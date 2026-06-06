@@ -52,6 +52,10 @@ export const cb = {
   OBJECT_GROUP_SELECT_ALL: `${PREFIX}object_group_all:`,
   OBJECT_GROUP_CLEAR_ALL: `${PREFIX}object_group_clear:`,
   OBJECT_TOGGLE: `${PREFIX}object_toggle:`,
+  OBJECT_GROUP_OPEN_SHORT: `${PREFIX}og:`,
+  OBJECT_GROUP_SELECT_ALL_SHORT: `${PREFIX}oga:`,
+  OBJECT_GROUP_CLEAR_ALL_SHORT: `${PREFIX}ogc:`,
+  OBJECT_TOGGLE_SHORT: `${PREFIX}ot:`,
   OBJECT_GROUPS_BACK: `${PREFIX}object_groups_back`,
   OBJECTS_DONE: `${PREFIX}objs_done`,
   

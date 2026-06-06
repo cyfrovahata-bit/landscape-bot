@@ -2984,9 +2984,27 @@ const decodeObjectAddressGroupId = (raw: string) => {
   }
 };
 
-if (data.startsWith(cb.OBJECT_GROUP_OPEN)) {
-  const groupId = decodeObjectAddressGroupId(data.slice(cb.OBJECT_GROUP_OPEN.length));
-  const group = getObjectAddressGroups(st).find((g) => g.id === groupId);
+const getObjectGroupByShortId = (raw: string) => {
+  const index = Number(raw);
+  const groups = getObjectAddressGroups(st);
+  return Number.isInteger(index) && index >= 0 ? groups[index] : undefined;
+};
+
+const getObjectGroupById = (raw: string) => {
+  const groupId = decodeObjectAddressGroupId(raw);
+  return getObjectAddressGroups(st).find((g) => g.id === groupId);
+};
+
+const getActiveObjectAddressGroup = () => {
+  const groupId = String((st as any).activeObjectAddressGroupId ?? "").trim();
+  if (!groupId) return undefined;
+  return getObjectAddressGroups(st).find((g) => g.id === groupId);
+};
+
+if (data.startsWith(cb.OBJECT_GROUP_OPEN_SHORT) || data.startsWith(cb.OBJECT_GROUP_OPEN)) {
+  const group = data.startsWith(cb.OBJECT_GROUP_OPEN_SHORT)
+    ? getObjectGroupByShortId(data.slice(cb.OBJECT_GROUP_OPEN_SHORT.length))
+    : getObjectGroupById(data.slice(cb.OBJECT_GROUP_OPEN.length));
 
   if (!group) {
     await bot.answerCallbackQuery(q.id, {
@@ -2996,7 +3014,7 @@ if (data.startsWith(cb.OBJECT_GROUP_OPEN)) {
     return true;
   }
 
-  (st as any).activeObjectAddressGroupId = groupId;
+  (st as any).activeObjectAddressGroupId = group.id;
   st.step = "PICK_OBJECTS";
   root[foremanTgId] = st;
   setFlowState(s, FLOW, root);
@@ -3013,9 +3031,10 @@ if (data === cb.OBJECT_GROUPS_BACK) {
   return true;
 }
 
-if (data.startsWith(cb.OBJECT_GROUP_SELECT_ALL)) {
-  const groupId = decodeObjectAddressGroupId(data.slice(cb.OBJECT_GROUP_SELECT_ALL.length));
-  const group = getObjectAddressGroups(st).find((g) => g.id === groupId);
+if (data.startsWith(cb.OBJECT_GROUP_SELECT_ALL_SHORT) || data.startsWith(cb.OBJECT_GROUP_SELECT_ALL)) {
+  const group = data.startsWith(cb.OBJECT_GROUP_SELECT_ALL_SHORT)
+    ? getObjectGroupByShortId(data.slice(cb.OBJECT_GROUP_SELECT_ALL_SHORT.length))
+    : getObjectGroupById(data.slice(cb.OBJECT_GROUP_SELECT_ALL.length));
   if (!group) return (gate("Адресу не знайдено."), true);
 
   for (const o of group.objects) {
@@ -3036,7 +3055,7 @@ if (data.startsWith(cb.OBJECT_GROUP_SELECT_ALL)) {
     payload: { plannedObjectIds: st.plannedObjectIds },
   });
 
-  (st as any).activeObjectAddressGroupId = groupId;
+  (st as any).activeObjectAddressGroupId = group.id;
   st.step = "PICK_OBJECTS";
   root[foremanTgId] = st;
   setFlowState(s, FLOW, root);
@@ -3044,9 +3063,10 @@ if (data.startsWith(cb.OBJECT_GROUP_SELECT_ALL)) {
   return true;
 }
 
-if (data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL)) {
-  const groupId = decodeObjectAddressGroupId(data.slice(cb.OBJECT_GROUP_CLEAR_ALL.length));
-  const group = getObjectAddressGroups(st).find((g) => g.id === groupId);
+if (data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL_SHORT) || data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL)) {
+  const group = data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL_SHORT)
+    ? getObjectGroupByShortId(data.slice(cb.OBJECT_GROUP_CLEAR_ALL_SHORT.length))
+    : getObjectGroupById(data.slice(cb.OBJECT_GROUP_CLEAR_ALL.length));
   if (!group) return (gate("Адресу не знайдено."), true);
 
   const ids = new Set(group.objects.map((o) => String(o.id)));
@@ -3063,7 +3083,7 @@ if (data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL)) {
     payload: { plannedObjectIds: st.plannedObjectIds },
   });
 
-  (st as any).activeObjectAddressGroupId = groupId;
+  (st as any).activeObjectAddressGroupId = group.id;
   st.step = "PICK_OBJECTS";
   root[foremanTgId] = st;
   setFlowState(s, FLOW, root);
@@ -3071,8 +3091,14 @@ if (data.startsWith(cb.OBJECT_GROUP_CLEAR_ALL)) {
   return true;
 }
 
-    if (data.startsWith(cb.OBJ_TOGGLE) || data.startsWith(cb.OBJECT_TOGGLE)) {
-      const oid = data.startsWith(cb.OBJECT_TOGGLE)
+    if (data.startsWith(cb.OBJ_TOGGLE) || data.startsWith(cb.OBJECT_TOGGLE) || data.startsWith(cb.OBJECT_TOGGLE_SHORT)) {
+      const activeGroup = getActiveObjectAddressGroup();
+      const shortObjectIndex = data.startsWith(cb.OBJECT_TOGGLE_SHORT)
+        ? Number(data.slice(cb.OBJECT_TOGGLE_SHORT.length))
+        : -1;
+      const oid = data.startsWith(cb.OBJECT_TOGGLE_SHORT)
+        ? String(activeGroup?.objects?.[shortObjectIndex]?.id ?? "")
+        : data.startsWith(cb.OBJECT_TOGGLE)
         ? data.slice(cb.OBJECT_TOGGLE.length)
         : data.slice(cb.OBJ_TOGGLE.length);
       if (!oid) return true;
