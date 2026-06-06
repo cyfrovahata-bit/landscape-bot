@@ -62,9 +62,22 @@ function isApprovedStatus(status: string) {
 
   return (
     s === "ЗАТВЕРДЖЕНО" ||
-    s === "ЗДАНО" ||
-    s === "АКТИВНА"
+    s === "ПІДТВЕРДЖЕНО"
   );
+}
+
+function isReturnedStatus(status: string) {
+  const s = normalizeStatus(status);
+  return s === "ПОВЕРНУТО" || s === "СКАСОВАНО";
+}
+
+function getEventTs(e: any) {
+  const ms = Date.parse(String(e?.ts ?? e?.updatedAt ?? ""));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function auditStatsSource(screen: string, details: Record<string, any>) {
+  console.log(`[RTS_STATS][${screen}]`, details);
 }
 
 function cbx(prefix: string, key: string) {
@@ -164,12 +177,16 @@ async function getLatestRoadEndPayload(params: {
     const rows = (events ?? [])
       .filter((e: any) => String(e.type ?? "") === "ROAD_END")
       .sort((a: any, b: any) => {
-        const ta = Date.parse(String(a.ts ?? a.updatedAt ?? ""));
-        const tb = Date.parse(String(b.ts ?? b.updatedAt ?? ""));
-        return ta - tb;
+        const ta = getEventTs(a);
+        const tb = getEventTs(b);
+        if (ta !== tb) return ta - tb;
+        return String(a.eventId ?? "").localeCompare(String(b.eventId ?? ""));
       });
 
-    const last = rows[rows.length - 1];
+    const approvedRows = rows.filter((e: any) => isApprovedStatus(String(e.status ?? "")));
+    const nonReturnedRows = rows.filter((e: any) => !isReturnedStatus(String(e.status ?? "")));
+    const candidates = approvedRows.length ? approvedRows : nonReturnedRows.length ? nonReturnedRows : rows;
+    const last = candidates[candidates.length - 1];
     if (!last?.payload) return null;
 
     const payload =
@@ -181,6 +198,9 @@ async function getLatestRoadEndPayload(params: {
       ...(payload ?? {}),
       __status: String(last.status ?? ""),
       __eventId: String(last.eventId ?? ""),
+      __refEventId: String(last.refEventId ?? ""),
+      __type: String(last.type ?? ""),
+      __resolvedFrom: approvedRows.length ? "approved" : nonReturnedRows.length ? "latest_non_returned" : "latest_any",
     };
   } catch {
     return null;
@@ -408,6 +428,7 @@ async function buildCarView(params: {
 
   const day = await buildRoadDayStats({ date, foremanTgId });
   const car = day.cars[carId];
+  const payload = await getLatestRoadEndPayload({ date, foremanTgId });
 
   const objectLines =
     (car?.objectIds ?? []).map((oid) => `• ${mdEscapeSimple(objectName(st, oid))}`).join("\n") || "—";
@@ -424,6 +445,24 @@ async function buildCarView(params: {
     car?.whereNowObjectId
       ? objectName(st, car.whereNowObjectId)
       : "—";
+
+  auditStatsSource("CAR_VIEW", {
+    date,
+    foremanTgId,
+    carId,
+    eventId: payload?.__eventId ?? "",
+    refEventId: payload?.__refEventId ?? "",
+    status: payload?.__status ?? "",
+    type: payload?.__type ?? "",
+    source: payload?.__resolvedFrom ?? "live_events",
+    resolvedFinalEvent: payload?.__eventId ?? "",
+    currentPhase: st.phase,
+    currentObject: car?.whereNowObjectId ?? "",
+    currentCar: carId,
+    currentEarnings: "",
+    statusNow: car?.statusNow ?? "",
+    lastEventType: car?.lastEventType ?? "",
+  });
 
   const text =
     `🚗 *Статистика авто*\n\n` +
@@ -512,6 +551,19 @@ if (payload?.salaryPacks?.length) {
     roleSummaryByObject.set(objectId, summary);
     companyByObject.set(objectId, summary.company);
   }
+
+  auditStatsSource("PAY_MAP", {
+    date,
+    foremanTgId,
+    source: "ROAD_END.salaryPacks",
+    resolvedEventId: payload.__eventId ?? "",
+    refEventId: payload.__refEventId ?? "",
+    status: payload.__status ?? "",
+    type: payload.__type ?? "",
+    resolvedFrom: payload.__resolvedFrom ?? "",
+    objects: moneyByObject.size,
+    totalEarnings: [...payByObjectEmp.values()].reduce((a, v) => a + Number(v ?? 0), 0),
+  });
 
   return {
     moneyByObject,
@@ -678,6 +730,16 @@ const companyPercent = hasSenior ? 0 : 0.1;
     });
   }
 
+  auditStatsSource("PAY_MAP", {
+    date,
+    foremanTgId,
+    source: "live_rts_events",
+    resolvedEventId: "",
+    status: "",
+    objects: moneyByObject.size,
+    totalEarnings: [...payByObjectEmp.values()].reduce((a, v) => a + Number(v ?? 0), 0),
+  });
+
   return {
     moneyByObject,
     payByObjectEmp,
@@ -738,6 +800,24 @@ const canShowMoney =
 
 const payMap = await buildStatsPayMap({ date, foremanTgId });
 const totalAmount = payMap.moneyByObject.get(String(objectId)) ?? 0;
+
+auditStatsSource("OBJECT_VIEW", {
+  date,
+  foremanTgId,
+  objectId,
+  eventId: payload?.__eventId ?? "",
+  refEventId: payload?.__refEventId ?? "",
+  status: payload?.__status ?? "",
+  type: payload?.__type ?? "",
+  source: payload?.__resolvedFrom ?? "live_events",
+  resolvedFinalEvent: payload?.__eventId ?? "",
+  currentPhase: st.phase,
+  currentObject: objectId,
+  currentCar: obj?.lastCarId ?? "",
+  currentEarnings: totalAmount,
+  statusNow: obj?.statusNow ?? "",
+  statusDay: displayDayStatus,
+});
 
 const payLines =
   [...payMap.payByObjectEmp.entries()]
@@ -868,6 +948,24 @@ const payMap = await buildStatsPayMap({ date, foremanTgId });
 const totalAmount = [...payMap.payByObjectEmp.entries()]
   .filter(([key]) => key.endsWith(`||${employeeId}`))
   .reduce((a, [, pay]) => a + Number(pay ?? 0), 0);
+
+auditStatsSource("PERSON_VIEW", {
+  date,
+  foremanTgId,
+  employeeId,
+  eventId: payload?.__eventId ?? "",
+  refEventId: payload?.__refEventId ?? "",
+  status: payload?.__status ?? "",
+  type: payload?.__type ?? "",
+  source: payload?.__resolvedFrom ?? "live_events",
+  resolvedFinalEvent: payload?.__eventId ?? "",
+  currentPhase: st.phase,
+  currentObject: emp?.whereNowObjectId ?? "",
+  currentCar: emp?.whereNowCarId ?? "",
+  currentEarnings: totalAmount,
+  statusNow: emp?.statusNow ?? "",
+  currentWork: emp?.currentWorkName ?? "",
+});
 
 const payLines =
   [...payMap.payByObjectEmp.entries()]

@@ -92,6 +92,11 @@ function normalizeDayStatus(raw?: string) {
   return String(raw ?? "").trim().toUpperCase();
 }
 
+function isIgnoredSaveStatus(raw?: string) {
+  const s = normalizeDayStatus(raw);
+  return s === "ПОВЕРНУТО" || s === "СКАСОВАНО";
+}
+
 function detectCarStatusFromType(type: string): string {
   const t = String(type ?? "").trim().toUpperCase();
 
@@ -144,9 +149,29 @@ export async function buildRoadDayStats(args: {
 
   const events = await fetchEvents({
   date,
-  foremanTgId: "" as any,
+  foremanTgId,
 });
-  const rows = [...(events ?? [])].sort((a, b) => getEventTsMs(a) - getEventTsMs(b));
+  const rows = [...(events ?? [])]
+    .filter((e: any) => {
+      const type = String(e.type ?? "");
+      if ((type === "ROAD_END" || type === "RTS_SAVE") && isIgnoredSaveStatus(e.status)) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => getEventTsMs(a) - getEventTsMs(b));
+
+  console.log("[RTS_STATS][DAY_DATA]", {
+    date,
+    foremanTgId,
+    eventsFetched: events?.length ?? 0,
+    eventsUsed: rows.length,
+    ignoredReturnedSaves: (events ?? []).length - rows.length,
+    firstEventId: rows[0]?.eventId ?? "",
+    lastEventId: rows[rows.length - 1]?.eventId ?? "",
+    lastType: rows[rows.length - 1]?.type ?? "",
+    lastStatus: rows[rows.length - 1]?.status ?? "",
+  });
 
   const cars: Record<string, CarDayStat> = {};
   const employees: Record<string, EmployeeDayStat> = {};
