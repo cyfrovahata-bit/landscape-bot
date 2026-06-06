@@ -1,7 +1,7 @@
 // src/bot/flows/roadTimesheet.utils.ts
 import type TelegramBot from "node-telegram-bot-api";
 import { TEXTS } from "../texts.js";
-import { setFlowState, todayISO } from "../core/helpers.js";
+import { getFlowState, setFlowState, todayISO } from "../core/helpers.js";
 import { computeWorkMoneyFromRts } from "./roadTimesheet.compute.js";
 import { buildRoadDayStats } from "./roadTimesheet.stats.data.js";
 
@@ -88,6 +88,92 @@ export function findOpen(obj: ObjectTS, employeeId: string, workId: string) {
   return obj.open.find((x) => x.employeeId === employeeId && x.workId === workId && x.objectId === obj.objectId);
 }
 
+type BulkQtyItem = NonNullable<State["pendingBulkQty"]>["items"][number];
+
+export function buildBulkQtyItemsFromCurrentWorks(params: {
+  st: State;
+  oid: string;
+  openSessions?: OpenSession[];
+  savedItems?: Array<Partial<BulkQtyItem> & { workId?: string }>;
+}) {
+  const { st, oid, openSessions = [], savedItems = [] } = params;
+  const obj = ensureObjectState(st, oid);
+
+  const savedByWorkId = new Map<string, any>();
+  for (const it of [
+    ...savedItems,
+    ...(st.pendingBulkQty?.objectId === oid ? st.pendingBulkQty.items ?? [] : []),
+  ] as any[]) {
+    const workId = String(it?.workId ?? "").trim();
+    if (workId) savedByWorkId.set(workId, it);
+  }
+
+  const sessionAgg = new Map<
+    string,
+    { workId: string; workName: string; unit: string; rate: number; sessionsCount: number; sec: number }
+  >();
+  const endedAt = st.pendingBulkQty?.objectId === oid ? st.pendingBulkQty.endedAt : now();
+
+  for (const s0 of openSessions) {
+    const workId = String(s0.workId ?? "").trim();
+    const startedAt = String(s0.startedAt ?? "").trim();
+    if (!workId) continue;
+
+    const sMs = Date.parse(startedAt);
+    const eMs = Date.parse(endedAt);
+    const sec =
+      Number.isFinite(sMs) && Number.isFinite(eMs) && eMs >= sMs
+        ? Math.floor((eMs - sMs) / 1000)
+        : 0;
+
+    const w = obj.works.find((x) => String(x.workId) === workId);
+    const cur = sessionAgg.get(workId) ?? {
+      workId,
+      workName: String(w?.name ?? workId),
+      unit: String(w?.unit ?? "од."),
+      rate: Number(w?.rate ?? 0),
+      sessionsCount: 0,
+      sec: 0,
+    };
+    cur.sessionsCount += 1;
+    cur.sec += sec;
+    sessionAgg.set(workId, cur);
+  }
+
+  const currentWorks = (obj.works ?? [])
+    .map((w: any) => ({
+      workId: String(w.workId ?? "").trim(),
+      workName: String(w.name ?? w.workId ?? "").trim(),
+      unit: String(w.unit ?? "од.").trim(),
+      rate: Number(w.rate ?? 0),
+    }))
+    .filter((w) => Boolean(w.workId));
+
+  const baseWorks = currentWorks.length
+    ? currentWorks
+    : [...sessionAgg.values()].map((w) => ({
+        workId: w.workId,
+        workName: w.workName,
+        unit: w.unit,
+        rate: w.rate,
+      }));
+
+  return baseWorks.map((w) => {
+    const saved: any = savedByWorkId.get(w.workId);
+    const agg = sessionAgg.get(w.workId);
+
+    return {
+      workId: w.workId,
+      workName: w.workName,
+      unit: w.unit,
+      rate: w.rate,
+      sessionsCount: Number(agg?.sessionsCount ?? saved?.sessionsCount ?? 0),
+      sec: Number(agg?.sec ?? saved?.sec ?? 0),
+      qty: Number(saved?.qty ?? 0),
+    };
+  });
+}
+
 
 export async function startBulkQtyForObject(params: {
   bot: TelegramBot;
@@ -122,12 +208,19 @@ export async function startBulkQtyForObject(params: {
     (s0) => String(s0.objectId ?? oid) === String(oid),
   );
 
-  if (!openSessions.length) {
-    // ✅ алерт показуємо тільки якщо реально є q.id
+  const existingItems = st.pendingBulkQty?.objectId === oid ? st.pendingBulkQty.items : [];
+  const items = buildBulkQtyItemsFromCurrentWorks({
+    st,
+    oid,
+    openSessions,
+    savedItems: existingItems,
+  });
+
+  if (!items.length) {
     if (callbackQueryId) {
       await bot
         .answerCallbackQuery(callbackQueryId, {
-          text: "ℹ️ На цьому об'єкті роботи вже не проводяться",
+          text: "⚠️ Нема робіт для цього обʼєкта. Спочатку додай роботи.",
           show_alert: true,
         })
         .catch(() => {});
@@ -178,34 +271,6 @@ export async function startBulkQtyForObject(params: {
   const keysToClose = new Set(openSessions.map((x) => openKey(x)));
   obj.open = (obj.open ?? []).filter((x) => !keysToClose.has(openKey(x)));
 
-  // 3) items map
-  const map = new Map<
-    string,
-    { workId: string; workName: string; unit: string; rate: number; sessionsCount: number; sec: number }
-  >();
-
-  for (const s0 of openSessions) {
-    const workId = String(s0.workId ?? "").trim();
-    const startedAt = String(s0.startedAt ?? "").trim();
-    const sMs = Date.parse(startedAt);
-    const eMs = Date.parse(endedAt);
-    const sec =
-      Number.isFinite(sMs) && Number.isFinite(eMs) && eMs >= sMs
-        ? Math.floor((eMs - sMs) / 1000)
-        : 0;
-
-    const w = obj.works.find((x) => String(x.workId) === workId);
-    const workName = String(w?.name ?? workId);
-    const unit = String(w?.unit ?? "од.");
-    const rate = Number(w?.rate ?? 0);
-
-    const cur = map.get(workId) ?? { workId, workName, unit, rate, sessionsCount: 0, sec: 0 };
-    cur.sessionsCount += 1;
-    cur.sec += sec;
-    if ((cur.rate ?? 0) <= 0 && rate > 0) cur.rate = rate;
-    map.set(workId, cur);
-  }
-
   const rosterIds = uniq([
     ...(openSessions.map((x) => String(x.employeeId)).filter(Boolean)),
     ...((obj.leftOnObjectIds ?? []).map(String).filter(Boolean)),
@@ -216,25 +281,18 @@ export async function startBulkQtyForObject(params: {
     objectName: objectName(st, oid),
     endedAt,
     employeeIds: rosterIds,
-    
-    items: [...map.values()].map((x) => ({
-      workId: x.workId,
-      workName: x.workName,
-      unit: x.unit,
-      rate: x.rate,
-      sessionsCount: x.sessionsCount,
-      sec: x.sec,
-      qty: 0,
-    })),
+    items,
     backStep: isReturnContext ? "RETURN_PICKUP_DROP" : "AT_OBJECT_MENU",
     afterSaveStep: isReturnContext ? "RETURN_PICKUP_DROP" : "AT_OBJECT_MENU",
   };
 
+  st.qtyUnlocked = true;
   st.arrivedObjectId = oid;
   st.step = "BULK_QTY";
 
-  // ✅ тепер s існує
-  setFlowState(s, FLOW, st);
+  const root = getFlowState<Record<number, State>>(s, FLOW) ?? {};
+  root[foremanTgId] = st;
+  setFlowState(s, FLOW, root);
 
   const scr = buildBulkQtyScreen(st, cb);
   await safeEditMessageText(bot, chatId, msgId, scr.text, {
@@ -1131,6 +1189,28 @@ export function buildBulkQtyScreen(st: any, cb: any) {
     sessionsCount: Number(x.sessionsCount ?? 0),
     sec: Number(x.sec ?? 0),
   })).filter((x: any) => x.workId);
+
+  const oid = String(b.objectId ?? "").trim();
+  const obj = oid ? ensureObjectState(st, oid) : undefined;
+  const currentWorkIds = (obj?.works ?? [])
+    .map((w: any) => String(w.workId ?? "").trim())
+    .filter(Boolean);
+  console.log("[RTS][BULK_QTY_SCREEN]", {
+    step: st.step,
+    phase: st.phase,
+    objectId: oid,
+    selectedWorkIds: currentWorkIds,
+    plannedWorkIds: currentWorkIds,
+    workQtyMapKeys: items.map((it: any) => it.workId),
+    sourceEventId: String(b.sourceEventId ?? b.payrollEventId ?? ""),
+    afterAdminReturn: Boolean(
+      (st as any).editByObject ||
+        st.returnAfterPlanWorksStep ||
+        String(b.backStep ?? "").startsWith("RETURN_EDIT") ||
+        String(b.afterSaveStep ?? "").startsWith("RETURN_EDIT"),
+    ),
+    worksShown: items.length,
+  });
 
   if (!items.length) {
     return {

@@ -36,7 +36,7 @@ import {  canStartDay,  canPause,  canResume,  canFinishDay,  canStartReturn,  c
 import {  ensureEmployees,  ensureObjectState,  objectName,  carName,  empName,  joinEmpNames,  findOpen,  openKey,
   fileIdFromPhoto,  now,  uniq,  fmtNum,  parseKm,  parseQty,  mdEscapeSimple,  roundToQuarterHours,  askNextMessage,  buildBulkQtyScreen,  sendLongHtml,  sendSaveScreen,
   getAdminTgIds,  pickBrigadierFromPeople,  isSenior,  buildRoadAdminTextFromEventPayload,  computeFromRts,  computeRoadSecondsFromRts,  writeEvent,  safeEditMessageText,
-  hasOpenSessionForEmployeeOnObject,  startBulkQtyForObject,  fetchEventsSafe,  parsePayload, ensureStateReady, 
+  hasOpenSessionForEmployeeOnObject,  startBulkQtyForObject,  buildBulkQtyItemsFromCurrentWorks,  fetchEventsSafe,  parsePayload, ensureStateReady,
   buildRoadApprovedShortText, findCarBusyByAnotherForeman, buildBusyCarsMap, buildBusyEmployeesMap,
 findEmployeeBusyByAnotherForeman } from "./roadTimesheet.utils.js";
 
@@ -1088,6 +1088,15 @@ const rows: TelegramBot.InlineKeyboardButton[][] = x.plannedObjectIds.map((oid) 
         },
       ]);
 
+      if ((obj.works ?? []).length) {
+        rows.push([
+          {
+            text: "🧮 Змінити обсяги",
+            callback_data: `${cb.QTY_OBJ}${oid}`,
+          },
+        ]);
+      }
+
       if (!isLastObject) {
         rows.push([{ text: "▶️ Продовжити рух", callback_data: cb.RESUME }]);
       }
@@ -1244,6 +1253,17 @@ if (x.step === "AT_OBJECT_RUN") {
           callback_data: cb.MANAGE_PEOPLE,
         },
       ]);
+
+      const hasWorksForQty = (x.plannedObjectIds ?? []).some((oid) => {
+        const obj = ensureObjectState(x, oid);
+        return (obj.works ?? []).length > 0;
+      });
+
+      if (hasWorksForQty) {
+        rows.push([
+          { text: "🧮 Змінити обсяги", callback_data: cb.QTY_MENU },
+        ]);
+      }
 
       if (canStartReturn(x)) {
         rows.push([
@@ -2066,6 +2086,7 @@ setFlowState(s, FLOW, root);
 
       let items: any[] = [];
       let employeeIds: string[] = [];
+      let savedItems: any[] = [];
 
       if (payrollEv) {
         const p = payrollEv.payload ?? {};
@@ -2083,9 +2104,7 @@ employeeIds = uniq([
   .filter(Boolean)
   .filter((id) => !removedForObj.has(String(id)));
 
- 
-
-        items = (p.items ?? []).map((it: any) => ({
+        savedItems = (p.items ?? []).map((it: any) => ({
           workId: String(it.workId ?? ""),
           workName: String(it.workName ?? it.workId ?? ""),
           unit: String(it.unit ?? "од."),
@@ -2095,21 +2114,17 @@ employeeIds = uniq([
           sec: 0,
         }));
       } else {
-        items = (obj.works ?? []).map((w: any) => ({
-          workId: String(w.workId),
-          workName: String(w.name ?? w.workId),
-          unit: String(w.unit ?? "од."),
-          rate: Number(w.rate ?? 0),
-          qty: 0,
-          sessionsCount: 0,
-          sec: 0,
-        }));
-
         employeeIds = uniq([
           ...(obj.leftOnObjectIds ?? []).map(String),
           ...(st.inCarIds ?? []).map(String),
         ]).filter(Boolean);
       }
+
+      items = buildBulkQtyItemsFromCurrentWorks({
+        st,
+        oid,
+        savedItems,
+      });
 
       if (!items.length) {
         await bot.answerCallbackQuery(q.id, {
@@ -2127,7 +2142,8 @@ employeeIds = uniq([
         backStep: "QTY_MENU",
         afterSaveStep: "QTY_MENU",
         payrollEventId: payrollEv?.eventId || "",
-      } as any;
+        sourceEventId: payrollEv?.eventId || "",
+      };
 
       st.step = "BULK_QTY";
       root[foremanTgId] = st;
@@ -2157,9 +2173,14 @@ setFlowState(s, FLOW, root);
 }
 
 if (data === cb.QTY_MENU) {
-  if (!st.qtyUnlocked) {
+  const hasPlannedWorksForQty = (st.plannedObjectIds ?? []).some((oid) => {
+    const obj = ensureObjectState(st, oid);
+    return (obj.works ?? []).length > 0;
+  });
+
+  if (!st.qtyUnlocked && !hasPlannedWorksForQty) {
     await bot.answerCallbackQuery(q.id, {
-      text: "⛔ Обсяги робіт доступні після першої зупинки роботи.",
+      text: "⛔ Обсяги доступні після додавання робіт або першої зупинки роботи.",
       show_alert: true,
     });
     return true;
@@ -4240,9 +4261,17 @@ if (data.startsWith(cb.STOP_OBJ_WORK)) {
   const isReturnContext = st.step === "RETURN_PICKUP_DROP";
 
   if (!openSessions.length) {
-    await bot.answerCallbackQuery(q.id, {
-      text: "ℹ️ На цьому об'єкті роботи вже не проводяться",
-      show_alert: true,
+    await startBulkQtyForObject({
+      bot,
+      chatId,
+      msgId,
+      date,
+      foremanTgId,
+      s,
+      callbackQueryId: q.id,
+      st,
+      oid,
+      isReturnContext,
     });
     return true;
   }

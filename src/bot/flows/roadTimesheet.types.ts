@@ -215,6 +215,8 @@ export type State = FlowBaseState & {
     backStep?: Step;
     afterSaveStep?: Step;
     objectName?: string;
+    payrollEventId?: string;
+    sourceEventId?: string;
     employeeIds: string[];
 
     items: Array<{
