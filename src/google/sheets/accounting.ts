@@ -3,9 +3,10 @@ import { getSheetsClient } from "../client.js";
 import { appendRows, getCell, loadSheet, invalidateSheetCache, withSheetsRetry } from "./core.js";
 import { EVENTS_HEADERS } from "./headers.js";
 import { SHEET_NAMES } from "./names.js";
-import { sheetRef } from "./utils.js";
+import { nowISO, sheetRef } from "./utils.js";
 
 const ACCOUNTING_SHEET = "БУХЗВІТ";
+const ACCOUNTING_META_SHEET = "БУХЗВІТ_META";
 const ACCOUNTING_HEADERS = [
   "№",
   "Працівник",
@@ -14,7 +15,11 @@ const ACCOUNTING_HEADERS = [
   "Обсяг робіт",
   "Нарахування",
   "Примітки",
+] as const;
+const ACCOUNTING_META_HEADERS = [
   "eventId",
+  "createdAt",
+  "rowsCount",
 ] as const;
 
 type RoadEventLike = {
@@ -43,7 +48,7 @@ type AccountingRow = {
   eventId: string;
 };
 
-async function ensureAccountingSheet() {
+async function ensureSheet(sheetName: string, headers: readonly string[]) {
   const sheets = getSheetsClient();
 
   const meta = await withSheetsRetry("READ", "spreadsheet metadata", () =>
@@ -54,45 +59,49 @@ async function ensureAccountingSheet() {
   );
 
   const exists = (meta.data.sheets ?? []).some(
-    (s) => s.properties?.title === ACCOUNTING_SHEET,
+    (s) => s.properties?.title === sheetName,
   );
 
   if (!exists) {
-    await withSheetsRetry("WRITE", `${ACCOUNTING_SHEET} create`, () =>
+    await withSheetsRetry("WRITE", `${sheetName} create`, () =>
       sheets.spreadsheets.batchUpdate({
         spreadsheetId: config.sheetId,
         requestBody: {
-          requests: [{ addSheet: { properties: { title: ACCOUNTING_SHEET } } }],
+          requests: [{ addSheet: { properties: { title: sheetName } } }],
         },
       }),
     );
 
-    await withSheetsRetry("WRITE", `${ACCOUNTING_SHEET}!A1:H1 update`, () =>
+    const lastCol = String.fromCharCode("A".charCodeAt(0) + headers.length - 1);
+    await withSheetsRetry("WRITE", `${sheetName}!A1:${lastCol}1 update`, () =>
       sheets.spreadsheets.values.update({
         spreadsheetId: config.sheetId,
-        range: `${sheetRef(ACCOUNTING_SHEET)}!A1:H1`,
+        range: `${sheetRef(sheetName)}!A1:${lastCol}1`,
         valueInputOption: "USER_ENTERED",
-        requestBody: { values: [[...ACCOUNTING_HEADERS]] },
+        requestBody: { values: [[...headers]] },
       }),
     );
-    invalidateSheetCache(ACCOUNTING_SHEET);
+    invalidateSheetCache(sheetName);
 
-    console.log(`[accounting] created sheet ${ACCOUNTING_SHEET}`);
+    console.log(`[accounting] created sheet ${sheetName}`);
   }
 }
 
 async function loadAccountingSheet() {
-  await ensureAccountingSheet();
-  return loadSheet(ACCOUNTING_SHEET, "A:H");
+  await ensureSheet(ACCOUNTING_SHEET, ACCOUNTING_HEADERS);
+  return loadSheet(ACCOUNTING_SHEET, "A:G");
+}
+
+async function loadAccountingMetaSheet() {
+  await ensureSheet(ACCOUNTING_META_SHEET, ACCOUNTING_META_HEADERS);
+  return loadSheet(ACCOUNTING_META_SHEET, "A:C");
 }
 
 export async function hasAccountingRowsForEvent(eventId: string) {
-  const sh = await loadAccountingSheet();
+  const sh = await loadAccountingMetaSheet();
+  const needle = String(eventId).trim();
 
-  return sh.all.some((row) =>
-    String(row?.[7] ?? "").trim() === String(eventId).trim() ||
-    String(row?.[6] ?? "").includes(`eventId=${eventId}`),
-  );
+  return sh.data.some((row) => String(row?.[0] ?? "").trim() === needle);
 }
 
 export async function resolveApprovedRoadEvent(callbackEv: RoadEventLike) {
@@ -148,10 +157,39 @@ function money(n: number) {
   return Math.round(Number(n || 0) * 100) / 100;
 }
 
-function volumeText(row: any) {
-  const qty = Number(row.qty ?? 0);
-  const unit = String(row.unit ?? "").trim();
-  const qtyText = Number.isFinite(qty) ? String(Math.round(qty * 100) / 100) : "";
+function parseQtyNumber(raw: unknown): number {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  const s = String(raw ?? "").trim().replace(",", ".");
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return 0;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function cleanUnit(raw: unknown): string {
+  return String(raw ?? "")
+    .trim()
+    .replace(/^-?\d+(?:[.,]\d+)?\s*/u, "")
+    .trim();
+}
+
+function unitFromQty(raw: unknown): string {
+  return cleanUnit(cleanUnit(raw));
+}
+
+export function formatWorkQty(qtyRaw: unknown, unitRaw: unknown) {
+  const qty = parseQtyNumber(qtyRaw);
+  const unit = cleanUnit(unitRaw) || unitFromQty(qtyRaw);
+
+  const roundedToInt = Math.round(qty);
+  const normalized =
+    Math.abs(qty - roundedToInt) < 0.011
+      ? roundedToInt
+      : Math.round(qty * 100) / 100;
+  const qtyText = Number.isInteger(normalized)
+    ? String(normalized)
+    : String(normalized).replace(/(\.\d*?)0+$/u, "$1").replace(/\.$/u, "");
+
   return [qtyText, unit].filter(Boolean).join(" ");
 }
 
@@ -234,17 +272,20 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
     byObjectEmployee.set(key, rows);
 
     const workKey = `${objectId}||${workId || workName}`;
+    const rowQty = parseQtyNumber(row.qty);
+    const rowUnit = cleanUnit(row.unit) || unitFromQty(row.qty);
     const current =
       workTotals.get(workKey) ?? {
         objectId,
         workId,
         workName,
-        unit: String(row.unit ?? "").trim(),
+        unit: rowUnit,
         qty: 0,
         amount: 0,
       };
 
-    current.qty += Number(row.qty ?? 0);
+    current.qty += rowQty;
+    if (!current.unit && rowUnit) current.unit = rowUnit;
     current.amount += Number(row.amount ?? 0);
     workTotals.set(workKey, current);
   }
@@ -325,8 +366,8 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
         if (amount <= 0) continue;
 
         const qty = Number(totalWork.qty ?? 0);
-        const unit = String(totalWork.unit ?? "").trim();
-        const formattedQty = volumeText({ qty, unit });
+        const unit = cleanUnit(totalWork.unit);
+        const formattedQty = formatWorkQty(qty, unit);
 
         out.push({
           employeeName,
@@ -384,8 +425,16 @@ export async function appendAccountingReportRows(rows: AccountingRow[]) {
       row.volume,
       row.amount,
       "",
-      row.eventId,
     ]),
+    "USER_ENTERED",
+  );
+}
+
+async function appendAccountingMetaRow(eventId: string, rowsCount: number) {
+  await loadAccountingMetaSheet();
+  await appendRows(
+    ACCOUNTING_META_SHEET,
+    [[String(eventId).trim(), nowISO(), rowsCount]],
     "USER_ENTERED",
   );
 }
@@ -405,6 +454,7 @@ export async function appendAccountingReportForApprovedRoadEvent(ev: RoadEventLi
   }
 
   await appendAccountingReportRows(rows);
+  await appendAccountingMetaRow(ev.eventId, rows.length);
   console.log(`[accounting] appended rows=${rows.length} eventId=${ev.eventId}`);
   return { skipped: false, rows: rows.length };
 }
