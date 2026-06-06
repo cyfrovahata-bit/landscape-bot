@@ -1,6 +1,8 @@
 import { config } from "../../config.js";
 import { getSheetsClient } from "../client.js";
-import { appendRows, loadSheet } from "./core.js";
+import { appendRows, getCell, loadSheet } from "./core.js";
+import { EVENTS_HEADERS } from "./headers.js";
+import { SHEET_NAMES } from "./names.js";
 import { sheetRef } from "./utils.js";
 
 const ACCOUNTING_SHEET = "БУХЗВІТ";
@@ -12,6 +14,7 @@ const ACCOUNTING_HEADERS = [
   "Обсяг робіт",
   "Нарахування",
   "Примітки",
+  "eventId",
 ] as const;
 
 type RoadEventLike = {
@@ -19,6 +22,16 @@ type RoadEventLike = {
   date: string;
   foremanTgId: number;
   payload?: string;
+  ts?: string;
+  status?: string;
+  chatId?: number;
+  msgId?: number;
+  type?: string;
+  objectId?: string;
+  carId?: string;
+  employeeIds?: string;
+  refEventId?: string;
+  updatedAt?: string;
 };
 
 type AccountingRow = {
@@ -27,7 +40,7 @@ type AccountingRow = {
   workName: string;
   volume: string;
   amount: number;
-  note: string;
+  eventId: string;
 };
 
 async function ensureAccountingSheet() {
@@ -52,7 +65,7 @@ async function ensureAccountingSheet() {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.sheetId,
-      range: `${sheetRef(ACCOUNTING_SHEET)}!A1:G1`,
+      range: `${sheetRef(ACCOUNTING_SHEET)}!A1:H1`,
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [[...ACCOUNTING_HEADERS]] },
     });
@@ -63,16 +76,65 @@ async function ensureAccountingSheet() {
 
 async function loadAccountingSheet() {
   await ensureAccountingSheet();
-  return loadSheet(ACCOUNTING_SHEET, "A:G");
+  return loadSheet(ACCOUNTING_SHEET, "A:H");
 }
 
 export async function hasAccountingRowsForEvent(eventId: string) {
   const sh = await loadAccountingSheet();
-  const marker = `eventId=${eventId}`;
 
   return sh.all.some((row) =>
-    String(row?.[6] ?? "").includes(marker),
+    String(row?.[7] ?? "").trim() === String(eventId).trim() ||
+    String(row?.[6] ?? "").includes(`eventId=${eventId}`),
   );
+}
+
+export async function resolveApprovedRoadEvent(callbackEv: RoadEventLike) {
+  const sh = await loadSheet(SHEET_NAMES.events);
+  const rows: RoadEventLike[] = [];
+
+  for (const row of sh.data) {
+    const type = getCell(row, sh.map, EVENTS_HEADERS.type);
+    const date = getCell(row, sh.map, EVENTS_HEADERS.date);
+    const foremanTgId = Number(getCell(row, sh.map, EVENTS_HEADERS.foremanTgId));
+
+    if (type !== "ROAD_END") continue;
+    if (date !== callbackEv.date) continue;
+    if (foremanTgId !== Number(callbackEv.foremanTgId)) continue;
+
+    rows.push({
+      eventId: getCell(row, sh.map, EVENTS_HEADERS.eventId),
+      ts: getCell(row, sh.map, EVENTS_HEADERS.ts),
+      date,
+      foremanTgId,
+      type,
+      status: getCell(row, sh.map, EVENTS_HEADERS.status),
+      objectId: getCell(row, sh.map, EVENTS_HEADERS.objectId),
+      carId: getCell(row, sh.map, EVENTS_HEADERS.carId),
+      employeeIds: getCell(row, sh.map, EVENTS_HEADERS.employeeIds),
+      payload: getCell(row, sh.map, EVENTS_HEADERS.payload),
+      chatId: Number(getCell(row, sh.map, EVENTS_HEADERS.chatId) || 0),
+      msgId: Number(getCell(row, sh.map, EVENTS_HEADERS.msgId) || 0),
+      refEventId: getCell(row, sh.map, EVENTS_HEADERS.refEventId),
+      updatedAt: getCell(row, sh.map, EVENTS_HEADERS.updatedAt),
+    });
+  }
+
+  const activeRows = rows.filter((ev) => String(ev.status ?? "") !== "СКАСОВАНО");
+  const candidates = activeRows.length ? activeRows : rows;
+  candidates.sort((a, b) => {
+    const ats = Date.parse(String(a.ts || a.updatedAt || ""));
+    const bts = Date.parse(String(b.ts || b.updatedAt || ""));
+    const an = Number.isFinite(ats) ? ats : 0;
+    const bn = Number.isFinite(bts) ? bts : 0;
+    if (an !== bn) return an - bn;
+    return String(a.eventId).localeCompare(String(b.eventId));
+  });
+
+  const resolved = candidates[candidates.length - 1] ?? callbackEv;
+  const savesCount = rows.length;
+  const isResubmission = savesCount > 1 || String(callbackEv.eventId) !== String(resolved.eventId);
+
+  return { event: resolved, savesCount, isResubmission };
 }
 
 function money(n: number) {
@@ -207,10 +269,12 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
       if (hasSenior && seniorIds.has(id)) return false;
       return byObjectEmployee.has(`${objectId}||${id}`);
     });
+    const totalPoints = workerSalaryRows.reduce(
+      (a: number, r: any) => a + Number(r.points ?? 0),
+      0,
+    );
     const employeesCount = workerSalaryRows.length;
     if (!employeesCount || workersPool <= 0) continue;
-
-    const perEmployeeAmount = money(workersPool / employeesCount);
     const objectWorks = [...workTotals.values()].filter(
       (w) => String(w.objectId) === objectId && Number(w.amount ?? 0) > 0,
     );
@@ -223,6 +287,10 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
       const employeeId = String(salaryRow?.employeeId ?? "").trim();
       const employeeName = String(salaryRow?.employeeName ?? employeeId).trim();
       if (!employeeId) continue;
+      const employeePoints = Number(salaryRow?.points ?? 0);
+      const employeeShare =
+        totalPoints > 0 ? employeePoints / totalPoints : 1 / employeesCount;
+      const employeeAmount = money(workersPool * employeeShare);
 
       const workRows = byObjectEmployee.get(`${objectId}||${employeeId}`) ?? [];
       if (!workRows.length) continue;
@@ -245,7 +313,7 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
           workTotalForObject > 0
             ? workTotal / workTotalForObject
             : 1 / Math.max(1, workKeys.length);
-        const amount = money(perEmployeeAmount * share);
+        const amount = money(employeeAmount * share);
 
         if (amount <= 0) continue;
 
@@ -259,14 +327,7 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
           workName: totalWork.workName || totalWork.workId || "—",
           volume: formattedQty,
           amount,
-          note: [
-            `date=${ev.date}`,
-            `foremanTgId=${ev.foremanTgId}`,
-            `eventId=${ev.eventId}`,
-            `objectId=${objectId}`,
-            `employeeId=${employeeId}`,
-            `workId=${totalWork.workId}`,
-          ].join("; "),
+          eventId: ev.eventId,
         });
 
         console.log(
@@ -275,7 +336,12 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
             `workTotal=${money(workTotal)}`,
             `workersPool=${workersPool}`,
             `employeesCount=${employeesCount}`,
-            `perEmployeeAmount=${perEmployeeAmount}`,
+            `totalPoints=${money(totalPoints)}`,
+            `employeeId=${employeeId}`,
+            `name=${employeeName}`,
+            `points=${money(employeePoints)}`,
+            `share=${money(employeeShare)}`,
+            `amount=${amount}`,
             `qty=${money(qty)}`,
             `unit=${unit}`,
             `formattedQty=${formattedQty}`,
@@ -310,7 +376,8 @@ export async function appendAccountingReportRows(rows: AccountingRow[]) {
       row.workName,
       row.volume,
       row.amount,
-      row.note,
+      "",
+      row.eventId,
     ]),
     "USER_ENTERED",
   );

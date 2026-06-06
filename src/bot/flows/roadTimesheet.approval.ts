@@ -2,7 +2,10 @@ import type TelegramBot from "node-telegram-bot-api";
 import { getFlowState, setFlowState, todayISO } from "../core/helpers.js";
 import { fetchUsers } from "../../google/sheets/dictionaries.js";
 import { getEventById, updateEventById } from "../../google/sheets/working.js";
-import { appendAccountingReportForApprovedRoadEvent } from "../../google/sheets/accounting.js";
+import {
+  appendAccountingReportForApprovedRoadEvent,
+  resolveApprovedRoadEvent,
+} from "../../google/sheets/accounting.js";
 import type { State } from "./roadTimesheet.types.js";
 import { cb, FLOW } from "./roadTimesheet.cb.js";
 import {
@@ -233,8 +236,26 @@ await bot.sendMessage(
       return true;
     }
 
+    const resolved = await resolveApprovedRoadEvent({
+      eventId: ev.eventId,
+      date: ev.date,
+      foremanTgId: ev.foremanTgId,
+      payload: ev.payload,
+      ts: ev.ts,
+      status: ev.status,
+      chatId: ev.chatId,
+      msgId: ev.msgId,
+      type: ev.type,
+      objectId: ev.objectId,
+      carId: ev.carId,
+      employeeIds: ev.employeeIds,
+      refEventId: ev.refEventId,
+      updatedAt: ev.updatedAt,
+    });
+
+    const approvedEv = resolved.event;
     const targetChatId =
-      Number(ev.chatId) > 0 ? Number(ev.chatId) : Number(ev.foremanTgId);
+      Number(approvedEv.chatId) > 0 ? Number(approvedEv.chatId) : Number(approvedEv.foremanTgId);
     if (!Number.isFinite(targetChatId) || targetChatId <= 0) {
       await bot.answerCallbackQuery(q.id, {
         text: "⚠️ Нема куди відправити бригадиру",
@@ -243,23 +264,35 @@ await bot.sendMessage(
       return true;
     }
 
-    await updateEventById(eventId, {
+    console.log(
+      [
+        "[accounting] approve resolve",
+        `callbackEventId=${eventId}`,
+        `resolvedEventId=${approvedEv.eventId}`,
+        `isResubmission=${resolved.isResubmission}`,
+        `savesCount=${resolved.savesCount}`,
+        `date=${approvedEv.date}`,
+        `foremanTgId=${approvedEv.foremanTgId}`,
+      ].join(" "),
+    );
+
+    await updateEventById(approvedEv.eventId, {
       status: "ЗАТВЕРДЖЕНО",
       updatedAt: nowIso,
     });
 
     await appendAccountingReportForApprovedRoadEvent({
-      eventId: ev.eventId,
-      date: ev.date,
-      foremanTgId: ev.foremanTgId,
-      payload: ev.payload,
+      eventId: approvedEv.eventId,
+      date: approvedEv.date,
+      foremanTgId: approvedEv.foremanTgId,
+      payload: approvedEv.payload,
     }).catch((e: any) => {
       console.log(
-        `[accounting] failed eventId=${eventId}: ${e?.message ?? String(e)}`,
+        `[accounting] failed eventId=${approvedEv.eventId}: ${e?.message ?? String(e)}`,
       );
     });
 
-    const targetForemanTgId = Number(ev.foremanTgId) || 0;
+    const targetForemanTgId = Number(approvedEv.foremanTgId) || 0;
 
 if (targetForemanTgId > 0) {
   const root2 = getFlowState<Record<number, State>>(s, FLOW) || {};
@@ -280,7 +313,7 @@ if (targetForemanTgId > 0) {
   setFlowState(s, FLOW, root2);
 }
 
-const approvedText = buildRoadApprovedShortText(ev, {
+const approvedText = buildRoadApprovedShortText(approvedEv as any, {
   title: "✅ *День затверджено*",
 });
 
@@ -290,11 +323,12 @@ try {
       adminChatId,
       [
         `DEBUG APPROVE`,
-        `eventId=${eventId}`,
+        `eventId=${approvedEv.eventId}`,
+        `callbackEventId=${eventId}`,
         `targetChatId=${targetChatId}`,
-        `ev.chatId=${ev?.chatId}`,
-        `ev.foremanTgId=${ev?.foremanTgId}`,
-        `payloadLen=${String(ev?.payload ?? "").length}`,
+        `ev.chatId=${approvedEv?.chatId}`,
+        `ev.foremanTgId=${approvedEv?.foremanTgId}`,
+        `payloadLen=${String(approvedEv?.payload ?? "").length}`,
       ].join("\n"),
     ).catch(() => {});
 
