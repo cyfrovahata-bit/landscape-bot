@@ -10,7 +10,24 @@ import {
   fetchUsers,
 } from "../../google/sheets/dictionaries.js";
 
-import type {  Step,  SalaryRow,  SalaryPack,  RoadMember,  State,  PayrollEmpRow,  PayrollObjectPack } from "./roadTimesheet.types.js";
+import type {  Step,  SalaryPack,  RoadMember,  State,  PayrollEmpRow,  PayrollObjectPack } from "./roadTimesheet.types.js";
+import { buildSalaryPacksWithRoles } from "./roadTimesheet.payroll.js";
+import {
+  buildSelectedCategoriesText,
+  getActiveWorks,
+  getWorkCategories,
+  isLocked,
+  workCategoryOf,
+} from "./roadTimesheet.domain.js";
+import { handleRoadApprovalCallbacks } from "./roadTimesheet.approval.js";
+import {
+  renderOdoStartScreen,
+  renderPickCarScreen,
+  renderPickObjectsScreen,
+  renderPickPeopleScreen,
+  renderStartScreen,
+  type RenderContext,
+} from "./roadTimesheet.renderers.js";
 
 import {  canStartDay,  canPause,  canResume,  canFinishDay,  canStartReturn,  canStopReturn,  canEnterOdoEnd,  canSave } from "./roadTimesheet.guards.js";
 
@@ -32,116 +49,6 @@ import {  cb,  PREFIX,  FLOW,  DEFAULT_ROAD_ALLOWANCE_BY_CLASS } from "./roadTim
 
 const uiSave = (bot: TelegramBot, chatId: number, foremanTgId: number, st: State) =>
   sendSaveScreen(bot, chatId, foremanTgId, st, cb);
-
-function isLocked(status?: string) {
-  const s = String(status || "").toUpperCase();
-  return s === "ЗДАНО" || s === "ЗАТВЕРДЖЕНО";
-}
-
-function buildSalaryPacksWithRoles(params: {
-  workTotalsByObject: any[];
-  payrollPacks: PayrollObjectPack[];
-  brigadierEmployeeIds: string[];
-  seniorEmployeeIds: string[];
-}): SalaryPack[] {
-  const {
-    workTotalsByObject,
-    payrollPacks,
-    brigadierEmployeeIds,
-    seniorEmployeeIds,
-  } = params;
-
-  return workTotalsByObject.map((o) => {
-    const pack = payrollPacks.find(
-      (p: any) => String(p.objectId) === String(o.objectId),
-    );
-
-    const rowsSrc = ((pack?.rows ?? []) as any[]).filter(
-      (r) => Number(r.hours ?? 0) > 0,
-    );
-
-    const objectTotal = Number(o.total ?? 0);
-
-    const brigadierSet = new Set(brigadierEmployeeIds.map(String));
-    const seniorSet = new Set(seniorEmployeeIds.map(String));
-
-    const brigadierRows = rowsSrc.filter((r) =>
-      brigadierSet.has(String(r.employeeId)),
-    );
-
-    const seniorRows = rowsSrc.filter((r) =>
-      seniorSet.has(String(r.employeeId)),
-    );
-
-    const hasBrigadier = brigadierRows.length > 0;
-    const hasSenior = seniorRows.length > 0;
-
-    const workerPercent = hasBrigadier ? 0.7 : 0.9;
-    const brigadierPercent = hasBrigadier ? 0.2 : 0;
-   const seniorPercent = hasSenior ? 0.1 : 0;
-
-    const workerRows = rowsSrc.filter((r) => {
-      const id = String(r.employeeId);
-
-      if (hasBrigadier && brigadierSet.has(id)) return false;
-      if (hasSenior && seniorSet.has(id)) return false;
-
-      return true;
-    });
-
-    const sumWorkerPoints = workerRows.reduce(
-      (a, r) => a + Number(r.points ?? 0),
-      0,
-    );
-
-    const brigadierOnePay =
-      brigadierRows.length > 0
-        ? (objectTotal * brigadierPercent) / brigadierRows.length
-        : 0;
-
-    const seniorOnePay =
-      seniorRows.length > 0
-        ? (objectTotal * seniorPercent) / seniorRows.length
-        : 0;
-
-    const rows: SalaryRow[] = rowsSrc.map((r) => {
-      const id = String(r.employeeId ?? "");
-      const points = Number(r.points ?? 0);
-
-      let pay = 0;
-
-      if (hasBrigadier && brigadierSet.has(id)) {
-        pay = brigadierOnePay;
-      } else if (hasSenior && seniorSet.has(id)) {
-        pay = seniorOnePay;
-      } else {
-        pay =
-          sumWorkerPoints > 0
-            ? (objectTotal * workerPercent * points) / sumWorkerPoints
-            : 0;
-      }
-
-      return {
-        employeeId: id,
-        employeeName: String(r.employeeName ?? ""),
-        hours: Number(r.hours ?? 0),
-        points,
-        pay: Math.round(pay * 100) / 100,
-      };
-    });
- 
-    return {
-      objectId: String(o.objectId),
-      objectName: String(o.objectName),
-      objectTotal: Math.round(objectTotal * 100) / 100,
-      sumPoints:
-        Math.round(
-          rowsSrc.reduce((a, r) => a + Number(r.points ?? 0), 0) * 100,
-        ) / 100,
-      rows: rows.filter((r) => (r.hours ?? 0) > 0 || (r.pay ?? 0) > 0),
-    };
-  });
-}
 
 async function render(
   bot: TelegramBot,
@@ -704,6 +611,19 @@ return renderFlow<State>(bot, chatId, s, FLOW, () => {
                   ? "🌙 Повернення на базу"
                   : "✅ Завершено";
 
+    const renderCtx: RenderContext = {
+      x,
+      date,
+      carLine,
+      odoStartLine,
+      odoEndLine,
+      plannedLine,
+      inCarLine,
+      phaseLine,
+      busyByCarId,
+      busyByEmployeeId,
+    };
+
     if (x.step === "BULK_QTY") {
       if (!x.pendingBulkQty) {
         return {
@@ -863,244 +783,15 @@ if ((x.step as any) === "OBJ_MONITOR_OBJECT") {
 }
 
 
-    if (x.step === "START") {
-      const rows: TelegramBot.InlineKeyboardButton[][] = [];
+    if (x.step === "START") return renderStartScreen(renderCtx);
 
-      if ((x as any).editReturned) {
-  rows.push([
-    {
-      text: "✏️ Редагувати повернений день",
-      callback_data: cb.RETURN_EDIT_OBJECTS,
-    },
-  ]);
-}
+if (x.step === "PICK_CAR") return renderPickCarScreen(renderCtx);
 
-      rows.push([
-        { text: TEXTS.roadFlow.buttons.pickCar, callback_data: cb.PICK_CAR },
-      ]);
-      rows.push([
-        { text: TEXTS.roadFlow.buttons.odoStart, callback_data: cb.ODO_START },
-      ]);
-      rows.push([
-        { text: "👥 Люди", callback_data: cb.PICK_PEOPLE },
-      ]);
-      rows.push([
-        { text: "🏗 Обʼєкти", callback_data: cb.PICK_OBJECTS },
-      ]);
-      if (x.plannedObjectIds.length) {
-        rows.push([
-          {
-            text: "🧱 План робіт по обʼєктах",
-            callback_data: cb.PLAN_OBJECT_MENU,
-          },
-        ]);
-      }
-      if (
-        x.driveActive ||
-        x.returnActive ||
-        x.phase === "DRIVE_DAY" ||
-        x.phase === "PAUSED_AT_OBJECT" ||
-        x.phase === "WORKING_AT_OBJECT" ||
-        x.phase === "WAIT_RETURN" ||
-        x.phase === "RETURN_DRIVE"
-      ) {
-        const label =
-          x.phase === "PAUSED_AT_OBJECT" || x.phase === "WORKING_AT_OBJECT"
-            ? "↩️ Назад до обʼєкта"
-            : x.phase === "RETURN_DRIVE" || x.phase === "WAIT_RETURN"
-              ? "🌙 Повернення (меню)"
-              : "🟢 Їдемо (дорога)";
+    if (x.step === "ODO_START") return renderOdoStartScreen(renderCtx);
 
-        rows.push([{ text: label, callback_data: cb.GO_DRIVE }]);
-      }
+    if (x.step === "PICK_PEOPLE") return renderPickPeopleScreen(renderCtx);
 
-      if (canStartDay(x))
-        rows.push([
-          {
-            text: TEXTS.roadFlow.buttons.startDay,
-            callback_data: cb.START_DAY,
-          },
-        ]);
-
-           if (x.qtyUnlocked) {
-        rows.push([{ text: "🧮 Обсяги робіт", callback_data: cb.QTY_MENU }]);
-      }
-
-if (
-  x.phase === "FINISHED" ||
-  x.odoEndKm !== undefined ||
-  !!x.odoEndPhotoFileId
-) {
-  rows.push([
-    {
-      text: "🔴 Кінцевий показник спідометра",
-      callback_data: `${cb.BACK}odo_end`,
-    },
-  ]);
-
-  if (x.odoEndKm !== undefined) {
-    rows.push([
-      {
-        text: "📨 Відправити на перевірку",
-        callback_data: cb.SKIP_ODO_END_PHOTO,
-      },
-    ]);
-  }
-}
-
-      rows.push([{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }]);
-      return {
-        text:
-          `🛣 Робочий день\n\n` +
-          `📅 ${date}\n\n` +
-          `${phaseLine}\n` +
-          `${carLine}\n` +
-          `${odoStartLine}\n` +
-          `${plannedLine}\n` +
-          `${odoEndLine}\n` +
-          `${inCarLine}\n\n` +
-          `Підготовка: авто → показник спідометра → обʼєкти → план робіт → початок`,
-        kb: { inline_keyboard: rows },
-      };
-    }
-
-if (x.step === "PICK_CAR") {
-  const cars = x.carsMeta ?? [];
-  const slice = cars.slice(0, 24);
-
-  const rows: TelegramBot.InlineKeyboardButton[][] = slice.map((c) => {
-    const selected = x.carId === c.id;
-    const busy = busyByCarId.get(String(c.id));
-
-    const label = selected
-      ? `☑️ ${c.name}`
-      : busy
-        ? `🔒 ${c.name} — ${busy.foremanName}`
-        : `${c.name}`;
-
-    return [
-      {
-        text: label.slice(0, 60),
-        callback_data: `${cb.CAR}${c.id}`,
-      },
-    ];
-  });
-
-  rows.push([
-    { text: TEXTS.ui.buttons.back, callback_data: `${cb.BACK}start` },
-  ]);
-  rows.push([{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }]);
-
-  return {
-    text: `🚗 Обери авто\n\nПоказую перші ${slice.length} з ${cars.length}.`,
-    kb: { inline_keyboard: rows },
-  };
-}
-
-    if (x.step === "ODO_START") {
-      return {
-        text:
-          `🟢 Початковий показник спідометра\n\n` +
-          `${carLine}\n` +
-          `${TEXTS.ui.labels.current} ${fmtNum(x.odoStartKm)} км\n\n` +
-          `1) Введи число\n2) Потім надішли фото`,
-        kb: {
-          inline_keyboard: [
-            [
-              {
-                text: TEXTS.roadFlow.buttons.enterValue,
-                callback_data: cb.ASK_ODO_START_KM,
-              },
-            ],
-            ...(x.odoStartKm !== undefined
-              ? [
-                  [
-                    {
-                      text: TEXTS.roadFlow.buttons.sendPhoto,
-                      callback_data: cb.ASK_ODO_START_PHOTO,
-                    },
-                  ],
-                ]
-              : []),
-            [{ text: TEXTS.ui.buttons.back, callback_data: `${cb.BACK}start` }],
-            [{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }],
-          ],
-        },
-      };
-    }
-
-    if (x.step === "PICK_PEOPLE") {
-      const emps = x.employees ?? [];
-      const slice = emps.slice(0, 40);
-      const inCar = new Set(x.inCarIds);
-const rows: TelegramBot.InlineKeyboardButton[][] = slice.map((e) => {
-  const busy = busyByEmployeeId.get(String(e.id));
-  const isMine = inCar.has(e.id);
-
-  const label = isMine
-    ? `✅ ${e.name}`
-    : busy
-      ? `🔒 ${e.name} — ${busy.foremanName}`
-      : `▫️ ${e.name}`;
-
-  return [
-    {
-      text: label.slice(0, 60),
-      callback_data: `${cb.EMP_TOGGLE}${e.id}`,
-    },
-  ];
-});
-
-      rows.push([{ text: "✅ Готово", callback_data: cb.PEOPLE_DONE }]);
-      rows.push([
-        { text: TEXTS.ui.buttons.back, callback_data: `${cb.BACK}start` },
-      ]);
-      rows.push([{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }]);
-      return {
-        text:
-          `👥 Люди в машині\n\n` +
-          `Зараз: ${joinEmpNames(x, x.inCarIds)}\n\n` +
-          `Натискай щоб додати/прибрати.`,
-        kb: { inline_keyboard: rows },
-      };
-    }
-
-    if (x.step === "PICK_OBJECTS") {
-      const objs = x.objectsMeta ?? [];
-      const slice = objs.slice(0, 30);
-      const picked = new Set(x.plannedObjectIds);
-      const rows: TelegramBot.InlineKeyboardButton[][] = slice.map((o) => [
-        {
-          text: `${picked.has(o.id) ? "✅ " : "▫️ "}${o.name}`.slice(
-            0,
-            60,
-          ),
-          callback_data: `${cb.OBJ_TOGGLE}${o.id}`,
-        },
-      ]);
-      rows.push([{ text: "✅ Готово", callback_data: cb.OBJECTS_DONE }]);
-      if (canStartDay(x)) {
-        rows.push([
-          {
-            text: TEXTS.roadFlow.buttons.startDay,
-            callback_data: cb.START_DAY,
-          },
-        ]);
-      }
-      rows.push([
-        { text: TEXTS.ui.buttons.back, callback_data: `${cb.BACK}start` },
-      ]);
-      rows.push([{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }]);
-
-      return {
-        text:
-          `🏗 Обʼєкти\n\n` +
-          `📅 ${date}\n` +
-          `Обрано: ${x.plannedObjectIds.length}\n\n` +
-          `Натискай щоб додати/прибрати.`,
-        kb: { inline_keyboard: rows },
-      };
-    }
+    if (x.step === "PICK_OBJECTS") return renderPickObjectsScreen(renderCtx);
 
 if (x.step === "OBJECT_PLAN_MENU") {
   const rows: TelegramBot.InlineKeyboardButton[][] = x.plannedObjectIds.map((oid) => {
@@ -1754,46 +1445,6 @@ if (x.step === "SAVE") {
   });
 }
 
-function workCategoryOf(w: any) {
-  return String(
-    w.category ??
-      w.CATEGORY ??
-      w["Категорія"] ??
-      w["КАТЕГОРІЯ"] ??
-      w["Категория"] ??
-      w["КАТЕГОРИЯ"] ??
-      "Без категорії",
-  ).trim();
-}
-
-function getActiveWorks(st: State) {
-  return (st.worksMeta ?? []).filter(
-    (w: any) => String(w.active ?? "TRUE").toUpperCase() !== "FALSE",
-  );
-}
- 
-function getWorkCategories(st: State) {
-  return uniq(getActiveWorks(st).map(workCategoryOf).filter(Boolean)).sort(
-    (a, b) => a.localeCompare(b),
-  );
-}
-
-function buildSelectedCategoriesText(st: State, oid: string) {
-  const obj = ensureObjectState(st, oid);
-  const picked = new Set(obj.works.map((w) => String(w.workId)));
-
-  const lines = getWorkCategories(st)
-    .map((cat) => {
-      const works = getActiveWorks(st).filter((w) => workCategoryOf(w) === cat);
-      const selected = works.filter((w) => picked.has(String(w.id))).length;
-      return selected > 0 ? `✅ ${cat}: ${selected}/${works.length}` : "";
-    })
-    .filter(Boolean);
-
-  return lines.length ? lines.join("\n") : "—";
-}
-
-
 function applyReturnedEditPersonChange(
   st: State,
   objectIdRaw: string,
@@ -1980,307 +1631,13 @@ if (handledStats) {
 
     
 
-    if (
-      data.startsWith(cb.ADM_APPROVE) ||
-      data.startsWith(cb.ADM_RETURN) ||
-      data.startsWith(cb.ADM_RETURN_REASON) ||
-      data.startsWith(cb.ADM_RETURN_CANCEL)
-    ) {
-      const nowIso = new Date().toISOString();
-      const users = await fetchUsers();
-      const usersNorm = (users ?? [])
-        .map((u: any) => ({
-          tgId: Number(u.tgId) || 0,
-          role: String(u.role ?? ""),
-          active: Boolean(u.active),
-        }))
-        .filter((u: any) => u.tgId > 0 && u.active);
-
-      const role = String(
-        usersNorm.find((u: any) => u.tgId === Number(q.from.id))?.role ?? "",
-      )
-        .toUpperCase()
-        .trim();
-
-      const isAdmin = role.includes("АДМІН") || role.includes("ADMIN");
-      if (!isAdmin) {
-        await bot.answerCallbackQuery(q.id, {
-          text: "⛔️ Тільки адміністратор",
-          show_alert: true,
-        });
-        return true;
-      }
-
-      const adminChatId = q.message?.chat?.id;
-      const adminMsgId = q.message?.message_id;
-
-      async function safeEditAdmin(text: string) {
-        if (typeof adminChatId !== "number" || typeof adminMsgId !== "number")
-          return;
-        try {
-          await bot.editMessageReplyMarkup(
-            { inline_keyboard: [] },
-            { chat_id: adminChatId, message_id: adminMsgId },
-          );
-        } catch {}
-        try {
-          await safeEditMessageText(bot, adminChatId, adminMsgId, text, {
-            parse_mode: "Markdown",
-          });
-        } catch {}
-      }
-
-      if (data.startsWith(cb.ADM_RETURN_CANCEL)) {
-        const eventId = data.slice(cb.ADM_RETURN_CANCEL.length);
-        await bot.answerCallbackQuery(q.id, { text: "✅ Скасовано" });
-        await safeEditAdmin(
-          `❎ *Повернення скасовано*\n🆔 Подія: *Робочий день*`,
-        );
-        return true;
-      }
-
-      if (data.startsWith(cb.ADM_RETURN_REASON)) {
-        const rest = data.slice(cb.ADM_RETURN_REASON.length);
-        const parts = rest.split(":");
-        const reasonCode = parts.pop() || "OTHER";
-        const eventId = parts.join(":");
-
-        const ev = await getEventById(eventId);
-        if (!ev) {
-          await bot.answerCallbackQuery(q.id, {
-            text: "❌ Подію не знайдено",
-            show_alert: true,
-          });
-          return true;
-        }
-
-        const targetChatId =
-          Number(ev.chatId) > 0 ? Number(ev.chatId) : Number(ev.foremanTgId);
-        if (!Number.isFinite(targetChatId) || targetChatId <= 0) {
-          await bot.answerCallbackQuery(q.id, {
-            text: "⚠️ Нема куди відправити бригадиру",
-            show_alert: true,
-          });
-          return true;
-        }
-
-        const reasonMap: Record<string, string> = {
-          WRONG_ODO: "ODO некоректний",
-          WRONG_PEOPLE: "Не ті люди",
-          WRONG_OBJECTS: "Не ті обʼєкти",
-          WRONG_QTY: "Невірні обсяги",
-          NO_PHOTO: "Нема фото",
-          OTHER: "Інше",
-        };
-        const reasonText = reasonMap[reasonCode] ?? reasonMap.OTHER;
-
-        await updateEventById(eventId, {
-          status: "ПОВЕРНУТО",
-          updatedAt: nowIso,
-        });
-
-        const targetForemanTgId = Number(ev.foremanTgId) || 0;
-
-if (targetForemanTgId > 0) {
-  const root2 = getFlowState<Record<number, State>>(s, FLOW) || {};
-  const st2 = root2[targetForemanTgId] as any;
-
-  if (st2) {
-    st2.submittedForApproval = false;
-    st2.adminReviewEventId = "";
-
-
-st2.submittedForApproval = false;
-st2.adminReviewEventId = "";
-st2.step = "RETURN_EDIT_OBJECTS" as any;
-
-(st2 as any).editReturned = true;
-(st2 as any).editAddedPeopleIds = [];
-(st2 as any).editRemovedPeopleIds = [];
-(st2 as any).editOriginalPeopleIds = uniq([
-  ...((st2.members ?? []).map((m: any) => String(m.employeeId)).filter(Boolean)),
-  ...((st2.inCarIds ?? []).map(String).filter(Boolean)),
-]);
-
-
-
-    root2[targetForemanTgId] = st2;
-    setFlowState(s, FLOW, root2);
-  }
-}
-
-await bot.sendMessage(
-  targetChatId,
-  `🔴 *День повернено адміністратором*\n📅 Дата: ${ev.date}\n📝 Причина: *${reasonText}*\n\nРедагування знову доступне. Відкрий меню робочого дня, виправ дані і надішли повторно.`,
-  { parse_mode: "Markdown" },
-);
-
-        await bot.answerCallbackQuery(q.id, { text: "🔴 Повернено" });
-        await safeEditAdmin(
-          `🔴 *Повернено*\n🆔 Подія: *Робочий день*\n📝 Причина: *${reasonText}*`,
-        );
-        return true;
-      }
-
-      if (data.startsWith(cb.ADM_RETURN)) {
-        const eventId = data.slice(cb.ADM_RETURN.length);
-        await bot.answerCallbackQuery(q.id, { text: "✍️ Обери причину" });
-
-        if (typeof adminChatId === "number") {
-          await bot.sendMessage(
-            adminChatId,
-            `🔴 *Повернення*\n🆔 Подія: *Робочий день*\n\nОбери причину:`,
-            {
-              parse_mode: "Markdown",
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    {
-                      text: "📸 Нема фото",
-                      callback_data: `${cb.ADM_RETURN_REASON}${eventId}:NO_PHOTO`,
-                    },
-                  ],
-                  [
-                    {
-                      text: "🔢 ODO некоректний",
-                      callback_data: `${cb.ADM_RETURN_REASON}${eventId}:WRONG_ODO`,
-                    },
-                  ],
-                  [
-                    {
-                      text: "👥 Не ті люди",
-                      callback_data: `${cb.ADM_RETURN_REASON}${eventId}:WRONG_PEOPLE`,
-                    },
-                  ],
-                  [
-                    {
-                      text: "🏗 Не ті обʼєкти",
-                      callback_data: `${cb.ADM_RETURN_REASON}${eventId}:WRONG_OBJECTS`,
-                    },
-                  ],
-                  [
-  {
-    text: "🧮 Невірні обсяги",
-    callback_data: `${cb.ADM_RETURN_REASON}${eventId}:WRONG_QTY`,
-  },
-],
-                  [
-                    {
-                      text: "❎ Скасувати",
-                      callback_data: `${cb.ADM_RETURN_CANCEL}${eventId}`,
-                    },
-                  ],
-                ],
-              },
-            },
-          );
-        }
-        return true;
-      }
-
-      if (data.startsWith(cb.ADM_APPROVE)) {
-        const eventId = data.slice(cb.ADM_APPROVE.length);
-
-        const ev = await getEventById(eventId);
-        if (!ev) {
-          await bot.answerCallbackQuery(q.id, {
-            text: "❌ Подію не знайдено",
-            show_alert: true,
-          });
-          return true;
-        }
-
-        const targetChatId =
-          Number(ev.chatId) > 0 ? Number(ev.chatId) : Number(ev.foremanTgId);
-        if (!Number.isFinite(targetChatId) || targetChatId <= 0) {
-          await bot.answerCallbackQuery(q.id, {
-            text: "⚠️ Нема куди відправити бригадиру",
-            show_alert: true,
-          });
-          return true;
-        }
-
-        await updateEventById(eventId, {
-          status: "ЗАТВЕРДЖЕНО",
-          updatedAt: nowIso,
-        });
-
-        const targetForemanTgId = Number(ev.foremanTgId) || 0;
-
-if (targetForemanTgId > 0) {
-  const root2 = getFlowState<Record<number, State>>(s, FLOW) || {};
-
-  root2[targetForemanTgId] = {
-    step: "START",
-    date: todayISO(),
-    phase: "SETUP",
-    plannedObjectIds: [],
-    objects: {},
-    inCarIds: [],
-    members: [],
-    driveActive: false,
-    returnActive: false,
-    qtyUnlocked: false,
-  } as State;
-
-  setFlowState(s, FLOW, root2);
-}
-
-const approvedText = buildRoadApprovedShortText(ev, {
-  title: "✅ *День затверджено*",
-});
-
-try {
-  if (typeof adminChatId === "number") {
-    await bot.sendMessage(
-      adminChatId,
-      [
-        `DEBUG APPROVE`,
-        `eventId=${eventId}`,
-        `targetChatId=${targetChatId}`,
-        `ev.chatId=${ev?.chatId}`,
-        `ev.foremanTgId=${ev?.foremanTgId}`,
-        `payloadLen=${String(ev?.payload ?? "").length}`,
-      ].join("\n"),
-    ).catch(() => {});
-
-    await bot.sendMessage(
-      adminChatId,
-      `approvedTextLen=${approvedText.length}`,
-    ).catch(() => {});
-  }
-
-  await sendLongHtml(bot, targetChatId, approvedText, {
-    disable_web_page_preview: true,
-  });
-} catch (e: any) {
-  const errText =
-    e?.response?.body?.description ??
-    e?.message ??
-    String(e);
-
-  await bot.sendMessage(
-    targetChatId,
-    `✅ День затверджено адміністратором.\n⚠️ Не зміг надіслати підсумок.`,
-  ).catch(() => {});
-
-  if (typeof adminChatId === "number") {
-    await bot.sendMessage(
-      adminChatId,
-      `⚠️ Не зміг надіслати підсумок бригадиру (chatId=${targetChatId}).\nПричина: ${errText}`.slice(0, 3500),
-    ).catch(() => {});
-  }
-}
-        await bot.answerCallbackQuery(q.id, { text: "✅ Затверджено" });
-        await safeEditAdmin(`✅ *Затверджено*\n🆔 Подія: *Робочий день*`);
-        return true;
-      }
-
-      const st = root[foremanTgId];
-if (!st) return true;
-await ensureStateReady(st);
-      return true;
-    }
+    const handledApproval = await handleRoadApprovalCallbacks({
+      bot,
+      q,
+      s,
+      data,
+    });
+    if (handledApproval) return true;
 
     const st = root[foremanTgId];
     if (!st) return true;
