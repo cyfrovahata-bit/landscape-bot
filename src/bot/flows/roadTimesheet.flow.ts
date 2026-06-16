@@ -1859,7 +1859,112 @@ start: async (bot, chatId, s) => {
 const foremanTgId = q.from?.id ?? 0;
 
 const root = getFlowState<Record<number, State>>(s, FLOW) || {};
+const st = root[foremanTgId] as State | undefined;
 s.flow = FLOW;
+
+const renderWorkCategoryPage = async (categoryIndex: number, pageIndex: number) => {
+  if (!st) return (gate("Обери обʼєкт."), true);
+  const oid = st.activeObjectId;
+  if (!oid) return (gate("Обери обʼєкт."), true);
+
+  const category = String((st as any).workCategories?.[categoryIndex] ?? "").trim();
+  if (!category) {
+    await bot.answerCallbackQuery(q.id, {
+      text: "⚠️ Категорію не знайдено",
+      show_alert: true,
+    });
+    return true;
+  }
+
+  const obj = ensureObjectState(st, oid);
+  const picked = new Set(obj.works.map((w) => String(w.workId)));
+
+  const dict = (st.worksMeta ?? [])
+    .filter((w: any) => String(w.active ?? "TRUE").toUpperCase() !== "FALSE")
+    .filter((w: any) => {
+      const cat = String(
+        w.category ??
+          w.CATEGORY ??
+          w["Категорія"] ??
+          w["КАТЕГОРІЯ"] ??
+          w["Категория"] ??
+          w["КАТЕГОРИЯ"] ??
+          "Без категорії",
+      ).trim();
+
+      return cat === category;
+    });
+
+  const itemsPerPage = 5;
+  const totalWorks = dict.length;
+  const totalPages = Math.max(1, Math.ceil(totalWorks / itemsPerPage));
+  const page = Number.isFinite(pageIndex) && pageIndex >= 0 ? pageIndex : 0;
+  const currentPage = Math.min(Math.max(page, 0), totalPages - 1);
+
+  (st as any).activeWorkCategoryIndex = categoryIndex;
+  (st as any).activeWorkPage = currentPage;
+
+  const pageStart = currentPage * itemsPerPage;
+  const pageItems = dict.slice(pageStart, pageStart + itemsPerPage);
+
+  const lines: string[] = [];
+  lines.push(`📁 ${category}`);
+  lines.push("");
+  lines.push(`🏗 ${objectName(st, oid)}`);
+  lines.push("");
+
+  if (!pageItems.length) {
+    lines.push("Нема робіт у категорії.");
+    lines.push("");
+  } else {
+    for (let idx = 0; idx < pageItems.length; idx += 1) {
+      const w = pageItems[idx];
+      const number = pageStart + idx + 1;
+      const on = picked.has(String(w.id));
+      const mark = on ? "☑️" : "◻️";
+      lines.push(`${mark} ${number}. ${String(w.name ?? w.id)}`);
+      if (idx < pageItems.length - 1) lines.push("");
+    }
+
+    lines.push("");
+    lines.push("⬇️ Оберіть роботи:");
+  }
+
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+  if (pageItems.length) {
+    const buttonRow: TelegramBot.InlineKeyboardButton[] = pageItems.map((w, idx) => {
+      const number = pageStart + idx + 1;
+      const on = picked.has(String(w.id));
+      return {
+        text: `${on ? "☑️ " : ""}${number}`,
+        callback_data: `${cb.PLAN_WORK}${String(w.id)}`,
+      };
+    });
+    rows.push(buttonRow);
+  }
+
+  const navRow: TelegramBot.InlineKeyboardButton[] = [];
+  if (currentPage > 0) {
+    navRow.push({ text: "⬅️ Назад", callback_data: `${cb.PLAN_WORK_PAGE}${currentPage - 1}` });
+  }
+  if (currentPage < totalPages - 1) {
+    navRow.push({ text: "➡️ Далі", callback_data: `${cb.PLAN_WORK_PAGE}${currentPage + 1}` });
+  }
+  if (navRow.length) rows.push(navRow);
+
+  rows.push([{ text: "📚 До категорій", callback_data: cb.PLAN_WORKS }]);
+  rows.push([{ text: "✅ Готово", callback_data: cb.PLAN_WORKS_DONE }]);
+  rows.push([{ text: "🏠 Назад в меню", callback_data: `${cb.BACK}plan_obj` }]);
+
+  root[foremanTgId] = st;
+  setFlowState(s, FLOW, root);
+
+  await safeEditMessageText(bot, chatId, msgId, lines.join("\n"), {
+    reply_markup: { inline_keyboard: rows },
+  });
+
+  return true;
+};
 
 if (data === cb.RESET_STATE) {
   console.log("[RTS][RESET] requested", {
@@ -1981,7 +2086,6 @@ if (handledStats) {
     });
     if (handledApproval) return true;
 
-    const st = root[foremanTgId];
     if (!st) return true;
     await ensureStateReady(st);
     const date = st.date;
@@ -3575,77 +3679,23 @@ if (data === cb.PLAN_WORKS) {
 }
 
 if (data.startsWith(cb.PLAN_WORK_CAT)) {
-  const oid = st.activeObjectId;
-  if (!oid) return (gate("Обери обʼєкт."), true);
-
-const categoryIndex = Number(data.slice(cb.PLAN_WORK_CAT.length).trim());
-(st as any).activeWorkCategoryIndex = categoryIndex;
-const category = String((st as any).workCategories?.[categoryIndex] ?? "").trim();
-
-if (!category) {
-  await bot.answerCallbackQuery(q.id, {
-    text: "⚠️ Категорію не знайдено",
-    show_alert: true,
-  });
-  return true;
+  const categoryIndex = Number(data.slice(cb.PLAN_WORK_CAT.length).trim());
+  return renderWorkCategoryPage(categoryIndex, 0);
 }
 
-  const obj = ensureObjectState(st, oid);
-  const picked = new Set(obj.works.map((w) => String(w.workId)));
+if (data.startsWith(cb.PLAN_WORK_PAGE)) {
+  const categoryIndex = Number((st as any).activeWorkCategoryIndex ?? -1);
+  const pageIndex = Number(data.slice(cb.PLAN_WORK_PAGE.length).trim());
 
-  const dict = (st.worksMeta ?? [])
-    .filter((w: any) => String(w.active ?? "TRUE").toUpperCase() !== "FALSE")
-    .filter((w: any) => {
-      const cat = String(
-        w.category ??
-          w.CATEGORY ??
-          w["Категорія"] ??
-          w["КАТЕГОРІЯ"] ??
-          w["Категория"] ??
-          w["КАТЕГОРИЯ"] ??
-          "Без категорії",
-      ).trim();
-
-      return cat === category;
-    });
-
-  const rows: TelegramBot.InlineKeyboardButton[][] = [];
-
-  rows.push([
-    {
-      text: "✅ Обрати всі роботи в категорії",
-      callback_data: `${cb.PLAN_WORK_ALL_CAT}${categoryIndex}`,
-    },
-  ]);
-
-  for (const w of dict.slice(0, 40)) {
-    const id = String(w.id);
-    const name = String(w.name ?? id);
-    const on = picked.has(id);
-
-    rows.push([
-      {
-        text: `${on ? "✅ " : "▫️ "}${name} (${id})`.slice(0, 60),
-        callback_data: `${cb.PLAN_WORK}${id}`,
-      },
-    ]);
+  if (!Number.isFinite(categoryIndex) || categoryIndex < 0) {
+    return (gate("Обери категорію."), true);
   }
 
-  rows.push([{ text: "⬅️ До категорій", callback_data: cb.PLAN_WORKS }]);
-  rows.push([{ text: "✅ Готово", callback_data: cb.PLAN_WORKS_DONE }]);
-  rows.push([{ text: TEXTS.common.backToMenu, callback_data: cb.MENU }]);
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) {
+    return true;
+  }
 
-  await safeEditMessageText(
-    bot,
-    chatId,
-    msgId,
-    `📁 ${category}\n\n🏗 ${objectName(st, oid)}\nОбери роботи:`,
-    {
-      reply_markup: { inline_keyboard: rows },
-    },
-  );
-
-  return true;
+  return renderWorkCategoryPage(categoryIndex, pageIndex);
 }
 
 if (data.startsWith(cb.PLAN_WORK_ALL_CAT)) {
@@ -3766,13 +3816,14 @@ root[foremanTgId] = st;
 setFlowState(s, FLOW, root);
 
 const categoryIndex = Number((st as any).activeWorkCategoryIndex ?? -1);
+const pageIndex = Number((st as any).activeWorkPage ?? 0);
 
 if (Number.isFinite(categoryIndex) && categoryIndex >= 0) {
   return RoadTimesheetFlow.onCallback!(
     bot,
     q,
     s,
-    `${cb.PLAN_WORK_CAT}${categoryIndex}`,
+    `${cb.PLAN_WORK_PAGE}${pageIndex}`,
   );
 }
 
