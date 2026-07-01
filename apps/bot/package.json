@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
 
-    "build": "node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc",
+    "build": "node --max-old-space-size=4096 $(npm root)/typescript/bin/tsc",
 
     "start": "node dist/index.js",
 
