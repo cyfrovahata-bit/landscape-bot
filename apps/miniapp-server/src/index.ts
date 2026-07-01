@@ -1,4 +1,7 @@
 import "dotenv/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs";
 import express from "express";
 import cors from "cors";
 import { startSyncLoop, config } from "@landscape/core";
@@ -14,19 +17,35 @@ import { roadTimesheetRouter } from "./routes/roadTimesheet.js";
   return this.toString();
 };
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.use(requireTelegramAuth);
+const apiRouter = express.Router();
+apiRouter.use(requireTelegramAuth);
+apiRouter.use("/dictionaries", dictionariesRouter);
+apiRouter.use("/logistics", logisticsRouter);
+apiRouter.use("/materials", materialsRouter);
+apiRouter.use("/stats", statsRouter);
+apiRouter.use("/road-timesheet", roadTimesheetRouter);
+app.use("/api", apiRouter);
 
-app.use("/api/dictionaries", dictionariesRouter);
-app.use("/api/logistics", logisticsRouter);
-app.use("/api/materials", materialsRouter);
-app.use("/api/stats", statsRouter);
-app.use("/api/road-timesheet", roadTimesheetRouter);
+// Serve the built mini-app frontend (apps/miniapp-web/dist) from the same
+// service, so the whole mini-app is one Railway service with one HTTPS URL
+// to register in @BotFather. Falls back gracefully if it hasn't been built.
+const webDist = path.resolve(__dirname, "../../miniapp-web/dist");
+if (fs.existsSync(webDist)) {
+  app.use(express.static(webDist));
+  app.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(path.join(webDist, "index.html"));
+  });
+} else {
+  console.warn(`[miniapp-server] no built frontend found at ${webDist} (run "npm run build -w apps/miniapp-web")`);
+}
 
 const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {

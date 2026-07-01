@@ -7,6 +7,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspace=apps/bot",
-    "start": "npm run start --workspace=apps/bot"
+    "start": "npm run start --workspace=apps/bot",
+    "build:miniapp": "npm run build --workspace=apps/miniapp-web",
+    "start:miniapp": "npm run start --workspace=apps/miniapp-server"
   }
 }
