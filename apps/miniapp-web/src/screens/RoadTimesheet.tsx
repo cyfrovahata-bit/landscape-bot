@@ -129,7 +129,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [works, setWorks] = useState<Work[]>([]);
   const [objects, setObjects] = useState<WorkObject[]>([]);
-  const [takenCarIds, setTakenCarIds] = useState<Set<string>>(new Set());
+  const [takenCars, setTakenCars] = useState<Map<string, string>>(new Map());
+  const [busyEmployees, setBusyEmployees] = useState<Map<string, string>>(new Map());
 
   const [carId, setCarId] = useState("");
 
@@ -164,8 +165,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     api.get<Work[]>("/api/dictionaries/works").then(setWorks).catch((e) => setError(e.message));
     api.get<WorkObject[]>("/api/dictionaries/objects").then(setObjects).catch((e) => setError(e.message));
     api
-      .get<{ taken: { carId: string; foremanTgId: string }[] }>(`/api/road-timesheet/car-status?date=${todayISO()}`)
-      .then((res) => setTakenCarIds(new Set(res.taken.map((t) => t.carId))))
+      .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${todayISO()}`)
+      .then((res) => setTakenCars(new Map(res.taken.map((t) => [t.carId, t.foremanName]))))
+      .catch(() => {});
+    api
+      .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${todayISO()}`)
+      .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
       .catch(() => {});
   }, []);
 
@@ -414,17 +419,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title">Обери авто</div>
           <div className="list">
             {cars.map((c) => {
-              const taken = takenCarIds.has(c.id);
+              const takenBy = takenCars.get(c.id);
               return (
                 <button
                   key={c.id}
                   className={`cell ${carId === c.id ? "selected" : ""}`}
-                  onClick={() => !taken && setCarId(c.id)}
-                  disabled={taken}
-                  style={taken ? { opacity: 0.4 } : undefined}
+                  onClick={() => !takenBy && setCarId(c.id)}
+                  disabled={!!takenBy}
+                  style={takenBy ? { opacity: 0.4 } : undefined}
                 >
                   <span className="cell-title">{c.name}</span>
-                  {taken ? <span className="badge warn">зайняте</span> : <span className="cell-sub">{c.plate}</span>}
+                  {takenBy ? <span className="badge warn">🔒 {takenBy}</span> : <span className="cell-sub">{c.plate}</span>}
                 </button>
               );
             })}
@@ -477,19 +482,30 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 {expanded && (
                   <div style={{ padding: "0 16px 16px" }}>
                     <div className="chip-row" style={{ padding: "8px 0" }}>
-                      {group.members.map((emp) => (
-                        <div
-                          key={emp.id}
-                          className={`chip ${employeeIds.includes(emp.id) ? "selected" : ""}`}
-                          onClick={() => setEmployeeIds((prev) => (prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id]))}
-                        >
-                          {emp.name}
-                        </div>
-                      ))}
+                      {group.members.map((emp) => {
+                        const busyBy = busyEmployees.get(emp.id);
+                        return (
+                          <div
+                            key={emp.id}
+                            className={`chip ${employeeIds.includes(emp.id) ? "selected" : ""}`}
+                            style={busyBy ? { opacity: 0.4 } : undefined}
+                            onClick={() =>
+                              !busyBy &&
+                              setEmployeeIds((prev) => (prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id]))
+                            }
+                          >
+                            {busyBy ? `🔒 ${emp.name} — ${busyBy}` : emp.name}
+                          </div>
+                        );
+                      })}
                     </div>
                     <button
                       className="chip"
-                      onClick={() => setEmployeeIds((prev) => [...new Set([...prev, ...group.members.map((m) => m.id)])])}
+                      onClick={() =>
+                        setEmployeeIds((prev) => [
+                          ...new Set([...prev, ...group.members.filter((m) => !busyEmployees.has(m.id)).map((m) => m.id)]),
+                        ])
+                      }
                     >
                       ✅ Обрати всіх
                     </button>
@@ -498,7 +514,23 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </div>
             );
           })}
-          <MainButton text="Далі" onClick={() => setStep("PICK_OBJECTS")} disabled={!employeeIds.length} />
+          <MainButton
+            text="Далі"
+            onClick={async () => {
+              // Reserve the car + picked people now (mirrors the bot's real-time
+              // busy/locked state) so another foreman opening the mini-app right
+              // after sees them as taken, instead of only after the whole day
+              // gets submitted at the very end.
+              try {
+                await api.post("/api/road-timesheet/reserve", { date: todayISO(), carId, employeeIds });
+              } catch (e) {
+                setError((e as Error).message);
+                return;
+              }
+              setStep("PICK_OBJECTS");
+            }}
+            disabled={!employeeIds.length}
+          />
         </>
       )}
 

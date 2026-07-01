@@ -276,9 +276,56 @@ roadTimesheetRouter.post("/", async (req, res) => {
 });
 
 /**
+ * POST /api/road-timesheet/reserve — called right after PICK_CAR and
+ * PICK_PEOPLE are confirmed, before the rest of the day is planned. Mirrors
+ * the bot's real-time car/people locking (buildBusyCarsMap/buildBusyEmployeesMap
+ * in roadTimesheet.utils.ts): without an early write, two foremen could pick
+ * the same car or the same person, since the mini-app otherwise only saves
+ * everything in one batch at the very end of the day.
+ */
+roadTimesheetRouter.post("/reserve", async (req, res) => {
+  const { date, carId, employeeIds } = req.body as { date: string; carId?: string; employeeIds?: string[] };
+  if (!date) {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+  const foremanTgId = req.user!.tgId;
+
+  if (carId) {
+    const existingForCar = await db
+      .select()
+      .from(schema.odometerDays)
+      .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
+    const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+    if (takenBySomeoneElse) {
+      res.status(409).json({ error: "Це авто вже зарезервоване іншим бригадиром на сьогодні" });
+      return;
+    }
+    // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
+    // date+carId, so the real ODO_START value submitted later just updates it.
+    await writeOdometerDay({ date, carId, foremanTgId });
+  }
+
+  if (employeeIds?.length) {
+    await writeEvent({
+      eventId: makeEventId("RTSRSV"),
+      status: "АКТИВНА",
+      date,
+      foremanTgId,
+      type: "RTS_RESERVE_PEOPLE",
+      employeeIds: JSON.stringify(employeeIds),
+    });
+  }
+
+  res.json({ ok: true });
+});
+
+/**
  * GET /api/road-timesheet/car-status?date=YYYY-MM-DD — which cars are
- * already taken for the day (someone already recorded a start odometer
- * for them) so PICK_CAR can stop two foremen picking the same car.
+ * already taken for the day (someone already recorded/reserved a start
+ * odometer for them), with the reserving foreman's name, so PICK_CAR can
+ * stop two foremen picking the same car -- same intent as the bot's
+ * "🔒 [авто] — [бригадир]" busy label.
  */
 roadTimesheetRouter.get("/car-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -287,11 +334,60 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
     return;
   }
 
-  const rows = await db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date));
+  const [rows, users] = await Promise.all([
+    db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date)),
+    db.select().from(schema.users),
+  ]);
+  const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
   const myTgId = req.user!.tgId;
   const taken = rows
     .filter((r) => Number(r.foremanTgId) !== myTgId)
-    .map((r) => ({ carId: r.carId, foremanTgId: String(r.foremanTgId) }));
+    .map((r) => ({ carId: r.carId, foremanName: nameByTgId.get(String(r.foremanTgId)) ?? `Бригадир ${r.foremanTgId}` }));
+
+  res.json({ taken });
+});
+
+/**
+ * GET /api/road-timesheet/people-status?date=YYYY-MM-DD — which employees
+ * are already riding with another foreman today. An employee frees up again
+ * once that foreman's day is fully submitted (RTS_SAVE), matching the bot's
+ * FREE_TYPES logic in buildBusyEmployeesMap.
+ */
+roadTimesheetRouter.get("/people-status", async (req, res) => {
+  const date = String(req.query.date || "");
+  if (!date) {
+    res.status(400).json({ error: "date query param is required" });
+    return;
+  }
+
+  const [events, users] = await Promise.all([
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", "RTS_SAVE"]))),
+    db.select().from(schema.users),
+  ]);
+  const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
+  const myTgId = req.user!.tgId;
+
+  const latestByEmployee = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
+  for (const e of events) {
+    if (Number(e.foremanTgId) === myTgId) continue;
+    let ids: string[] = [];
+    try {
+      ids = JSON.parse(e.employeeIds ?? "[]");
+    } catch {
+      ids = [];
+    }
+    for (const id of ids) {
+      const cur = latestByEmployee.get(id);
+      if (!cur || e.ts > cur.ts) latestByEmployee.set(id, { type: e.type, ts: e.ts, foremanTgId: String(e.foremanTgId) });
+    }
+  }
+
+  const taken = [...latestByEmployee.entries()]
+    .filter(([, v]) => v.type !== "RTS_SAVE")
+    .map(([employeeId, v]) => ({ employeeId, foremanName: nameByTgId.get(v.foremanTgId) ?? `Бригадир ${v.foremanTgId}` }));
 
   res.json({ taken });
 });
