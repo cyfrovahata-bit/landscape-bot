@@ -60,6 +60,14 @@ export const CARS_HEADERS = {
   active: "АКТИВ",
 } as const;
 
+export const LOGISTIC_HEADERS = {
+  id: "ID",
+  name: "НАЗВА",
+  tariff: "СТАВКА",
+  discount: "ЗНИЖКИ",
+  active: "АКТИВ",
+} as const;
+
 export const REPORTS_HEADERS = {
   date: "ДАТА",
   objectId: "ОБʼЄКТ_ID",

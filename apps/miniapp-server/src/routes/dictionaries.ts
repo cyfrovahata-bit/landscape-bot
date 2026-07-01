@@ -33,3 +33,15 @@ dictionariesRouter.get("/tools", async (_req, res) => {
   const rows = await db.select().from(schema.tools).where(eq(schema.tools.active, true));
   res.json(rows);
 });
+
+dictionariesRouter.get("/logistics", async (_req, res) => {
+  const rows = await db.select().from(schema.logisticDirections).where(eq(schema.logisticDirections.active, true));
+  res.json(
+    rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      tariff: r.tariff,
+      discountsByQty: r.discountsByQty ? JSON.parse(r.discountsByQty) : {},
+    })),
+  );
+});

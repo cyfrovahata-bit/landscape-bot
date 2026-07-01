@@ -15,6 +15,13 @@
       "when": 1782905540090,
       "tag": "0001_clammy_catseye",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782910159247,
+      "tag": "0002_past_speedball",
+      "breakpoints": true
     }
   ]
 }

@@ -7,6 +7,7 @@ import {
   OBJECTS_HEADERS,
   WORKS_HEADERS,
   CARS_HEADERS,
+  LOGISTIC_HEADERS,
   MATERIALS_HEADERS,
   TOOLS_HEADERS,
   SETTINGS_HEADERS,
@@ -94,6 +95,39 @@ export async function readCars() {
       name: getCell(row, map, CARS_HEADERS.name),
       plate: getCell(row, map, CARS_HEADERS.plate) || null,
       active: toBool(getCell(row, map, CARS_HEADERS.active)),
+    }))
+    .filter((r) => r.id);
+}
+
+function parseDiscountsCell(raw: unknown): Record<number, number> {
+  const s = String(raw ?? "").trim();
+  if (!s) return {};
+
+  const out: Record<number, number> = {};
+  const parts = s.split(/[;,\n]+/).map((x) => x.trim()).filter(Boolean);
+
+  for (const p of parts) {
+    const m = p.match(/^(\d+)\s*[:=]\s*(\d+(?:[.,]\d+)?)$/);
+    if (!m) continue;
+    const qty = Number(m[1]);
+    const disc = Number(String(m[2]).replace(",", "."));
+    if (Number.isFinite(qty) && qty >= 2 && Number.isFinite(disc) && disc >= 0) {
+      out[qty] = disc;
+    }
+  }
+
+  return out;
+}
+
+export async function readLogisticDirections() {
+  const { data, map } = await loadSheet(SHEET_NAMES.logistic);
+  return data
+    .map((row) => ({
+      id: getCell(row, map, LOGISTIC_HEADERS.id),
+      name: getCell(row, map, LOGISTIC_HEADERS.name),
+      tariff: parseNumber(getCell(row, map, LOGISTIC_HEADERS.tariff)) ?? 0,
+      discountsByQty: JSON.stringify(parseDiscountsCell(getCell(row, map, LOGISTIC_HEADERS.discount))),
+      active: toBool(getCell(row, map, LOGISTIC_HEADERS.active)),
     }))
     .filter((r) => r.id);
 }

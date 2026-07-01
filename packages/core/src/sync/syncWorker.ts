@@ -41,6 +41,13 @@ export async function runSyncCycle() {
 
   await upsertBatch(schema.cars, await sheets.readCars(), schema.cars.id, ["name", "plate", "active"]);
 
+  await upsertBatch(
+    schema.logisticDirections,
+    await sheets.readLogisticDirections(),
+    schema.logisticDirections.id,
+    ["name", "tariff", "discountsByQty", "active"],
+  );
+
   await upsertBatch(schema.materials, await sheets.readMaterials(), schema.materials.id, [
     "name",
     "unit",

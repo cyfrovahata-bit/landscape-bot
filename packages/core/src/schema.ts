@@ -57,6 +57,14 @@ export const cars = pgTable("cars", {
   active: boolean("active").notNull().default(true),
 });
 
+export const logisticDirections = pgTable("logistic_directions", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  tariff: real("tariff").notNull().default(0),
+  discountsByQty: text("discounts_by_qty"), // JSON: { "2": 50, "3": 100 }
+  active: boolean("active").notNull().default(true),
+});
+
 export const materials = pgTable("materials", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
