@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import express from "express";
 import cors from "cors";
-import { startSyncLoop, config } from "@landscape/core";
+import { startSyncLoop, runMigrations, config } from "@landscape/core";
 import { requireTelegramAuth } from "./authMiddleware.js";
 import { dictionariesRouter } from "./routes/dictionaries.js";
 import { logisticsRouter } from "./routes/logistics.js";
@@ -47,9 +47,18 @@ if (fs.existsSync(webDist)) {
   console.warn(`[miniapp-server] no built frontend found at ${webDist} (run "npm run build -w apps/miniapp-web")`);
 }
 
-const port = Number(process.env.PORT || 3001);
-app.listen(port, () => {
-  console.log(`[miniapp-server] listening on :${port}`);
-});
+async function main() {
+  await runMigrations();
 
-startSyncLoop(config.syncIntervalMs);
+  const port = Number(process.env.PORT || 3001);
+  app.listen(port, () => {
+    console.log(`[miniapp-server] listening on :${port}`);
+  });
+
+  startSyncLoop(config.syncIntervalMs);
+}
+
+main().catch((err) => {
+  console.error("[miniapp-server] fatal startup error", err);
+  process.exit(1);
+});
