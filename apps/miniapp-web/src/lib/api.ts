@@ -1,6 +1,10 @@
 import { getInitData } from "./telegram";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
+// In production the API is served from the same origin as the frontend
+// (miniapp-server serves both), so an empty base means same-origin relative
+// requests. VITE_API_BASE_URL only needs to be set for local `vite dev`,
+// where the frontend and API run on different ports.
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
