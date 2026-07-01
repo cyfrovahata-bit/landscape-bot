@@ -1895,7 +1895,7 @@ const renderWorkCategoryPage = async (categoryIndex: number, pageIndex: number) 
       return cat === category;
     });
 
-  const itemsPerPage = 5;
+  const itemsPerPage = 10;
   const totalWorks = dict.length;
   const totalPages = Math.max(1, Math.ceil(totalWorks / itemsPerPage));
   const page = Number.isFinite(pageIndex) && pageIndex >= 0 ? pageIndex : 0;
@@ -1932,7 +1932,7 @@ const renderWorkCategoryPage = async (categoryIndex: number, pageIndex: number) 
 
   const rows: TelegramBot.InlineKeyboardButton[][] = [];
   if (pageItems.length) {
-    const buttonRow: TelegramBot.InlineKeyboardButton[] = pageItems.map((w, idx) => {
+    const buttons: TelegramBot.InlineKeyboardButton[] = pageItems.map((w, idx) => {
       const number = pageStart + idx + 1;
       const on = picked.has(String(w.id));
       return {
@@ -1940,8 +1940,13 @@ const renderWorkCategoryPage = async (categoryIndex: number, pageIndex: number) 
         callback_data: `${cb.PLAN_WORK}${String(w.id)}`,
       };
     });
-    rows.push(buttonRow);
+
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(buttons.slice(i, i + 5));
+    }
   }
+
+  rows.push([{ text: "✅ Вибрати всі на сторінці", callback_data: cb.PLAN_WORK_PAGE_SELECT_ALL }]);
 
   const navRow: TelegramBot.InlineKeyboardButton[] = [];
   if (currentPage > 0) {
@@ -3696,6 +3701,103 @@ if (data.startsWith(cb.PLAN_WORK_PAGE)) {
   }
 
   return renderWorkCategoryPage(categoryIndex, pageIndex);
+}
+
+if (data === cb.PLAN_WORK_PAGE_SELECT_ALL) {
+  const oid = st.activeObjectId;
+  if (!oid) return (gate("Обери обʼєкт."), true);
+
+  const categoryIndex = Number((st as any).activeWorkCategoryIndex ?? -1);
+  const pageIndex = Number((st as any).activeWorkPage ?? 0);
+
+  if (!Number.isFinite(categoryIndex) || categoryIndex < 0) {
+    return (gate("Обери категорію."), true);
+  }
+
+  const category = String((st as any).workCategories?.[categoryIndex] ?? "").trim();
+  if (!category) {
+    await bot.answerCallbackQuery(q.id, {
+      text: "⚠️ Категорію не знайдено",
+      show_alert: true,
+    });
+    return true;
+  }
+
+  const obj = ensureObjectState(st, oid);
+  const currentIds = new Set(obj.works.map((w) => String(w.workId)));
+
+  const dict = (st.worksMeta ?? [])
+    .filter((w: any) => String(w.active ?? "TRUE").toUpperCase() !== "FALSE")
+    .filter((w: any) => {
+      const cat = String(
+        w.category ??
+          w.CATEGORY ??
+          w["Категорія"] ??
+          w["КАТЕГОРІЯ"] ??
+          w["Категория"] ??
+          w["КАТЕГОРИЯ"] ??
+          "Без категорії",
+      ).trim();
+
+      return cat === category;
+    });
+
+  const itemsPerPage = 10;
+  const pageStart = Math.max(0, pageIndex) * itemsPerPage;
+  const pageItems = dict.slice(pageStart, pageStart + itemsPerPage);
+
+  if (!pageItems.length) {
+    await bot.answerCallbackQuery(q.id, {
+      text: "⚠️ На сторінці немає робіт",
+      show_alert: true,
+    });
+    return true;
+  }
+
+  const added: Array<{ workId: string; name: string; unit: string; rate: number }> = [];
+  for (const w of pageItems) {
+    const id = String(w.id ?? "").trim();
+    if (!id || currentIds.has(id)) continue;
+
+    currentIds.add(id);
+    added.push({
+      workId: id,
+      name: String(w.name ?? id),
+      unit: String(w.unit ?? "од."),
+      rate: Number(w.rate ?? 0),
+    });
+  }
+
+  if (added.length) {
+    obj.works.push(...added);
+
+    await writeEvent({
+      bot,
+      chatId,
+      msgId,
+      date,
+      foremanTgId,
+      objectId: oid,
+      carId: st.carId ?? "",
+      type: "RTS_PLAN_WORKS",
+      payload: { objectId: oid, works: obj.works },
+    });
+  }
+
+  root[foremanTgId] = st;
+  setFlowState(s, FLOW, root);
+
+  await bot.answerCallbackQuery(q.id, {
+    text: added.length ? `✅ Додано ${added.length} робіт зі сторінки` : "✅ Всі роботи зі сторінки вже вибрані",
+    show_alert: false,
+  }).catch(() => {});
+
+  return RoadTimesheetFlow.onCallback!(
+    bot,
+    q,
+    s,
+    `${cb.PLAN_WORK_PAGE}${pageIndex}`,
+  );
 }
 
 if (data.startsWith(cb.PLAN_WORK_ALL_CAT)) {

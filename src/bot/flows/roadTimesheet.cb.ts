@@ -69,6 +69,7 @@ export const cb = {
   PLAN_WORK: `${PREFIX}plan_work:`,
   PLAN_WORK_CAT: `${PREFIX}plan_work_cat:`,
   PLAN_WORK_PAGE: `${PREFIX}plan_work_page:`,
+  PLAN_WORK_PAGE_SELECT_ALL: `${PREFIX}plan_work_page_select_all`,
   PLAN_WORK_ALL_CAT: `${PREFIX}plan_work_all_cat:`,
   PLAN_WORKS_DONE: `${PREFIX}plan_works_done`,
   PLAN_ASSIGN_MENU: `${PREFIX}plan_assign_menu`,
