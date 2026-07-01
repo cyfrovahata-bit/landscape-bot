@@ -39,7 +39,9 @@ roadTimesheetRouter.post("/photo", upload.single("photo"), async (req, res) => {
 
 // A work session: an employee was dropped at an object and (usually) later picked back up.
 type WorkSession = { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string };
-type WorkInput = { workId: string; workName: string; volume?: string | number };
+// employeeIds: who was specifically assigned to this work (so it's visible who did what,
+// not just that the object had some work done) -- stored in the event payload for record.
+type WorkInput = { workId: string; workName: string; volume?: string | number; employeeIds?: string[] };
 // disciplineCoef/productivityCoef default to 1.0, same as the bot -- the foreman can
 // adjust them per employee per object (affects only how the *worker* share of the
 // object's payroll fund is split between workers, not the fund total itself).
@@ -89,6 +91,18 @@ roadTimesheetRouter.post("/", async (req, res) => {
   }
 
   const foremanTgId = req.user!.tgId;
+
+  // Enforce the car reservation server-side too, not just as a UI hint: a car
+  // already started by a different foreman today can't be double-booked.
+  const existingForCar = await db
+    .select()
+    .from(schema.odometerDays)
+    .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
+  const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+  if (takenBySomeoneElse) {
+    res.status(409).json({ error: "Це авто вже зарезервоване іншим бригадиром на сьогодні" });
+    return;
+  }
 
   const { km, tripClass } = await writeOdometerDay({
     date,
@@ -259,6 +273,27 @@ roadTimesheetRouter.post("/", async (req, res) => {
     brigadierEmployeeId,
     seniorEmployeeIds,
   });
+});
+
+/**
+ * GET /api/road-timesheet/car-status?date=YYYY-MM-DD — which cars are
+ * already taken for the day (someone already recorded a start odometer
+ * for them) so PICK_CAR can stop two foremen picking the same car.
+ */
+roadTimesheetRouter.get("/car-status", async (req, res) => {
+  const date = String(req.query.date || "");
+  if (!date) {
+    res.status(400).json({ error: "date query param is required" });
+    return;
+  }
+
+  const rows = await db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date));
+  const myTgId = req.user!.tgId;
+  const taken = rows
+    .filter((r) => Number(r.foremanTgId) !== myTgId)
+    .map((r) => ({ carId: r.carId, foremanTgId: String(r.foremanTgId) }));
+
+  res.json({ taken });
 });
 
 /** GET /api/road-timesheet/today?date=YYYY-MM-DD — for the review screen. */
