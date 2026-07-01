@@ -8,10 +8,15 @@ import {
   writeReports,
   writeTimesheetRows,
   writeDayStatus,
+  writeAllowanceRows,
   makeEventId,
   uploadPhotoFromBuffer,
+  pickBrigadierFromRiders,
+  pickSeniorsFromRiders,
+  buildSalaryPacksWithRoles,
+  DEFAULT_ROAD_ALLOWANCE_BY_CLASS,
 } from "@landscape/core";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 export const roadTimesheetRouter = Router();
 
@@ -35,7 +40,17 @@ roadTimesheetRouter.post("/photo", upload.single("photo"), async (req, res) => {
 // A work session: an employee was dropped at an object and (usually) later picked back up.
 type WorkSession = { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string };
 type WorkInput = { workId: string; workName: string; volume?: string | number };
-type ObjectInput = { objectId: string; objectName: string; works: WorkInput[]; sessions: WorkSession[] };
+// disciplineCoef/productivityCoef default to 1.0, same as the bot -- the foreman can
+// adjust them per employee per object (affects only how the *worker* share of the
+// object's payroll fund is split between workers, not the fund total itself).
+type CoefInput = { employeeId: string; disciplineCoef?: number; productivityCoef?: number };
+type ObjectInput = {
+  objectId: string;
+  objectName: string;
+  works: WorkInput[];
+  sessions: WorkSession[];
+  coefs?: CoefInput[];
+};
 
 /**
  * POST /api/road-timesheet — final save for the day, submitted once the
@@ -84,6 +99,24 @@ roadTimesheetRouter.post("/", async (req, res) => {
     endValue: odoEnd,
     endPhoto: odoEndPhoto,
   });
+
+  // Needed to compute payroll: work tariffs (objectTotal = Sum(volume * tariff))
+  // and employee position/active (to find the trip's brigadier/seniors), exactly
+  // like the bot's roleFromPosition / isBrigadier / isSenior checks.
+  const allWorkIds = [...new Set(objects.flatMap((o) => (o.works ?? []).map((w) => w.workId)))];
+  const [workRows, employeeRows] = await Promise.all([
+    allWorkIds.length ? db.select().from(schema.works).where(inArray(schema.works.id, allWorkIds)) : Promise.resolve([]),
+    employeeIds?.length ? db.select().from(schema.employees).where(inArray(schema.employees.id, employeeIds)) : Promise.resolve([]),
+  ]);
+  const tariffByWorkId = new Map(workRows.map((w) => [w.id, w.tariff]));
+  const employeeById = new Map(employeeRows.map((e) => [e.id, { name: e.name, position: e.position, active: e.active }]));
+
+  const payrollObjectInputs: Array<{
+    objectId: string;
+    objectName: string;
+    objectTotal: number;
+    rows: Array<{ employeeId: string; employeeName: string; hours: number; disciplineCoef: number; productivityCoef: number }>;
+  }> = [];
 
   for (const obj of objects) {
     if (obj.works?.length) {
@@ -140,6 +173,69 @@ roadTimesheetRouter.post("/", async (req, res) => {
       hasOdoStart: odoStart !== undefined,
       hasOdoEnd: odoEnd !== undefined,
     });
+
+    // objectTotal = Sum(volume * tariff) across the works actually done at this
+    // object -- matches computeWorkMoneyFromRts + workTotalsByObject in the bot
+    // (their per-employee split algebraically cancels back out to this sum).
+    const objectTotal = (obj.works ?? []).reduce((acc, w) => {
+      const vol = Number(w.volume);
+      const tariff = tariffByWorkId.get(w.workId) ?? 0;
+      return acc + (Number.isFinite(vol) ? vol : 0) * tariff;
+    }, 0);
+
+    const coefByEmployee = new Map((obj.coefs ?? []).map((c) => [c.employeeId, c]));
+    payrollObjectInputs.push({
+      objectId: obj.objectId,
+      objectName: obj.objectName,
+      objectTotal,
+      rows: [...hoursByEmployee.entries()].map(([employeeId, v]) => ({
+        employeeId,
+        employeeName: v.name,
+        hours: v.ms / 3_600_000,
+        disciplineCoef: coefByEmployee.get(employeeId)?.disciplineCoef ?? 1,
+        productivityCoef: coefByEmployee.get(employeeId)?.productivityCoef ?? 1,
+      })),
+    });
+  }
+
+  // Payroll split (display-only, same as the bot: it's computed on demand for
+  // review/accounting, not written back as its own sheet rows).
+  const brigadierEmployeeId = pickBrigadierFromRiders(employeeIds ?? [], employeeById);
+  const seniorEmployeeIds = pickSeniorsFromRiders(employeeIds ?? [], employeeById);
+  const salaryPacks = buildSalaryPacksWithRoles({
+    objects: payrollObjectInputs,
+    brigadierEmployeeId,
+    seniorEmployeeIds,
+  });
+
+  // Road allowance: a fixed per-trip amount by trip class, split evenly among
+  // everyone who rode along (not just those who worked), written as its own
+  // ROAD_TRIP allowance row per rider -- matches the bot exactly.
+  const settingRows = await db
+    .select()
+    .from(schema.settings)
+    .where(eq(schema.settings.key, `ROAD_ALLOWANCE_${tripClass}`));
+  const roadAllowanceTotal =
+    settingRows.length && Number.isFinite(Number(settingRows[0].value))
+      ? Number(settingRows[0].value)
+      : DEFAULT_ROAD_ALLOWANCE_BY_CLASS[tripClass as "S" | "M" | "L" | "XL"];
+  const riders = employeeIds ?? [];
+  const perPerson = riders.length ? roadAllowanceTotal / riders.length : 0;
+
+  if (riders.length) {
+    await writeAllowanceRows(
+      riders.map((employeeId) => ({
+        date,
+        foremanTgId,
+        type: "ROAD_TRIP",
+        employeeId,
+        employeeName: employeeById.get(employeeId)?.name ?? employeeId,
+        objectId: "ROAD",
+        amount: Math.round(perPerson * 100) / 100,
+        meta: JSON.stringify({ km, tripClass, carId }),
+        dayStatus: "ЧЕРНЕТКА",
+      })),
+    );
   }
 
   const eventId = makeEventId("RTS");
@@ -151,10 +247,18 @@ roadTimesheetRouter.post("/", async (req, res) => {
     type: "RTS_SAVE",
     carId,
     employeeIds: JSON.stringify(employeeIds ?? []),
-    payload: JSON.stringify({ odoStart, odoEnd, km, tripClass, objects }),
+    payload: JSON.stringify({ odoStart, odoEnd, km, tripClass, objects, salaryPacks, roadAllowance: { total: roadAllowanceTotal, perPerson } }),
   });
 
-  res.json({ eventId, km, tripClass });
+  res.json({
+    eventId,
+    km,
+    tripClass,
+    salaryPacks,
+    roadAllowance: { total: roadAllowanceTotal, perPerson: Math.round(perPerson * 100) / 100 },
+    brigadierEmployeeId,
+    seniorEmployeeIds,
+  });
 });
 
 /** GET /api/road-timesheet/today?date=YYYY-MM-DD — for the review screen. */

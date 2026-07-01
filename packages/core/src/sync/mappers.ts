@@ -216,7 +216,10 @@ export async function readAllowances() {
   return data
     .map((row) => ({
       date: getCell(row, map, ALLOWANCES_HEADERS.date),
-      objectId: getCell(row, map, ALLOWANCES_HEADERS.objectId) || null,
+      // Kept as "" rather than null: it's part of the upsert key (mirroring the
+      // bot's ALLOWANCES upsert key), and Postgres unique indexes treat NULL as
+      // distinct from NULL, which would break de-duplication on resync.
+      objectId: getCell(row, map, ALLOWANCES_HEADERS.objectId),
       foremanTgId: toBigIntOrNull(getCell(row, map, ALLOWANCES_HEADERS.foremanTgId)) ?? BigInt(0),
       type: getCell(row, map, ALLOWANCES_HEADERS.type),
       employeeId: getCell(row, map, ALLOWANCES_HEADERS.employeeId),

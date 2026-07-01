@@ -176,7 +176,7 @@ export const allowances = pgTable(
   {
     id: serial("id").primaryKey(),
     date: text("date").notNull(),
-    objectId: text("object_id"),
+    objectId: text("object_id").notNull().default(""),
     foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).notNull(),
     type: text("type").notNull(),
     employeeId: text("employee_id").notNull(),
@@ -188,7 +188,16 @@ export const allowances = pgTable(
   },
   (t) => [
     index("allowances_date_idx").on(t.date),
-    uniqueIndex("allowances_date_employee_type_uq").on(t.date, t.employeeId, t.type),
+    // Mirrors the bot's upsert key exactly (apps/bot/.../working.ts upsertAllowanceRow):
+    // date + foremanTgId + type + employeeId + objectId. objectId is "" (not null) for
+    // trip-level allowances like ROAD_TRIP, so it's safe to include in a unique index.
+    uniqueIndex("allowances_date_foreman_type_employee_object_uq").on(
+      t.date,
+      t.foremanTgId,
+      t.type,
+      t.employeeId,
+      t.objectId,
+    ),
   ],
 );
 

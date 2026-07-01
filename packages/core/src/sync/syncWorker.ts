@@ -90,8 +90,8 @@ export async function runSyncCycle() {
   await upsertBatch(
     schema.allowances,
     await sheets.readAllowances(),
-    [schema.allowances.date, schema.allowances.employeeId, schema.allowances.type],
-    ["objectId", "foremanTgId", "employeeName", "amount", "meta", "dayStatus"],
+    [schema.allowances.date, schema.allowances.foremanTgId, schema.allowances.type, schema.allowances.employeeId, schema.allowances.objectId],
+    ["employeeName", "amount", "meta", "dayStatus"],
   );
 
   await upsertBatch(

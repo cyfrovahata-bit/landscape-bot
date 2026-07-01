@@ -22,6 +22,13 @@
       "when": 1782910159247,
       "tag": "0002_past_speedball",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782925381629,
+      "tag": "0003_chief_aqueduct",
+      "breakpoints": true
     }
   ]
 }

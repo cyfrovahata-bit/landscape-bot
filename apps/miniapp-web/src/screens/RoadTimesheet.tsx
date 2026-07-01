@@ -22,13 +22,74 @@ type Step =
 type ObjWork = { workId: string; workName: string; volume: string };
 // A work session: an employee dropped at this object, and (once picked back up) how long they were there.
 type Session = { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string };
-type ObjPlan = { objectId: string; objectName: string; works: ObjWork[]; sessions: Session[] };
+// disciplineCoef/productivityCoef: per-employee-per-object multipliers (default 1.0), same
+// as the bot -- they only affect how a worker's *share* of the object's fund is split against
+// the other workers there, not brigadier/senior shares or the fund total.
+type Coef = { employeeId: string; disciplineCoef: number; productivityCoef: number };
+type ObjPlan = { objectId: string; objectName: string; works: ObjWork[]; sessions: Session[]; coefs: Coef[] };
+
+type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
+type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; rows: SalaryRow[] };
+type SaveResult = {
+  km: number;
+  tripClass: string;
+  salaryPacks: SalaryPack[];
+  roadAllowance: { total: number; perPerson: number };
+  brigadierEmployeeId: string;
+  seniorEmployeeIds: string[];
+};
 
 function fmtElapsed(fromISO: string) {
   const ms = Date.now() - new Date(fromISO).getTime();
   const mins = Math.max(0, Math.round(ms / 60000));
   if (mins < 60) return `${mins} хв`;
   return `${Math.floor(mins / 60)} год ${mins % 60} хв`;
+}
+
+// Mirrors the bot's brigade grouping for the people picker (roadTimesheet.domain.ts
+// getPeopleBrigadeGroups): group by brigadeId, title the group after its brigadier's
+// position text, "Без бригади" (no brigade) last.
+function groupByBrigade(employees: Employee[]) {
+  const NO_BRIGADE = "__NO_BRIGADE__";
+  const byBrigade = new Map<string, Employee[]>();
+  for (const e of employees) {
+    const id = e.brigadeId?.trim() || NO_BRIGADE;
+    const list = byBrigade.get(id) ?? [];
+    list.push(e);
+    byBrigade.set(id, list);
+  }
+
+  const groups = [...byBrigade.entries()].map(([id, members]) => {
+    const leader = members.find((e) => e.position?.trim().toLowerCase().startsWith("бригадир"));
+    const title =
+      id === NO_BRIGADE
+        ? "Без бригади"
+        : leader
+          ? leader.position!.replace(/^бригадир\s*/i, "").trim() || leader.position!
+          : id;
+    return { id, title, members: [...members].sort((a, b) => a.name.localeCompare(b.name)) };
+  });
+
+  return groups.sort((a, b) => {
+    if (a.id === NO_BRIGADE) return 1;
+    if (b.id === NO_BRIGADE) return -1;
+    return a.title.localeCompare(b.title);
+  });
+}
+
+// Mirrors the bot's category grouping for the works picker (roadTimesheet.domain.ts
+// workCategoryOf/getWorkCategories) -- with 600+ works, a flat list is unusable.
+function groupByCategory(works: Work[]) {
+  const map = new Map<string, Work[]>();
+  for (const w of works) {
+    const cat = w.category?.trim() || "Без категорії";
+    const list = map.get(cat) ?? [];
+    list.push(w);
+    map.set(cat, list);
+  }
+  return [...map.entries()]
+    .map(([category, items]) => ({ category, items: items.sort((a, b) => a.name.localeCompare(b.name)) }))
+    .sort((a, b) => a.category.localeCompare(b.category));
 }
 
 export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved: () => void }) {
@@ -50,6 +111,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [employeeIds, setEmployeeIds] = useState<string[]>([]);
   const [plans, setPlans] = useState<ObjPlan[]>([]);
   const [openObjectId, setOpenObjectId] = useState<string | null>(null);
+  const [openCategory, setOpenCategory] = useState<string | null>(null);
 
   // Who is currently physically in the car during the drive.
   const [onboard, setOnboard] = useState<string[]>([]);
@@ -58,7 +120,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ km: number; tripClass: string } | null>(null);
+  const [result, setResult] = useState<SaveResult | null>(null);
 
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
@@ -90,7 +152,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setPlans((prev) => {
       const exists = prev.find((p) => p.objectId === obj.id);
       if (exists) return prev.filter((p) => p.objectId !== obj.id);
-      return [...prev, { objectId: obj.id, objectName: obj.name, works: [], sessions: [] }];
+      return [...prev, { objectId: obj.id, objectName: obj.name, works: [], sessions: [], coefs: [] }];
     });
   }
 
@@ -111,6 +173,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function setVolume(objectId: string, workId: string, volume: string) {
     setPlans((prev) =>
       prev.map((p) => (p.objectId !== objectId ? p : { ...p, works: p.works.map((w) => (w.workId === workId ? { ...w, volume } : w)) })),
+    );
+  }
+
+  function coefFor(plan: ObjPlan, employeeId: string): Coef {
+    return plan.coefs.find((c) => c.employeeId === employeeId) ?? { employeeId, disciplineCoef: 1, productivityCoef: 1 };
+  }
+
+  function setCoef(objectId: string, employeeId: string, patch: Partial<Coef>) {
+    setPlans((prev) =>
+      prev.map((p) => {
+        if (p.objectId !== objectId) return p;
+        const existing = p.coefs.find((c) => c.employeeId === employeeId);
+        const next = { ...(existing ?? { employeeId, disciplineCoef: 1, productivityCoef: 1 }), ...patch };
+        return { ...p, coefs: existing ? p.coefs.map((c) => (c.employeeId === employeeId ? next : c)) : [...p.coefs, next] };
+      }),
     );
   }
 
@@ -180,7 +257,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setSaving(true);
     setError(null);
     try {
-      const res = await api.post<{ km: number; tripClass: string }>("/api/road-timesheet", {
+      const res = await api.post<SaveResult>("/api/road-timesheet", {
         date: todayISO(),
         carId,
         odoStart: Number(odoStart),
@@ -193,6 +270,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           objectName: p.objectName,
           works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?" })),
           sessions: p.sessions,
+          coefs: p.coefs,
         })),
       });
       setResult(res);
@@ -211,9 +289,44 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <div className="header">
           <h1>✅ День збережено</h1>
         </div>
-        <div className="empty-state">
-          Поїздка: {result.km} км · клас {result.tripClass}
+        <div className="list">
+          <div className="cell">
+            <span className="cell-title">🚙 Поїздка</span>
+            <span className="cell-sub">
+              {result.km} км · клас {result.tripClass}
+            </span>
+          </div>
+          <div className="cell">
+            <span className="cell-title">💸 Доплата за виїзд</span>
+            <span className="cell-sub">{result.roadAllowance.perPerson} грн/особу</span>
+          </div>
         </div>
+
+        {result.brigadierEmployeeId && (
+          <div className="hint" style={{ padding: "8px 16px" }}>
+            Бригадир поїздки: {employeeName(result.brigadierEmployeeId)}
+            {result.seniorEmployeeIds.length > 0 && ` · Старші: ${result.seniorEmployeeIds.map(employeeName).join(", ")}`}
+          </div>
+        )}
+
+        <div className="section-title">Фонд по обʼєктах</div>
+        {result.salaryPacks.map((pack) => (
+          <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
+            <div className="cell" style={{ cursor: "default" }}>
+              <span className="cell-title">📍 {pack.objectName}</span>
+              <span className="badge ok">{pack.objectTotal} грн</span>
+            </div>
+            <div style={{ padding: "0 16px 12px" }} className="hint">
+              {pack.rows.map((r) => (
+                <div key={r.employeeId}>
+                  {r.employeeName}: {r.pay} грн
+                </div>
+              ))}
+              {!pack.rows.length && "— без нарахувань —"}
+            </div>
+          </div>
+        ))}
+
         <MainButton text="До меню" onClick={onBack} />
       </div>
     );
@@ -284,18 +397,22 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
       {step === "PICK_PEOPLE" && (
         <>
-          <div className="section-title">Люди в поїздці</div>
-          <div className="chip-row">
-            {employees.map((emp) => (
-              <div
-                key={emp.id}
-                className={`chip ${employeeIds.includes(emp.id) ? "selected" : ""}`}
-                onClick={() => setEmployeeIds((prev) => (prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id]))}
-              >
-                {emp.name}
+          {groupByBrigade(employees).map((group) => (
+            <div key={group.id}>
+              <div className="section-title">{group.title}</div>
+              <div className="chip-row">
+                {group.members.map((emp) => (
+                  <div
+                    key={emp.id}
+                    className={`chip ${employeeIds.includes(emp.id) ? "selected" : ""}`}
+                    onClick={() => setEmployeeIds((prev) => (prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id]))}
+                  >
+                    {emp.name}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
           <MainButton text="Далі" onClick={() => setStep("PICK_OBJECTS")} disabled={!employeeIds.length} />
         </>
       )}
@@ -329,19 +446,35 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               {openObjectId === plan.objectId && (
                 <div style={{ padding: "0 16px 16px" }}>
                   <div className="section-title" style={{ padding: "8px 0" }}>
-                    Обери роботи
+                    Обери роботи (по категоріях)
                   </div>
-                  <div className="chip-row" style={{ padding: 0 }}>
-                    {works.map((w) => (
-                      <div
-                        key={w.id}
-                        className={`chip ${plan.works.some((pw) => pw.workId === w.id) ? "selected" : ""}`}
-                        onClick={() => toggleWork(plan.objectId, w)}
-                      >
-                        {w.name}
+                  {groupByCategory(works).map((group) => {
+                    const selectedInGroup = group.items.filter((w) => plan.works.some((pw) => pw.workId === w.id)).length;
+                    const catKey = `${plan.objectId}::${group.category}`;
+                    return (
+                      <div key={group.category} className="list" style={{ margin: "6px 0" }}>
+                        <button className="cell" onClick={() => setOpenCategory(openCategory === catKey ? null : catKey)}>
+                          <span className="cell-title">📁 {group.category}</span>
+                          <span className={`badge ${selectedInGroup ? "ok" : ""}`}>
+                            {selectedInGroup}/{group.items.length}
+                          </span>
+                        </button>
+                        {openCategory === catKey && (
+                          <div className="chip-row">
+                            {group.items.map((w) => (
+                              <div
+                                key={w.id}
+                                className={`chip ${plan.works.some((pw) => pw.workId === w.id) ? "selected" : ""}`}
+                                onClick={() => toggleWork(plan.objectId, w)}
+                              >
+                                {w.name}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })}
 
                   {plan.works.length > 0 && (
                     <>
@@ -500,30 +633,63 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           </div>
 
-          {plans.map((plan) => (
-            <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
-              <div className="cell" style={{ cursor: "default" }}>
-                <span className="cell-title">📍 {plan.objectName}</span>
-              </div>
-              <div style={{ padding: "0 16px 12px" }} className="hint">
-                {plan.works.map((w) => (
-                  <div key={w.workId}>
-                    {w.workName}: {w.volume || "?"}
-                  </div>
-                ))}
-                {[...new Set(plan.sessions.map((s) => s.employeeId))].map((empId) => {
-                  const totalMs = plan.sessions
-                    .filter((s) => s.employeeId === empId)
-                    .reduce((acc, s) => acc + (new Date(s.pickedUpAt ?? new Date().toISOString()).getTime() - new Date(s.droppedAt).getTime()), 0);
-                  return (
-                    <div key={empId}>
-                      {employeeName(empId)}: {Math.round((totalMs / 3_600_000) * 100) / 100} год
+          {plans.map((plan) => {
+            const workedEmployeeIds = [...new Set(plan.sessions.map((s) => s.employeeId))];
+            return (
+              <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
+                <div className="cell" style={{ cursor: "default" }}>
+                  <span className="cell-title">📍 {plan.objectName}</span>
+                </div>
+                <div style={{ padding: "0 16px 12px" }} className="hint">
+                  {plan.works.map((w) => (
+                    <div key={w.workId}>
+                      {w.workName}: {w.volume || "?"}
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+
+                {workedEmployeeIds.length > 0 && (
+                  <div style={{ padding: "0 16px 12px" }}>
+                    <div className="section-title" style={{ padding: "0 0 6px" }}>
+                      Коефіцієнти (дисципліна × продуктивність)
+                    </div>
+                    {workedEmployeeIds.map((empId) => {
+                      const totalMs = plan.sessions
+                        .filter((s) => s.employeeId === empId)
+                        .reduce(
+                          (acc, s) => acc + (new Date(s.pickedUpAt ?? new Date().toISOString()).getTime() - new Date(s.droppedAt).getTime()),
+                          0,
+                        );
+                      const coef = coefFor(plan, empId);
+                      return (
+                        <div key={empId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+                          <span style={{ flex: 1, fontSize: 14 }}>
+                            {employeeName(empId)} <span className="hint">({Math.round((totalMs / 3_600_000) * 100) / 100} год)</span>
+                          </span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            style={{ width: 56 }}
+                            value={coef.disciplineCoef}
+                            onChange={(e) => setCoef(plan.objectId, empId, { disciplineCoef: Number(e.target.value) || 1 })}
+                            title="Коефіцієнт дисципліни"
+                          />
+                          <input
+                            type="number"
+                            step="0.1"
+                            style={{ width: 56 }}
+                            value={coef.productivityCoef}
+                            onChange={(e) => setCoef(plan.objectId, empId, { productivityCoef: Number(e.target.value) || 1 })}
+                            title="Коефіцієнт продуктивності"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           <MainButton text={saving ? "Збереження…" : "💾 Зберегти день"} onClick={save} disabled={saving} />
         </>

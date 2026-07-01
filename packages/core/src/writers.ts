@@ -316,6 +316,58 @@ export async function writeDayStatus(row: DayStatusInput) {
   );
 }
 
+export type AllowanceInput = {
+  date: string;
+  objectId?: string; // "" for trip-level allowances like ROAD_TRIP, matches the bot exactly
+  foremanTgId: number;
+  type: string;
+  employeeId: string;
+  employeeName: string;
+  amount: number;
+  meta?: string;
+  dayStatus?: string;
+};
+
+/** Mirrors the bot's upsertAllowanceRow: keyed by date+foremanTgId+type+employeeId+objectId. */
+export async function writeAllowanceRows(rows: AllowanceInput[]) {
+  for (const row of rows) {
+    await upsertRowByKeys(
+      SHEET_NAMES.allowances,
+      {
+        [ALLOWANCES_HEADERS.date]: row.date,
+        [ALLOWANCES_HEADERS.foremanTgId]: row.foremanTgId,
+        [ALLOWANCES_HEADERS.type]: row.type,
+        [ALLOWANCES_HEADERS.employeeId]: row.employeeId,
+        [ALLOWANCES_HEADERS.objectId]: row.objectId ?? "",
+      },
+      {
+        [ALLOWANCES_HEADERS.employeeName]: row.employeeName,
+        [ALLOWANCES_HEADERS.amount]: row.amount,
+        [ALLOWANCES_HEADERS.meta]: row.meta ?? "",
+        [ALLOWANCES_HEADERS.dayStatus]: row.dayStatus ?? "ЧЕРНЕТКА",
+        [ALLOWANCES_HEADERS.updatedAt]: nowISO(),
+      },
+    );
+  }
+
+  await upsertBatch(
+    schema.allowances,
+    rows.map((row) => ({
+      date: row.date,
+      objectId: row.objectId ?? "",
+      foremanTgId: BigInt(row.foremanTgId),
+      type: row.type,
+      employeeId: row.employeeId,
+      employeeName: row.employeeName,
+      amount: row.amount,
+      meta: row.meta ?? null,
+      dayStatus: row.dayStatus ?? "ЧЕРНЕТКА",
+    })),
+    [schema.allowances.date, schema.allowances.foremanTgId, schema.allowances.type, schema.allowances.employeeId, schema.allowances.objectId],
+    ["employeeName", "amount", "meta", "dayStatus"],
+  );
+}
+
 export type MaterialMoveInput = {
   date: string;
   objectId: string;
