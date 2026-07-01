@@ -225,7 +225,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // --- DRIVE / ARRIVE helpers ---
   const unfinishedPlans = plans.filter((p) => !p.finished);
-  const everyoneBack = onboard.length === employeeIds.length;
+  const allObjectsFinished = plans.length > 0 && plans.every((p) => p.finished);
 
   function startDrive() {
     setOnboard(employeeIds);
@@ -656,9 +656,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             ))}
           </div>
 
-          <MainButton text="🛑 Зупинитися" onClick={startArrive} disabled={!unfinishedPlans.length || !onboard.length} />
-          <div style={{ height: 8 }} />
-          <MainButton text="🏁 Повернутися на базу" onClick={() => setStep("ODO_END")} disabled={!everyoneBack} />
+          {allObjectsFinished ? (
+            <MainButton text="🏁 Повернутися на базу" onClick={() => setStep("ODO_END")} />
+          ) : (
+            <MainButton text="🛑 Зупинитися" onClick={startArrive} disabled={!unfinishedPlans.length || !onboard.length} />
+          )}
         </>
       )}
 
