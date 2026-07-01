@@ -3,47 +3,45 @@ import { api, type Car, type Employee, type Work, type WorkObject } from "../lib
 import { todayISO } from "../lib/date";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
+import { NumericKeypad } from "../components/NumericKeypad";
 
-// Mirrors the real day-in-the-life sequence a brigadier uses (refined after
-// watching the actual bot flow): pick car (reserved for the day) -> record
-// start odometer (+optional photo) -> pick people by brigade -> pick route
-// objects by city -> plan which works are expected per object -> drive out ->
-// at each stop: drop people off, assign them to specific planned works, then
-// finish (enter volumes done + per-person coefficients) -> return to base ->
-// record end odometer -> brigadier reviews everything once more -> submit for
-// admin approval.
+// Mirrors the 13-screen mobile mockup exactly (кроки 3.1–3.13):
+// 3.1 старт зміни (дата+бригада) -> 3.2 авто -> 3.3 одометр старт -> 3.4 люди ->
+// 3.5 обʼєкти -> 3.6 планування (роботи + люди на обʼєкт) -> 3.7 вибір робіт "пакет" ->
+// 3.8 обсяги (+3.8 деталь) -> 3.9 готовність -> 3.10 у дорозі -> 3.11 на обʼєкті ->
+// 3.12 повернення -> 3.13 підсумок дня · SAVE.
 type Step =
+  | "START"
   | "PICK_CAR"
   | "ODO_START"
   | "PICK_PEOPLE"
   | "PICK_OBJECTS"
   | "PLAN"
+  | "PLAN_WORKS"
+  | "PLAN_VOLUMES"
   | "READY"
   | "DRIVE"
-  | "ARRIVE"
-  | "ODO_END"
+  | "AT_OBJECT"
+  | "RETURN"
   | "REVIEW"
   | "DONE";
 
-type Coef = { employeeId: string; disciplineCoef: number; productivityCoef: number };
-// A work actually done at an object: who did it and how much of it got done.
-type WorkAssignment = { workId: string; workName: string; employeeIds: string[]; volume: string };
+type PlannedWork = { workId: string; workName: string; unit: string; volume: string };
+type WorkSession = { workId: string; workName: string; employeeIds: string[]; startedAt: string; endedAt?: string };
 type ObjPlan = {
   objectId: string;
   objectName: string;
-  plannedWorkIds: string[]; // chosen before departure -- what's expected here
-  droppedEmployeeIds: string[]; // everyone who was dropped off here over the trip (kept for the record even after finishing)
-  droppedAt?: string;
-  finished: boolean;
-  finishedAt?: string;
-  assignments: WorkAssignment[]; // filled in when finishing work here
-  coefs: Coef[];
+  works: PlannedWork[];
+  assignedEmployeeIds: string[]; // planned during 3.6, before departure
+  here: string[]; // physically dropped off at this object right now
+  sessions: WorkSession[];
+  visited: boolean; // reached via "Прибув на обʼєкт"
 };
 
 type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
 type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; rows: SalaryRow[] };
-type SaveResult = {
-  km: number;
+type PayrollPreview = {
+  km?: number;
   tripClass: string;
   salaryPacks: SalaryPack[];
   roadAllowance: { total: number; perPerson: number };
@@ -51,113 +49,108 @@ type SaveResult = {
   seniorEmployeeIds: string[];
 };
 
-const NO_BRIGADE = "__NO_BRIGADE__";
-const NO_CITY = "__NO_CITY__";
+const UNITS = ["м²", "м", "пог.м", "шт"];
 
-// Mirrors the bot's brigade grouping (roadTimesheet.domain.ts getPeopleBrigadeGroups):
-// group by brigadeId, title after the brigade's own "бригадир", "Без бригади" last.
+function employeeRole(emp: Employee): "бригадир" | "старший" | "робітник" {
+  const pos = (emp.position ?? "").toLowerCase();
+  if (pos.includes("бригадир")) return "бригадир";
+  if (pos.includes("старш")) return "старший";
+  return "робітник";
+}
+
 function groupByBrigade(employees: Employee[]) {
-  const byBrigade = new Map<string, Employee[]>();
+  const NO_BRIGADE = "__NO_BRIGADE__";
+  const map = new Map<string, Employee[]>();
   for (const e of employees) {
     const id = e.brigadeId?.trim() || NO_BRIGADE;
-    const list = byBrigade.get(id) ?? [];
+    const list = map.get(id) ?? [];
     list.push(e);
-    byBrigade.set(id, list);
-  }
-
-  const groups = [...byBrigade.entries()].map(([id, members]) => {
-    const leader = members.find((e) => e.position?.trim().toLowerCase().startsWith("бригадир"));
-    const title =
-      id === NO_BRIGADE
-        ? "Без бригади"
-        : leader
-          ? leader.position!.replace(/^бригадир\s*/i, "").trim() || leader.position!
-          : id;
-    return { id, title, members: [...members].sort((a, b) => a.name.localeCompare(b.name)) };
-  });
-
-  return groups.sort((a, b) => {
-    if (a.id === NO_BRIGADE) return 1;
-    if (b.id === NO_BRIGADE) return -1;
-    return a.title.localeCompare(b.title);
-  });
-}
-
-// Mirrors the bot's category grouping for the works picker.
-function groupByCategory(works: Work[]) {
-  const map = new Map<string, Work[]>();
-  for (const w of works) {
-    const cat = w.category?.trim() || "Без категорії";
-    const list = map.get(cat) ?? [];
-    list.push(w);
-    map.set(cat, list);
+    map.set(id, list);
   }
   return [...map.entries()]
-    .map(([category, items]) => ({ category, items: items.sort((a, b) => a.name.localeCompare(b.name)) }))
-    .sort((a, b) => a.category.localeCompare(b.category));
+    .map(([id, members]) => {
+      const leader = members.find((e) => employeeRole(e) === "бригадир");
+      const title = id === NO_BRIGADE ? "Без бригади" : leader ? leader.position!.replace(/^бригадир\s*/i, "").trim() || leader.position! : id;
+      return { id, title, members: [...members].sort((a, b) => a.name.localeCompare(b.name)) };
+    })
+    .sort((a, b) => (a.id === NO_BRIGADE ? 1 : b.id === NO_BRIGADE ? -1 : a.title.localeCompare(b.title)));
 }
 
-// Mirrors the bot's address grouping (roadTimesheet.domain.ts getObjectAddressGroups).
-function groupByCity(objects: WorkObject[]) {
-  const map = new Map<string, WorkObject[]>();
-  for (const o of objects) {
-    const city = o.address?.trim() || NO_CITY;
-    const list = map.get(city) ?? [];
-    list.push(o);
-    map.set(city, list);
-  }
-  return [...map.entries()]
-    .map(([city, items]) => ({ city, title: city === NO_CITY ? "Без адреси" : city, items: items.sort((a, b) => a.name.localeCompare(b.name)) }))
-    .sort((a, b) => {
-      if (a.city === NO_CITY) return 1;
-      if (b.city === NO_CITY) return -1;
-      return a.title.localeCompare(b.title);
-    });
+function fmtHMS(ms: number) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return [h, m, s].map((n) => String(n).padStart(2, "0")).join(":");
 }
 
-function fmtElapsed(fromISO: string, toISO?: string) {
-  const ms = new Date(toISO ?? new Date().toISOString()).getTime() - new Date(fromISO).getTime();
-  const mins = Math.max(0, Math.round(ms / 60000));
-  if (mins < 60) return `${mins} хв`;
-  return `${Math.floor(mins / 60)} год ${mins % 60} хв`;
+function fmtHours(ms: number) {
+  return Math.round((ms / 3_600_000) * 100) / 100;
 }
 
 export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved: () => void }) {
-  const [step, setStep] = useState<Step>("PICK_CAR");
+  const [step, setStep] = useState<Step>("START");
+  const [now, setNow] = useState(Date.now());
 
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // --- dictionaries ---
   const [cars, setCars] = useState<Car[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [works, setWorks] = useState<Work[]>([]);
   const [objects, setObjects] = useState<WorkObject[]>([]);
+  const [lastOdometer, setLastOdometer] = useState<Record<string, number>>({});
   const [takenCars, setTakenCars] = useState<Map<string, string>>(new Map());
   const [busyEmployees, setBusyEmployees] = useState<Map<string, string>>(new Map());
 
-  const [carId, setCarId] = useState("");
+  // --- 3.1 ---
+  const [date, setDate] = useState(todayISO());
+  const [editingDate, setEditingDate] = useState(false);
+  const [brigadeId, setBrigadeId] = useState<string | null>(null);
 
+  // --- 3.2 / 3.3 ---
+  const [carId, setCarId] = useState("");
   const [odoStart, setOdoStart] = useState("");
   const [odoStartPhoto, setOdoStartPhoto] = useState<string | null>(null);
   const [odoEnd, setOdoEnd] = useState("");
   const [odoEndPhoto, setOdoEndPhoto] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
+  // --- 3.4 / 3.5 ---
   const [employeeIds, setEmployeeIds] = useState<string[]>([]);
-  const [expandedBrigadeId, setExpandedBrigadeId] = useState<string | null>(null);
-  const [expandedCityId, setExpandedCityId] = useState<string | null>(null);
-
+  const [objectSearch, setObjectSearch] = useState("");
   const [plans, setPlans] = useState<ObjPlan[]>([]);
-  const [openObjectId, setOpenObjectId] = useState<string | null>(null);
-  const [openCategory, setOpenCategory] = useState<string | null>(null);
 
-  // Who is currently physically in the car during the drive.
+  // --- 3.6 / 3.7 / 3.8 ---
+  const [planObjectId, setPlanObjectId] = useState<string | null>(null);
+  const [planWorksSearch, setPlanWorksSearch] = useState("");
+  const [planVolumeWorkId, setPlanVolumeWorkId] = useState<string | null>(null);
+  const [volumeBuffer, setVolumeBuffer] = useState("");
+  const [volumeUnit, setVolumeUnit] = useState("");
+  const [assignOpenObjectId, setAssignOpenObjectId] = useState<string | null>(null);
+
+  // --- 3.9 / 3.10 ---
   const [onboard, setOnboard] = useState<string[]>([]);
-  // The stop currently being handled (Зупинитися -> pick object+people -> assign works -> finish).
-  const [arriveObjectId, setArriveObjectId] = useState<string | null>(null);
-  const [arriveDropSelected, setArriveDropSelected] = useState<string[]>([]);
-  const [arriveWorkOpenId, setArriveWorkOpenId] = useState<string | null>(null);
+  const [tripStartedAt, setTripStartedAt] = useState<string | null>(null);
+
+  // --- 3.11 ---
+  const [atObjectId, setAtObjectId] = useState<string | null>(null);
+  const [startingWorkId, setStartingWorkId] = useState<string | null>(null);
+  const [startPeopleSelected, setStartPeopleSelected] = useState<string[]>([]);
+  const [finishingSessionKey, setFinishingSessionKey] = useState<string | null>(null);
+  const [dropSelected, setDropSelected] = useState<string[]>([]);
+  const [showDropPicker, setShowDropPicker] = useState(false);
+  const [moveSelected, setMoveSelected] = useState<string[]>([]);
+  const [moveTargetId, setMoveTargetId] = useState<string | null>(null);
+  const [showMovePicker, setShowMovePicker] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<SaveResult | null>(null);
+  const [result, setResult] = useState<(PayrollPreview & { eventId: string }) | null>(null);
+  const [preview, setPreview] = useState<PayrollPreview | null>(null);
 
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
@@ -165,14 +158,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     api.get<Work[]>("/api/dictionaries/works").then(setWorks).catch((e) => setError(e.message));
     api.get<WorkObject[]>("/api/dictionaries/objects").then(setObjects).catch((e) => setError(e.message));
     api
-      .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${todayISO()}`)
+      .get<{ lastOdometer: Record<string, number> }>("/api/road-timesheet/cars-last-odometer")
+      .then((res) => setLastOdometer(res.lastOdometer))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api
+      .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${date}`)
       .then((res) => setTakenCars(new Map(res.taken.map((t) => [t.carId, t.foremanName]))))
       .catch(() => {});
     api
-      .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${todayISO()}`)
+      .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${date}`)
       .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
       .catch(() => {});
-  }, []);
+  }, [date]);
 
   function employeeName(id: string) {
     return employees.find((e) => e.id === id)?.name ?? id;
@@ -192,148 +192,233 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
   }
 
-  // --- PICK_OBJECTS helpers ---
+  // ---------- 3.4 people helpers ----------
+  function toggleEmployee(id: string) {
+    if (busyEmployees.has(id)) return;
+    setEmployeeIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  // ---------- 3.5 objects helpers ----------
   function toggleRouteObject(obj: WorkObject) {
     setPlans((prev) => {
       const exists = prev.find((p) => p.objectId === obj.id);
       if (exists) return prev.filter((p) => p.objectId !== obj.id);
-      return [
-        ...prev,
-        { objectId: obj.id, objectName: obj.name, plannedWorkIds: [], droppedEmployeeIds: [], finished: false, assignments: [], coefs: [] },
-      ];
+      return [...prev, { objectId: obj.id, objectName: obj.name, works: [], assignedEmployeeIds: [], here: [], sessions: [], visited: false }];
     });
   }
 
-  // --- PLAN helpers ---
-  function toggleWork(objectId: string, work: Work) {
+  // ---------- 3.6 plan helpers ----------
+  function planFor(objectId: string) {
+    return plans.find((p) => p.objectId === objectId)!;
+  }
+
+  function toggleAssigned(objectId: string, employeeId: string) {
     setPlans((prev) =>
       prev.map((p) => {
         if (p.objectId !== objectId) return p;
-        const has = p.plannedWorkIds.includes(work.id);
-        return { ...p, plannedWorkIds: has ? p.plannedWorkIds.filter((id) => id !== work.id) : [...p.plannedWorkIds, work.id] };
+        const has = p.assignedEmployeeIds.includes(employeeId);
+        return { ...p, assignedEmployeeIds: has ? p.assignedEmployeeIds.filter((x) => x !== employeeId) : [...p.assignedEmployeeIds, employeeId] };
       }),
     );
   }
 
-  function selectWholeCategory(objectId: string, categoryWorks: Work[]) {
-    setPlans((prev) =>
-      prev.map((p) => (p.objectId !== objectId ? p : { ...p, plannedWorkIds: [...new Set([...p.plannedWorkIds, ...categoryWorks.map((w) => w.id)])] })),
-    );
-  }
-
-  const missingPlanCount = plans.filter((p) => !p.plannedWorkIds.length).length;
-
-  // --- DRIVE / ARRIVE helpers ---
-  const unfinishedPlans = plans.filter((p) => !p.finished);
-  const allObjectsFinished = plans.length > 0 && plans.every((p) => p.finished);
-
-  function startDrive() {
-    setOnboard(employeeIds);
-    setStep("DRIVE");
-  }
-
-  function startArrive() {
-    setArriveObjectId(null);
-    setArriveDropSelected([]);
-    setArriveWorkOpenId(null);
-    setStep("ARRIVE");
-  }
-
-  function confirmDrop() {
-    if (!arriveObjectId || !arriveDropSelected.length) return;
-    const now = new Date().toISOString();
-    setPlans((prev) =>
-      prev.map((p) => (p.objectId !== arriveObjectId ? p : { ...p, droppedEmployeeIds: arriveDropSelected, droppedAt: now })),
-    );
-    setOnboard((prev) => prev.filter((id) => !arriveDropSelected.includes(id)));
-  }
-
-  function currentArrivePlan() {
-    return plans.find((p) => p.objectId === arriveObjectId) ?? null;
-  }
-
-  function toggleWorkAssignee(workId: string, workName: string, employeeId: string) {
-    if (!arriveObjectId) return;
+  // ---------- 3.7 works helpers ----------
+  function toggleWork(objectId: string, work: Work) {
     setPlans((prev) =>
       prev.map((p) => {
-        if (p.objectId !== arriveObjectId) return p;
-        const existing = p.assignments.find((a) => a.workId === workId);
-        if (!existing) {
-          return { ...p, assignments: [...p.assignments, { workId, workName, employeeIds: [employeeId], volume: "" }] };
-        }
-        const has = existing.employeeIds.includes(employeeId);
-        const nextEmployeeIds = has ? existing.employeeIds.filter((id) => id !== employeeId) : [...existing.employeeIds, employeeId];
+        if (p.objectId !== objectId) return p;
+        const has = p.works.some((w) => w.workId === work.id);
         return {
           ...p,
-          assignments: nextEmployeeIds.length
-            ? p.assignments.map((a) => (a.workId === workId ? { ...a, employeeIds: nextEmployeeIds } : a))
-            : p.assignments.filter((a) => a.workId !== workId),
+          works: has
+            ? p.works.filter((w) => w.workId !== work.id)
+            : [...p.works, { workId: work.id, workName: work.name, unit: work.unit || "шт", volume: "" }],
         };
       }),
     );
   }
 
-  function setAssignmentVolume(workId: string, volume: string) {
-    if (!arriveObjectId) return;
+  // ---------- 3.8 volume helpers ----------
+  function openVolumeDetail(objectId: string, work: PlannedWork) {
+    setPlanObjectId(objectId);
+    setPlanVolumeWorkId(work.workId);
+    setVolumeBuffer(work.volume && work.volume !== "?" ? work.volume : "");
+    setVolumeUnit(work.unit);
+  }
+
+  function saveVolumeDetail(deferred: boolean) {
+    if (!planObjectId || !planVolumeWorkId) return;
     setPlans((prev) =>
       prev.map((p) =>
-        p.objectId !== arriveObjectId ? p : { ...p, assignments: p.assignments.map((a) => (a.workId === workId ? { ...a, volume } : a)) },
+        p.objectId !== planObjectId
+          ? p
+          : {
+              ...p,
+              works: p.works.map((w) =>
+                w.workId !== planVolumeWorkId ? w : { ...w, volume: deferred ? "?" : volumeBuffer, unit: volumeUnit || w.unit },
+              ),
+            },
       ),
     );
+    setPlanVolumeWorkId(null);
   }
 
-  function setArriveCoef(employeeId: string, patch: Partial<Coef>) {
-    if (!arriveObjectId) return;
+  function applyBulkVolume(objectId: string, value: string) {
     setPlans((prev) =>
-      prev.map((p) => {
-        if (p.objectId !== arriveObjectId) return p;
-        const existing = p.coefs.find((c) => c.employeeId === employeeId);
-        const next = { ...(existing ?? { employeeId, disciplineCoef: 1, productivityCoef: 1 }), ...patch };
-        return { ...p, coefs: existing ? p.coefs.map((c) => (c.employeeId === employeeId ? next : c)) : [...p.coefs, next] };
-      }),
+      prev.map((p) => (p.objectId !== objectId ? p : { ...p, works: p.works.map((w) => (w.volume ? w : { ...w, volume: value })) })),
     );
   }
 
-  function coefFor(plan: ObjPlan, employeeId: string): Coef {
-    return plan.coefs.find((c) => c.employeeId === employeeId) ?? { employeeId, disciplineCoef: 1, productivityCoef: 1 };
+  // ---------- 3.9 -> 3.10 ----------
+  function startDrive() {
+    setOnboard(employeeIds);
+    setTripStartedAt(new Date().toISOString());
+    setStep("DRIVE");
   }
 
-  function finishArriveObject() {
-    if (!arriveObjectId) return;
-    const now = new Date().toISOString();
-    const plan = currentArrivePlan();
-    if (plan) setOnboard((prev) => [...new Set([...prev, ...plan.droppedEmployeeIds])]);
-    setPlans((prev) => prev.map((p) => (p.objectId !== arriveObjectId ? p : { ...p, finished: true, finishedAt: now })));
-    setArriveObjectId(null);
-    setArriveDropSelected([]);
-    setArriveWorkOpenId(null);
-    setStep("DRIVE");
+  const nextUnvisited = plans.find((p) => !p.visited) ?? null;
+
+  function arriveAtObject() {
+    if (!nextUnvisited) return;
+    setPlans((prev) => prev.map((p) => (p.objectId !== nextUnvisited.objectId ? p : { ...p, visited: true })));
+    setAtObjectId(nextUnvisited.objectId);
+    setStep("AT_OBJECT");
+  }
+
+  // ---------- 3.11 at object ----------
+  function currentAtPlan() {
+    return plans.find((p) => p.objectId === atObjectId) ?? null;
+  }
+
+  function runningSession(plan: ObjPlan) {
+    return plan.sessions.find((s) => !s.endedAt) ?? null;
+  }
+
+  function confirmStartWork() {
+    if (!atObjectId || !startingWorkId || !startPeopleSelected.length) return;
+    const plan = currentAtPlan()!;
+    const work = plan.works.find((w) => w.workId === startingWorkId)!;
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== atObjectId
+          ? p
+          : {
+              ...p,
+              sessions: [
+                ...p.sessions,
+                { workId: work.workId, workName: work.workName, employeeIds: startPeopleSelected, startedAt: new Date().toISOString() },
+              ],
+            },
+      ),
+    );
+    setStartingWorkId(null);
+    setStartPeopleSelected([]);
+  }
+
+  function confirmFinishWork() {
+    if (!atObjectId || !finishingSessionKey) return;
+    const endedAt = new Date().toISOString();
+    let finishedWorkId = "";
+    setPlans((prev) =>
+      prev.map((p) => {
+        if (p.objectId !== atObjectId) return p;
+        return {
+          ...p,
+          sessions: p.sessions.map((s) => {
+            const key = `${s.workId}#${s.startedAt}`;
+            if (key !== finishingSessionKey) return s;
+            finishedWorkId = s.workId;
+            return { ...s, endedAt };
+          }),
+        };
+      }),
+    );
+    setFinishingSessionKey(null);
+    // If that work's volume isn't filled yet, prompt for it right away.
+    const plan = currentAtPlan()!;
+    const work = plan.works.find((w) => w.workId === finishedWorkId);
+    if (work && (!work.volume || work.volume === "?")) {
+      openVolumeDetail(atObjectId, work);
+      setStep("PLAN_VOLUMES");
+    }
+  }
+
+  function confirmDrop() {
+    if (!atObjectId || !dropSelected.length) return;
+    setPlans((prev) => prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, here: [...new Set([...p.here, ...dropSelected])] })));
+    setOnboard((prev) => prev.filter((id) => !dropSelected.includes(id)));
+    setDropSelected([]);
+    setShowDropPicker(false);
+  }
+
+  function confirmMove() {
+    if (!atObjectId || !moveTargetId || !moveSelected.length) return;
+    setPlans((prev) =>
+      prev.map((p) => {
+        if (p.objectId === atObjectId) return { ...p, here: p.here.filter((id) => !moveSelected.includes(id)) };
+        if (p.objectId === moveTargetId) return { ...p, here: [...new Set([...p.here, ...moveSelected])] };
+        return p;
+      }),
+    );
+    setMoveSelected([]);
+    setMoveTargetId(null);
+    setShowMovePicker(false);
+  }
+
+  // ---------- 3.12 return ----------
+  function pickUpHere(objectId: string) {
+    const plan = planFor(objectId);
+    setOnboard((prev) => [...new Set([...prev, ...plan.here])]);
+    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, here: [] })));
+  }
+
+  const allBack = onboard.length === employeeIds.length;
+
+  // ---------- payload / save ----------
+  function buildObjectsPayload() {
+    return plans.map((p) => ({
+      objectId: p.objectId,
+      objectName: p.objectName,
+      works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.assignedEmployeeIds })),
+      sessions: p.sessions.flatMap((s) =>
+        s.employeeIds.map((employeeId) => ({
+          employeeId,
+          employeeName: employeeName(employeeId),
+          droppedAt: s.startedAt,
+          pickedUpAt: s.endedAt,
+        })),
+      ),
+      coefs: [] as { employeeId: string; disciplineCoef: number; productivityCoef: number }[],
+    }));
+  }
+
+  async function loadPreview() {
+    try {
+      const res = await api.post<PayrollPreview>("/api/road-timesheet/preview", {
+        odoStart: Number(odoStart),
+        odoEnd: Number(odoEnd),
+        employeeIds,
+        objects: buildObjectsPayload(),
+      });
+      setPreview(res);
+    } catch (e) {
+      setError((e as Error).message);
+    }
   }
 
   async function save() {
     setSaving(true);
     setError(null);
     try {
-      const res = await api.post<SaveResult>("/api/road-timesheet", {
-        date: todayISO(),
+      const res = await api.post<PayrollPreview & { eventId: string }>("/api/road-timesheet", {
+        date,
         carId,
         odoStart: Number(odoStart),
         odoStartPhoto,
         odoEnd: Number(odoEnd),
         odoEndPhoto,
         employeeIds,
-        objects: plans.map((p) => ({
-          objectId: p.objectId,
-          objectName: p.objectName,
-          works: p.assignments.map((a) => ({ workId: a.workId, workName: a.workName, volume: a.volume || "?", employeeIds: a.employeeIds })),
-          sessions: p.droppedEmployeeIds.map((employeeId) => ({
-            employeeId,
-            employeeName: employeeName(employeeId),
-            droppedAt: p.droppedAt!,
-            pickedUpAt: p.finishedAt,
-          })),
-          coefs: p.coefs,
-        })),
+        objects: buildObjectsPayload(),
       });
       setResult(res);
       setStep("DONE");
@@ -363,14 +448,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <span className="cell-sub">{result.roadAllowance.perPerson} грн/особу</span>
           </div>
         </div>
-
-        {result.brigadierEmployeeId && (
-          <div className="hint" style={{ padding: "8px 16px" }}>
-            Бригадир поїздки: {employeeName(result.brigadierEmployeeId)}
-            {result.seniorEmployeeIds.length > 0 && ` · Старші: ${result.seniorEmployeeIds.map(employeeName).join(", ")}`}
-          </div>
-        )}
-
         <div className="section-title">Фонд по обʼєктах</div>
         {result.salaryPacks.map((pack) => (
           <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
@@ -388,20 +465,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           </div>
         ))}
-
         <MainButton text="До меню" onClick={onBack} />
       </div>
     );
   }
 
   const backTargets: Partial<Record<Step, Step>> = {
+    PICK_CAR: "START",
     ODO_START: "PICK_CAR",
     PICK_PEOPLE: "ODO_START",
     PICK_OBJECTS: "PICK_PEOPLE",
     PLAN: "PICK_OBJECTS",
     READY: "PLAN",
-    ODO_END: "DRIVE",
-    REVIEW: "ODO_END",
+    RETURN: "DRIVE",
+    REVIEW: "RETURN",
   };
 
   return (
@@ -409,17 +486,49 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       <BackRow onBack={() => (backTargets[step] ? setStep(backTargets[step]!) : onBack())} />
       <div className="header">
         <h1>🚗 Дорожній табель</h1>
-        <div className="hint">{todayISO()}</div>
       </div>
 
       {error && <div className="empty-state">⚠️ {error}</div>}
 
+      {step === "START" && (
+        <>
+          <div className="step-badge">КРОК 1/13</div>
+          <div className="section-title">Дата</div>
+          <div className="field">
+            {editingDate ? (
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} onBlur={() => setEditingDate(false)} autoFocus />
+            ) : (
+              <div className="list">
+                <button className="cell" onClick={() => setEditingDate(true)}>
+                  <span className="cell-title">{date}</span>
+                  <span className="cell-sub">Змінити дату</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="section-title">Бригада</div>
+          <div className="list">
+            {groupByBrigade(employees).map((g) => (
+              <button key={g.id} className={`cell ${brigadeId === g.id ? "selected" : ""}`} onClick={() => setBrigadeId(g.id)}>
+                <span className="cell-title">{g.title}</span>
+                <span className="cell-sub">{g.members.length} людей</span>
+              </button>
+            ))}
+          </div>
+
+          <MainButton text="Далі → Вибір авто" onClick={() => setStep("PICK_CAR")} disabled={!brigadeId} />
+        </>
+      )}
+
       {step === "PICK_CAR" && (
         <>
-          <div className="section-title">Обери авто</div>
+          <div className="step-badge">КРОК 2/13</div>
+          <div className="section-title">Вибір авто</div>
           <div className="list">
             {cars.map((c) => {
               const takenBy = takenCars.get(c.id);
+              const last = lastOdometer[c.id];
               return (
                 <button
                   key={c.id}
@@ -428,101 +537,85 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   disabled={!!takenBy}
                   style={takenBy ? { opacity: 0.4 } : undefined}
                 >
-                  <span className="cell-title">{c.name}</span>
-                  {takenBy ? <span className="badge warn">🔒 {takenBy}</span> : <span className="cell-sub">{c.plate}</span>}
+                  <span className="cell-title">
+                    {c.name} {c.plate ? <span className="hint">{c.plate}</span> : null}
+                  </span>
+                  {takenBy ? <span className="badge warn">🔒 {takenBy}</span> : <span className="cell-sub">{last ? `${last} км` : ""}</span>}
                 </button>
               );
             })}
           </div>
-          <MainButton text="Далі" onClick={() => setStep("ODO_START")} disabled={!carId} />
+          <MainButton text="Далі → Одометр" onClick={() => setStep("ODO_START")} disabled={!carId} />
         </>
       )}
 
       {step === "ODO_START" && (
         <>
+          <div className="step-badge">КРОК 3/13</div>
           <div className="section-title">Одометр на старті</div>
+          {lastOdometer[carId] !== undefined && <div className="hint" style={{ padding: "0 16px" }}>Попереднє значення: {lastOdometer[carId]} км</div>}
+          <div className="big-number">{odoStart || "0"} км</div>
+          {odoStart && lastOdometer[carId] !== undefined && Number(odoStart) >= lastOdometer[carId] && (
+            <div className="hint" style={{ textAlign: "center" }}>
+              +{Math.round((Number(odoStart) - lastOdometer[carId]) * 10) / 10} км з попереднього виїзду
+            </div>
+          )}
+          <NumericKeypad value={odoStart} onChange={setOdoStart} />
           <div className="field">
-            <label>Показник (км)</label>
-            <input type="number" value={odoStart} onChange={(e) => setOdoStart(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>Фото спідометра (необовʼязково)</label>
             {odoStartPhoto ? (
               <div className="badge ok">📷 Фото додано</div>
             ) : (
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={(e) => e.target.files?.[0] && uploadPhoto(e.target.files[0], "start")}
-              />
+              <>
+                <label className="hint">📷 Фото спідометра (не обовʼязково)</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => e.target.files?.[0] && uploadPhoto(e.target.files[0], "start")}
+                />
+              </>
             )}
           </div>
-          <MainButton
-            text={uploadingPhoto ? "Завантаження фото…" : "Далі"}
-            onClick={() => setStep("PICK_PEOPLE")}
-            disabled={!odoStart || uploadingPhoto}
-          />
+          <MainButton text={uploadingPhoto ? "Завантаження…" : "Далі → Люди"} onClick={() => setStep("PICK_PEOPLE")} disabled={!odoStart || uploadingPhoto} />
         </>
       )}
 
       {step === "PICK_PEOPLE" && (
         <>
-          {groupByBrigade(employees).map((group) => {
-            const expanded = expandedBrigadeId === group.id;
-            const pickedCount = group.members.filter((m) => employeeIds.includes(m.id)).length;
-            return (
-              <div key={group.id} className="list" style={{ marginTop: 8 }}>
-                <button className="cell" onClick={() => setExpandedBrigadeId(expanded ? null : group.id)}>
-                  <span className="cell-title">👥 {group.title}</span>
-                  <span className={`badge ${pickedCount ? "ok" : ""}`}>
-                    {pickedCount}/{group.members.length}
-                  </span>
-                </button>
-                {expanded && (
-                  <div style={{ padding: "0 16px 16px" }}>
-                    <div className="chip-row" style={{ padding: "8px 0" }}>
-                      {group.members.map((emp) => {
-                        const busyBy = busyEmployees.get(emp.id);
-                        return (
-                          <div
-                            key={emp.id}
-                            className={`chip ${employeeIds.includes(emp.id) ? "selected" : ""}`}
-                            style={busyBy ? { opacity: 0.4 } : undefined}
-                            onClick={() =>
-                              !busyBy &&
-                              setEmployeeIds((prev) => (prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id]))
-                            }
-                          >
-                            {busyBy ? `🔒 ${emp.name} — ${busyBy}` : emp.name}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <button
-                      className="chip"
-                      onClick={() =>
-                        setEmployeeIds((prev) => [
-                          ...new Set([...prev, ...group.members.filter((m) => !busyEmployees.has(m.id)).map((m) => m.id)]),
-                        ])
-                      }
-                    >
-                      ✅ Обрати всіх
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          <div className="step-badge">КРОК 4/13</div>
+          <div className="section-title">Люди в поїздці — Обрано {employeeIds.length}</div>
+          <div className="list">
+            {[...employees]
+              .sort((a, b) => {
+                const aIn = a.brigadeId === brigadeId ? 0 : 1;
+                const bIn = b.brigadeId === brigadeId ? 0 : 1;
+                return aIn - bIn || a.name.localeCompare(b.name);
+              })
+              .map((emp) => {
+                const busyBy = busyEmployees.get(emp.id);
+                const checked = employeeIds.includes(emp.id);
+                return (
+                  <button
+                    key={emp.id}
+                    className={`cell ${checked ? "selected" : ""}`}
+                    onClick={() => toggleEmployee(emp.id)}
+                    disabled={!!busyBy}
+                    style={busyBy ? { opacity: 0.4 } : undefined}
+                  >
+                    <span className="cell-title">
+                      {checked ? "✅ " : "☐ "}
+                      {emp.name}
+                    </span>
+                    {busyBy ? <span className="badge warn">🔒 {busyBy}</span> : <span className="role-tag">{employeeRole(emp)}</span>}
+                  </button>
+                );
+              })}
+          </div>
           <MainButton
-            text="Далі"
+            text="Далі → Обʼєкти"
             onClick={async () => {
-              // Reserve the car + picked people now (mirrors the bot's real-time
-              // busy/locked state) so another foreman opening the mini-app right
-              // after sees them as taken, instead of only after the whole day
-              // gets submitted at the very end.
               try {
-                await api.post("/api/road-timesheet/reserve", { date: todayISO(), carId, employeeIds });
+                await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds });
               } catch (e) {
                 setError((e as Error).message);
                 return;
@@ -536,22 +629,65 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
       {step === "PICK_OBJECTS" && (
         <>
-          {groupByCity(objects).map((group) => {
-            const expanded = expandedCityId === group.city;
-            const pickedCount = group.items.filter((o) => plans.some((p) => p.objectId === o.id)).length;
+          <div className="step-badge">КРОК 5/13</div>
+          <div className="section-title">Обʼєкти маршруту — Обрано {plans.length}</div>
+          <input className="search-box" placeholder="Пошук обʼєкта…" value={objectSearch} onChange={(e) => setObjectSearch(e.target.value)} />
+          <div className="list">
+            {objects
+              .filter((o) => `${o.name} ${o.address ?? ""}`.toLowerCase().includes(objectSearch.toLowerCase()))
+              .map((obj) => {
+                const checked = plans.some((p) => p.objectId === obj.id);
+                return (
+                  <button key={obj.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleRouteObject(obj)}>
+                    <span className="cell-title">
+                      {checked ? "✅" : "☐"} 📍 {obj.name}
+                    </span>
+                    <span className="cell-sub">{obj.address}</span>
+                  </button>
+                );
+              })}
+          </div>
+          <MainButton text="Далі → Планування" onClick={() => setStep("PLAN")} disabled={!plans.length} />
+        </>
+      )}
+
+      {step === "PLAN" && (
+        <>
+          <div className="step-badge">КРОК 6/13</div>
+          <div className="section-title">Планування обʼєктів</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>Заповніть роботи й людей на кожному обʼєкті</div>
+          {plans.map((plan) => {
+            const ready = plan.works.length > 0 && plan.assignedEmployeeIds.length > 0;
+            const open = assignOpenObjectId === plan.objectId;
             return (
-              <div key={group.city} className="list" style={{ marginTop: 8 }}>
-                <button className="cell" onClick={() => setExpandedCityId(expanded ? null : group.city)}>
-                  <span className="cell-title">🏙 {group.title}</span>
-                  <span className={`badge ${pickedCount ? "ok" : ""}`}>
-                    {pickedCount}/{group.items.length}
-                  </span>
+              <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
+                <div className="cell" style={{ cursor: "default" }}>
+                  <span className="cell-title">📍 {plan.objectName}</span>
+                  <span className={`badge ${ready ? "ok" : "warn"}`}>{ready ? "Готово з обʼєктом" : "не готово"}</span>
+                </div>
+                <button
+                  className="cell"
+                  onClick={() => {
+                    setPlanObjectId(plan.objectId);
+                    setStep("PLAN_WORKS");
+                  }}
+                >
+                  <span className="cell-title">🧱 Роботи (обрані зі списку)</span>
+                  <span className="badge">{plan.works.length} обрано</span>
                 </button>
-                {expanded && (
-                  <div className="chip-row" style={{ padding: "8px 16px 16px" }}>
-                    {group.items.map((obj) => (
-                      <div key={obj.id} className={`chip ${plans.some((p) => p.objectId === obj.id) ? "selected" : ""}`} onClick={() => toggleRouteObject(obj)}>
-                        {obj.name}
+                <button className="cell" onClick={() => setAssignOpenObjectId(open ? null : plan.objectId)}>
+                  <span className="cell-title">👥 Призначити людей</span>
+                  <span className="badge">{plan.assignedEmployeeIds.length} люди</span>
+                </button>
+                {open && (
+                  <div className="chip-row">
+                    {employeeIds.map((id) => (
+                      <div
+                        key={id}
+                        className={`chip ${plan.assignedEmployeeIds.includes(id) ? "selected" : ""}`}
+                        onClick={() => toggleAssigned(plan.objectId, id)}
+                      >
+                        {employeeName(id)}
                       </div>
                     ))}
                   </div>
@@ -559,307 +695,435 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </div>
             );
           })}
-          <MainButton text="Далі — призначити роботи" onClick={() => setStep("PLAN")} disabled={!plans.length} />
+          <MainButton text="Далі → Готовність" onClick={() => setStep("READY")} disabled={plans.some((p) => !p.works.length || !p.assignedEmployeeIds.length)} />
         </>
       )}
 
-      {step === "PLAN" && (
+      {step === "PLAN_WORKS" && planObjectId && (
         <>
-          <div className="section-title">Роботи на кожному обʼєкті{missingPlanCount > 0 ? " (🟡 є обʼєкти без робіт)" : ""}</div>
-          {plans.map((plan) => (
-            <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
-              <button className="cell" onClick={() => setOpenObjectId(openObjectId === plan.objectId ? null : plan.objectId)}>
-                <span className="cell-title">📍 {plan.objectName}</span>
-                <span className={`badge ${plan.plannedWorkIds.length ? "ok" : "warn"}`}>{plan.plannedWorkIds.length} робіт</span>
-              </button>
+          <div className="step-badge">КРОК 7/13 · {planFor(planObjectId).objectName.toUpperCase()}</div>
+          <div className="section-title">Вибір робіт</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>Обери роботи. Для кожної потім постав обсяг</div>
+          <input className="search-box" placeholder="Пошук роботи…" value={planWorksSearch} onChange={(e) => setPlanWorksSearch(e.target.value)} />
+          <div className="list">
+            {works
+              .filter((w) => w.name.toLowerCase().includes(planWorksSearch.toLowerCase()))
+              .slice(0, 60)
+              .map((w) => {
+                const checked = planFor(planObjectId).works.some((pw) => pw.workId === w.id);
+                return (
+                  <button key={w.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleWork(planObjectId, w)}>
+                    <span className="cell-title">
+                      {checked ? "✅" : "☐"} {w.name}
+                    </span>
+                  </button>
+                );
+              })}
+          </div>
+          <div className="hint" style={{ padding: "0 16px" }}>Робіт у пакеті: {planFor(planObjectId).works.length}</div>
+          <MainButton
+            text="Готово → Обсяги"
+            onClick={() => setStep("PLAN_VOLUMES")}
+            disabled={!planFor(planObjectId).works.length}
+          />
+        </>
+      )}
 
-              {openObjectId === plan.objectId && (
-                <div style={{ padding: "0 16px 16px" }}>
-                  {groupByCategory(works).map((group) => {
-                    const selectedInGroup = group.items.filter((w) => plan.plannedWorkIds.includes(w.id)).length;
-                    const catKey = `${plan.objectId}::${group.category}`;
-                    return (
-                      <div key={group.category} className="list" style={{ margin: "6px 0" }}>
-                        <button className="cell" onClick={() => setOpenCategory(openCategory === catKey ? null : catKey)}>
-                          <span className="cell-title">📁 {group.category}</span>
-                          <span className={`badge ${selectedInGroup ? "ok" : ""}`}>
-                            {selectedInGroup}/{group.items.length}
-                          </span>
-                        </button>
-                        {openCategory === catKey && (
-                          <div style={{ padding: "8px 16px 16px" }}>
-                            <div className="chip-row" style={{ padding: 0 }}>
-                              {group.items.map((w) => (
-                                <div
-                                  key={w.id}
-                                  className={`chip ${plan.plannedWorkIds.includes(w.id) ? "selected" : ""}`}
-                                  onClick={() => toggleWork(plan.objectId, w)}
-                                >
-                                  {w.name}
-                                </div>
-                              ))}
-                            </div>
-                            <button className="chip" style={{ marginTop: 8 }} onClick={() => selectWholeCategory(plan.objectId, group.items)}>
-                              ✅ Обрати всю категорію
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+      {step === "PLAN_VOLUMES" && planObjectId && !planVolumeWorkId && (
+        <>
+          {(() => {
+            const plan = planFor(planObjectId);
+            const unfilled = plan.works.filter((w) => !w.volume || w.volume === "?");
+            return (
+              <>
+                <div className="step-badge">КРОК 8/13 · {plan.objectName.toUpperCase()}</div>
+                <div className="section-title" style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Обсяги</span>
+                  <button className="chip" onClick={() => applyBulkVolume(planObjectId, prompt("Значення для незаповнених обсягів:") || "")}>
+                    Масовий ввід
+                  </button>
                 </div>
-              )}
-            </div>
-          ))}
-          <MainButton text="Готово — до виїзду" onClick={() => setStep("READY")} disabled={plans.some((p) => !p.plannedWorkIds.length)} />
+                <div className="hint" style={{ padding: "0 16px 8px" }}>Постав число для кожної роботи</div>
+                <div className="list">
+                  {plan.works.map((w) => (
+                    <button key={w.workId} className="cell" onClick={() => openVolumeDetail(planObjectId, w)}>
+                      <span className="cell-title">{w.workName}</span>
+                      {w.volume && w.volume !== "?" ? (
+                        <span className="badge ok">
+                          {w.volume} {w.unit}
+                        </span>
+                      ) : (
+                        <span className="badge warn">🟡 Введи</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                {unfilled.length > 0 && (
+                  <div className="empty-state">🟡 Є роботи без обсягу: {unfilled.map((w) => w.workName).join(", ")}</div>
+                )}
+                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep("PLAN")} />
+              </>
+            );
+          })()}
+        </>
+      )}
+
+      {step === "PLAN_VOLUMES" && planObjectId && planVolumeWorkId && (
+        <>
+          {(() => {
+            const work = planFor(planObjectId).works.find((w) => w.workId === planVolumeWorkId)!;
+            return (
+              <>
+                <div className="step-badge">3.8 деталь</div>
+                <div className="section-title">Обсяг для роботи</div>
+                <div className="hint" style={{ padding: "0 16px" }}>{work.workName}</div>
+                <div className="big-number">{volumeBuffer || "0"}</div>
+                <div className="unit-tabs">
+                  {UNITS.map((u) => (
+                    <div key={u} className={`unit-tab ${volumeUnit === u ? "selected" : ""}`} onClick={() => setVolumeUnit(u)}>
+                      {u}
+                    </div>
+                  ))}
+                </div>
+                <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center", cursor: "pointer" }} onClick={() => saveVolumeDetail(true)}>
+                  ❓ Обсяг ще невідомий — заповнити пізніше
+                </div>
+                <NumericKeypad value={volumeBuffer} onChange={setVolumeBuffer} />
+                <MainButton text="Зберегти обсяг" onClick={() => saveVolumeDetail(false)} disabled={!volumeBuffer} />
+              </>
+            );
+          })()}
         </>
       )}
 
       {step === "READY" && (
         <>
+          <div className="step-badge">КРОК 9/13</div>
           <div className="section-title">Готовність до виїзду</div>
           <div className="list">
             <div className="cell">
               <span className="cell-title">🚙 Авто</span>
-              <span className="cell-sub">{cars.find((c) => c.id === carId)?.name}</span>
+              <span className="cell-sub">
+                {cars.find((c) => c.id === carId)?.name} · {odoStart} км
+              </span>
             </div>
             <div className="cell">
-              <span className="cell-title">👥 Людей</span>
-              <span className="cell-sub">{employeeIds.length}</span>
-            </div>
-            <div className="cell">
-              <span className="cell-title">📍 Обʼєктів</span>
-              <span className="cell-sub">{plans.length}</span>
+              <span className="cell-title">👥 Люди</span>
+              <span className="cell-sub">{employeeIds.map(employeeName).join(", ")}</span>
             </div>
           </div>
+          <div className="section-title">Обʼєкти · роботи · обсяги</div>
+          <div className="list">
+            {plans.map((p) => {
+              const unfilled = p.works.filter((w) => !w.volume || w.volume === "?");
+              return (
+                <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
+                  <div className="cell-title">📍 {p.objectName}</div>
+                  <div className="hint">{p.works.map((w) => `${w.workName} ${w.volume && w.volume !== "?" ? w.volume + w.unit : ""}`).join(" · ")}</div>
+                  {unfilled.length > 0 && <div className="badge warn">🟡 {unfilled.map((w) => w.workName).join(", ")}</div>}
+                </div>
+              );
+            })}
+          </div>
+          {plans.some((p) => p.works.some((w) => !w.volume || w.volume === "?")) && (
+            <div className="empty-state">Є незаповнені обсяги — можна заповнити зі списку планування</div>
+          )}
           <MainButton text="🚗 Виїхати" onClick={startDrive} />
         </>
       )}
 
       {step === "DRIVE" && (
         <>
-          <div className="section-title">🚗 В дорозі</div>
-          <div className="list">
-            <div className="cell">
-              <span className="cell-title">У машині</span>
-              <span className="cell-sub">{onboard.length ? onboard.map(employeeName).join(", ") : "— нікого —"}</span>
-            </div>
+          <div className="step-badge">КРОК 10/13</div>
+          <div className="pulse-icon">🚗</div>
+          <div className="section-title" style={{ textAlign: "center" }}>{nextUnvisited ? "В ДОРОЗІ" : "ПОВЕРТАЄМОСЬ"}</div>
+          <div className="timer-big">{tripStartedAt ? fmtHMS(now - new Date(tripStartedAt).getTime()) : "00:00:00"}</div>
+          <div className="hint" style={{ textAlign: "center" }}>
+            {nextUnvisited ? (
+              <>
+                Прямуємо до
+                <br />📍 {nextUnvisited.objectName}
+              </>
+            ) : (
+              "Усі обʼєкти відвідано — час повертатись на базу"
+            )}
           </div>
-
-          <div className="section-title">Маршрут</div>
-          <div className="list">
-            {plans.map((p) => (
-              <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
-                <span className="cell-title">📍 {p.objectName}</span>
-                <span className={`badge ${p.finished ? "ok" : ""}`}>{p.finished ? "завершено" : "заплановано"}</span>
-              </div>
-            ))}
-          </div>
-
-          {allObjectsFinished ? (
-            <MainButton text="🏁 Повернутися на базу" onClick={() => setStep("ODO_END")} />
+          {nextUnvisited ? (
+            <MainButton text="📍 Прибув на обʼєкт" onClick={arriveAtObject} />
           ) : (
-            <MainButton text="🛑 Зупинитися" onClick={startArrive} disabled={!unfinishedPlans.length || !onboard.length} />
+            <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} />
           )}
         </>
       )}
 
-      {step === "ARRIVE" && !arriveObjectId && (
-        <>
-          <div className="section-title">На якому обʼєкті зупинились?</div>
-          <div className="list">
-            {unfinishedPlans.map((p) => (
-              <button key={p.objectId} className="cell" onClick={() => setArriveObjectId(p.objectId)}>
-                <span className="cell-title">📍 {p.objectName}</span>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {step === "ARRIVE" && arriveObjectId && currentArrivePlan() && !currentArrivePlan()!.droppedAt && (
-        <>
-          <div className="section-title">Кого залишити на обʼєкті «{currentArrivePlan()!.objectName}»</div>
-          <div className="chip-row">
-            {onboard.map((id) => (
-              <div
-                key={id}
-                className={`chip ${arriveDropSelected.includes(id) ? "selected" : ""}`}
-                onClick={() => setArriveDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
-              >
-                {employeeName(id)}
-              </div>
-            ))}
-          </div>
-          <MainButton text="Підтвердити" onClick={confirmDrop} disabled={!arriveDropSelected.length} />
-        </>
-      )}
-
-      {step === "ARRIVE" && arriveObjectId && currentArrivePlan()?.droppedAt && (
+      {step === "AT_OBJECT" && atObjectId && (
         <>
           {(() => {
-            const plan = currentArrivePlan()!;
+            const plan = currentAtPlan()!;
+            const running = runningSession(plan);
+            const notStarted = plan.works.filter((w) => !plan.sessions.some((s) => s.workId === w.workId));
             return (
               <>
-                <div className="section-title">Роботи на «{plan.objectName}»</div>
-                <div className="hint" style={{ padding: "0 16px 8px" }}>
-                  Натисни на роботу, щоб призначити людей, які нею займаються
-                </div>
-                <div className="list">
-                  {plan.plannedWorkIds.map((workId) => {
-                    const work = works.find((w) => w.id === workId);
-                    if (!work) return null;
-                    const assignment = plan.assignments.find((a) => a.workId === workId);
-                    const open = arriveWorkOpenId === workId;
-                    return (
-                      <div key={workId}>
-                        <button className="cell" onClick={() => setArriveWorkOpenId(open ? null : workId)}>
-                          <span className="cell-title">{work.name}</span>
-                          <span className={`badge ${assignment?.employeeIds.length ? "ok" : ""}`}>
-                            {assignment?.employeeIds.length ?? 0} люд.
-                          </span>
-                        </button>
-                        {open && (
-                          <div className="chip-row" style={{ padding: "8px 16px" }}>
-                            {plan.droppedEmployeeIds.map((empId) => (
-                              <div
-                                key={empId}
-                                className={`chip ${assignment?.employeeIds.includes(empId) ? "selected" : ""}`}
-                                onClick={() => toggleWorkAssignee(workId, work.name, empId)}
-                              >
-                                {employeeName(empId)}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <MainButton text="Далі — завершити роботи" onClick={() => setArriveWorkOpenId("__FINISH__")} disabled={!plan.assignments.length} />
-              </>
-            );
-          })()}
-        </>
-      )}
+                <div className="step-badge">КРОК 11/13 · НА ОБʼЄКТІ</div>
+                <div className="section-title">📍 {plan.objectName}</div>
 
-      {step === "ARRIVE" && arriveObjectId && arriveWorkOpenId === "__FINISH__" && currentArrivePlan() && (
-        <>
-          {(() => {
-            const plan = currentArrivePlan()!;
-            return (
-              <>
-                <div className="section-title">Обсяги виконаних робіт</div>
-                {plan.assignments.map((a) => (
-                  <div className="field" key={a.workId}>
-                    <label>
-                      {a.workName} <span className="hint">({a.employeeIds.map(employeeName).join(", ")})</span>
-                    </label>
-                    <input
-                      placeholder='Обсяг, наприклад "50 пнів" або "30 м²"'
-                      value={a.volume}
-                      onChange={(e) => setAssignmentVolume(a.workId, e.target.value)}
-                    />
+                {running ? (
+                  <div className="active-work-card">
+                    <div style={{ fontWeight: 700 }}>{running.workName}</div>
+                    <div className="timer-big" style={{ padding: "4px 0" }}>{fmtHMS(now - new Date(running.startedAt).getTime())}</div>
+                    <div className="hint">{running.employeeIds.map(employeeName).join(", ")}</div>
                   </div>
-                ))}
+                ) : (
+                  <div className="empty-state">Немає активної роботи</div>
+                )}
 
-                <div className="section-title">Коефіцієнти (дисципліна × продуктивність)</div>
-                {plan.droppedEmployeeIds.map((empId) => {
-                  const coef = coefFor(plan, empId);
-                  return (
-                    <div key={empId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 16px" }}>
-                      <span style={{ flex: 1, fontSize: 14 }}>
-                        {employeeName(empId)} <span className="hint">({fmtElapsed(plan.droppedAt!)})</span>
-                      </span>
-                      <input
-                        type="number"
-                        step="0.1"
-                        style={{ width: 56 }}
-                        value={coef.disciplineCoef}
-                        title="Коефіцієнт дисципліни"
-                        onChange={(e) => setArriveCoef(empId, { disciplineCoef: Number(e.target.value) || 1 })}
-                      />
-                      <input
-                        type="number"
-                        step="0.1"
-                        style={{ width: 56 }}
-                        value={coef.productivityCoef}
-                        title="Коефіцієнт продуктивності"
-                        onChange={(e) => setArriveCoef(empId, { productivityCoef: Number(e.target.value) || 1 })}
-                      />
+                {startingWorkId === null && !showDropPicker && !showMovePicker && (
+                  <div className="list" style={{ marginTop: 8 }}>
+                    <button
+                      className="cell"
+                      onClick={() => setStartingWorkId(notStarted[0]?.workId ?? "__PICK__")}
+                      disabled={!!running || !plan.here.length || !notStarted.length}
+                    >
+                      <span className="cell-title">▶️ Почати роботу</span>
+                    </button>
+                    <button
+                      className="cell danger-btn"
+                      onClick={() => setFinishingSessionKey(running ? `${running.workId}#${running.startedAt}` : null)}
+                      disabled={!running}
+                    >
+                      <span className="cell-title">⏹ Завершити роботу</span>
+                    </button>
+                    <button className="cell" onClick={() => setShowMovePicker(true)} disabled={!plan.here.length}>
+                      <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
+                    </button>
+                    <button className="cell" onClick={() => setShowDropPicker(true)} disabled={!onboard.length}>
+                      <span className="cell-title">👥 Висадити людей тут</span>
+                    </button>
+                  </div>
+                )}
+
+                {startingWorkId !== null && (
+                  <>
+                    <div className="section-title">Яку роботу почати</div>
+                    <div className="chip-row">
+                      {notStarted.map((w) => (
+                        <div key={w.workId} className={`chip ${startingWorkId === w.workId ? "selected" : ""}`} onClick={() => setStartingWorkId(w.workId)}>
+                          {w.workName}
+                        </div>
+                      ))}
                     </div>
-                  );
-                })}
+                    <div className="section-title">Хто виконує</div>
+                    <div className="chip-row">
+                      {plan.here.map((id) => (
+                        <div
+                          key={id}
+                          className={`chip ${startPeopleSelected.includes(id) ? "selected" : ""}`}
+                          onClick={() => setStartPeopleSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                        >
+                          {employeeName(id)}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                      <button className="chip" onClick={() => setStartingWorkId(null)}>
+                        Скасувати
+                      </button>
+                      <button className="chip selected" onClick={confirmStartWork} disabled={!startPeopleSelected.length || startingWorkId === "__PICK__"}>
+                        Почати
+                      </button>
+                    </div>
+                  </>
+                )}
 
-                <MainButton text="✅ Завершити роботи на обʼєкті" onClick={finishArriveObject} />
+                {finishingSessionKey && (
+                  <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                    <button className="chip" onClick={() => setFinishingSessionKey(null)}>
+                      Скасувати
+                    </button>
+                    <button className="chip selected" onClick={confirmFinishWork}>
+                      Підтвердити завершення
+                    </button>
+                  </div>
+                )}
+
+                {showDropPicker && (
+                  <>
+                    <div className="section-title">Кого залишити тут</div>
+                    <div className="chip-row">
+                      {onboard.map((id) => (
+                        <div
+                          key={id}
+                          className={`chip ${dropSelected.includes(id) ? "selected" : ""}`}
+                          onClick={() => setDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                        >
+                          {employeeName(id)}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                      <button className="chip" onClick={() => setShowDropPicker(false)}>
+                        Скасувати
+                      </button>
+                      <button className="chip selected" onClick={confirmDrop} disabled={!dropSelected.length}>
+                        Підтвердити
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {showMovePicker && (
+                  <>
+                    <div className="section-title">Кого перенести</div>
+                    <div className="chip-row">
+                      {plan.here.map((id) => (
+                        <div
+                          key={id}
+                          className={`chip ${moveSelected.includes(id) ? "selected" : ""}`}
+                          onClick={() => setMoveSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                        >
+                          {employeeName(id)}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="section-title">На який обʼєкт</div>
+                    <div className="chip-row">
+                      {plans
+                        .filter((p) => p.objectId !== atObjectId)
+                        .map((p) => (
+                          <div key={p.objectId} className={`chip ${moveTargetId === p.objectId ? "selected" : ""}`} onClick={() => setMoveTargetId(p.objectId)}>
+                            {p.objectName}
+                          </div>
+                        ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                      <button className="chip" onClick={() => setShowMovePicker(false)}>
+                        Скасувати
+                      </button>
+                      <button className="chip selected" onClick={confirmMove} disabled={!moveSelected.length || !moveTargetId}>
+                        Підтвердити
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                <MainButton text="➡️ Продовжити маршрут" onClick={() => setStep("DRIVE")} disabled={!!running} />
               </>
             );
           })()}
         </>
       )}
 
-      {step === "ODO_END" && (
+      {step === "RETURN" && (
         <>
-          <div className="section-title">Одометр на фініші (приїхали на базу)</div>
-          <div className="field">
-            <label>Показник (км)</label>
-            <input type="number" value={odoEnd} onChange={(e) => setOdoEnd(e.target.value)} />
+          <div className="step-badge">КРОК 12/13</div>
+          <div className="section-title">Повернення</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>Завершіть роботу і заберіть людей з обʼєктів</div>
+          <div className="list">
+            {plans
+              .filter((p) => p.visited)
+              .map((p) => (
+                <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
+                  <span className="cell-title">📍 {p.objectName}</span>
+                  {p.here.length ? (
+                    <button className="chip" onClick={() => pickUpHere(p.objectId)}>
+                      Забрати ({p.here.map(employeeName).join(", ")})
+                    </button>
+                  ) : (
+                    <span className="badge ok">забрано</span>
+                  )}
+                </div>
+              ))}
           </div>
+
+          <div className="section-title">Одометр на фініші</div>
+          <div className="hint" style={{ padding: "0 16px" }}>Старт: {odoStart} км</div>
+          <div className="big-number">{odoEnd || "0"} км</div>
+          {odoEnd && Number(odoEnd) >= Number(odoStart) && <div className="hint" style={{ textAlign: "center" }}>Пройдено {Math.round((Number(odoEnd) - Number(odoStart)) * 10) / 10} км</div>}
+          <NumericKeypad value={odoEnd} onChange={setOdoEnd} />
           <div className="field">
-            <label>Фото спідометра (необовʼязково)</label>
             {odoEndPhoto ? (
               <div className="badge ok">📷 Фото додано</div>
             ) : (
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={(e) => e.target.files?.[0] && uploadPhoto(e.target.files[0], "end")}
-              />
+              <>
+                <label className="hint">📷 Фото спідометра (не обовʼязково)</label>
+                <input type="file" accept="image/*" capture="environment" onChange={(e) => e.target.files?.[0] && uploadPhoto(e.target.files[0], "end")} />
+              </>
             )}
           </div>
+
           <MainButton
-            text={uploadingPhoto ? "Завантаження фото…" : "Далі — перевірити день"}
-            onClick={() => setStep("REVIEW")}
-            disabled={!odoEnd || uploadingPhoto}
+            text="Далі → Підсумок дня"
+            onClick={async () => {
+              setStep("REVIEW");
+              await loadPreview();
+            }}
+            disabled={!odoEnd || !allBack || uploadingPhoto}
           />
         </>
       )}
 
       {step === "REVIEW" && (
         <>
-          <div className="section-title">Перевір день перед відправкою</div>
+          <div className="step-badge">КРОК 13/13 · ЗВІТ</div>
+          <div className="section-title">Підсумок дня</div>
           <div className="list">
             <div className="cell">
-              <span className="cell-title">🚙 {cars.find((c) => c.id === carId)?.name}</span>
+              <span className="cell-title">Проїхано</span>
               <span className="cell-sub">
-                {odoStart} → {odoEnd} км
+                {preview ? `${preview.km} км · клас ${preview.tripClass}` : "рахую…"}
               </span>
             </div>
           </div>
 
-          {plans.map((plan) => (
-            <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
-              <div className="cell" style={{ cursor: "default" }}>
-                <span className="cell-title">📍 {plan.objectName}</span>
+          <div className="section-title">Обʼєкти · роботи · обсяги</div>
+          <div className="list">
+            {plans.map((p) => (
+              <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
+                <div className="cell-title">📍 {p.objectName}</div>
+                <div className="hint">{p.works.map((w) => `${w.workName} ${w.volume !== "?" ? w.volume + w.unit : "?"}`).join(" · ")}</div>
               </div>
-              <div style={{ padding: "0 16px 12px" }} className="hint">
-                {plan.assignments.map((a) => (
-                  <div key={a.workId}>
-                    {a.workName}: {a.volume || "?"} — {a.employeeIds.map(employeeName).join(", ")}
+            ))}
+          </div>
+
+          <div className="section-title">Години працівників</div>
+          <div className="list">
+            {employeeIds.map((id) => {
+              const totalMs = plans.reduce(
+                (acc, p) =>
+                  acc +
+                  p.sessions
+                    .filter((s) => s.employeeIds.includes(id))
+                    .reduce((a, s) => a + (new Date(s.endedAt ?? new Date().toISOString()).getTime() - new Date(s.startedAt).getTime()), 0),
+                0,
+              );
+              return (
+                <div key={id} className="cell" style={{ cursor: "default" }}>
+                  <span className="cell-title">{employeeName(id)}</span>
+                  <span className="cell-sub">{fmtHours(totalMs)} год</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {preview && (
+            <>
+              <div className="section-title">Розподіл фонду</div>
+              <div className="list">
+                {preview.brigadierEmployeeId && (
+                  <div className="cell" style={{ cursor: "default" }}>
+                    <span className="cell-title">Бригадир</span>
+                    <span className="cell-sub">
+                      {preview.salaryPacks.reduce((a, pack) => a + (pack.rows.find((r) => r.employeeId === preview.brigadierEmployeeId)?.pay ?? 0), 0)} ₴
+                    </span>
                   </div>
-                ))}
-                {plan.droppedEmployeeIds.map((empId) => {
-                  const coef = coefFor(plan, empId);
-                  return (
-                    <div key={empId}>
-                      {employeeName(empId)}: {fmtElapsed(plan.droppedAt!, plan.finishedAt)} · коеф {coef.disciplineCoef}×{coef.productivityCoef}
-                    </div>
-                  );
-                })}
+                )}
+                <div className="cell" style={{ cursor: "default" }}>
+                  <span className="cell-title">Доплата за виїзд</span>
+                  <span className="cell-sub">{preview.roadAllowance.perPerson} ₴/особу</span>
+                </div>
               </div>
-            </div>
-          ))}
+            </>
+          )}
 
           <MainButton text={saving ? "Відправлення…" : "📤 Відправити на підтвердження"} onClick={save} disabled={saving} />
         </>
