@@ -90,6 +90,14 @@ export async function loadSheet(sheetName: string, range = "A:Z"): Promise<Loade
   return { header, map, data, all: rows };
 }
 
+/** Append rows built from a patch object keyed by header name, respecting the sheet's real column order. */
+export async function appendRowsByHeaders(sheetName: string, patches: Record<string, any>[]) {
+  if (!patches.length) return;
+  const { header, map } = await loadSheet(sheetName, "1:1");
+  const rows = patches.map((patch) => buildRowByHeaders(header, map, patch));
+  await appendRows(sheetName, rows);
+}
+
 export async function appendRows(sheetName: string, rows: any[][]) {
   if (!rows.length) return;
   const sheets = getSheetsClient();

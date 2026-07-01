@@ -60,6 +60,32 @@ export const CARS_HEADERS = {
   active: "АКТИВ",
 } as const;
 
+export const REPORTS_HEADERS = {
+  date: "ДАТА",
+  objectId: "ОБʼЄКТ_ID",
+  foremanTgId: "БРИГАДИР_TG_ID",
+  workId: "РОБОТА_ID",
+  workName: "НАЗВА_РОБОТИ",
+  volume: "ОБСЯГ",
+  volumeStatus: "СТАТУС_ОБСЯГУ",
+  photos: "ФОТО",
+  dayStatus: "СТАТУС_ДНЯ",
+  createdAt: "СТВОРЕНО",
+  updatedAt: "ОНОВЛЕНО",
+} as const;
+
+export const TIMESHEET_HEADERS = {
+  date: "ДАТА",
+  objectId: "ОБʼЄКТ_ID",
+  employeeId: "ПРАЦІВНИК_ID",
+  employeeName: "ІМʼЯ_ПРАЦІВНИКА",
+  hours: "ГОДИНИ",
+  disciplineCoef: "КОЕФ_ДИСЦИПЛІНА",
+  productivityCoef: "КОЕФ_ПРОДУКТИВНІСТЬ",
+  source: "ДЖЕРЕЛО",
+  updatedAt: "ОНОВЛЕНО",
+} as const;
+
 export const EVENTS_HEADERS = {
   eventId: "ПОДІЯ_ID",
   ts: "ЧАС",

@@ -28,6 +28,10 @@ export function sheetRef(sheetName: string) {
   return `'${safe}'`;
 }
 
+export function nowISO() {
+  return new Date().toISOString();
+}
+
 export function colToA1(colIndex: number) {
   let n = colIndex + 1;
   let s = "";
