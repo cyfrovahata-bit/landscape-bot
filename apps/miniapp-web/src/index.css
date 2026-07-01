@@ -1,0 +1,257 @@
+:root {
+  --tg-bg: var(--tg-theme-bg-color, #f2f2f7);
+  --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #ffffff);
+  --tg-text: var(--tg-theme-text-color, #000000);
+  --tg-hint: var(--tg-theme-hint-color, #8e8e93);
+  --tg-link: var(--tg-theme-link-color, #007aff);
+  --tg-button: var(--tg-theme-button-color, #007aff);
+  --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+  --tg-border: rgba(60, 60, 67, 0.15);
+
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--tg-text);
+  background: var(--tg-bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 84px;
+}
+
+.header {
+  padding: 16px;
+}
+
+.header h1 {
+  font-size: 20px;
+  margin: 0 0 2px;
+}
+
+.header .hint {
+  color: var(--tg-hint);
+  font-size: 14px;
+}
+
+.section-title {
+  padding: 16px 16px 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+  letter-spacing: 0.3px;
+}
+
+.list {
+  background: var(--tg-secondary-bg);
+  border-radius: 12px;
+  margin: 0 12px;
+  overflow: hidden;
+}
+
+.cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--tg-border);
+  background: none;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cell:last-child {
+  border-bottom: none;
+}
+
+.cell:active {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.cell.selected {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.cell-title {
+  font-size: 16px;
+}
+
+.cell-sub {
+  font-size: 13px;
+  color: var(--tg-hint);
+}
+
+.cell-icon {
+  font-size: 20px;
+  width: 28px;
+  text-align: center;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--tg-hint);
+}
+
+.badge.ok {
+  background: rgba(52, 199, 89, 0.15);
+  color: #1c8a3d;
+}
+
+.badge.warn {
+  background: rgba(255, 149, 0, 0.15);
+  color: #b06a00;
+}
+
+.field {
+  margin: 12px;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin-bottom: 6px;
+}
+
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  font: inherit;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.stepper button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-secondary-bg);
+  font-size: 18px;
+  color: var(--tg-text);
+}
+
+.stepper input {
+  width: 70px;
+  text-align: center;
+}
+
+.back-row {
+  padding: 8px 16px;
+}
+
+.back-btn {
+  border: none;
+  background: none;
+  color: var(--tg-link);
+  font: inherit;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.main-button {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: var(--tg-bg);
+  border-top: 1px solid var(--tg-border);
+}
+
+.main-button button {
+  width: 100%;
+  padding: 14px;
+  border-radius: 12px;
+  border: none;
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.main-button button:disabled {
+  opacity: 0.4;
+}
+
+.empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--tg-hint);
+}
+
+.toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1c1c1e;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 14px;
+  z-index: 1000;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.chip {
+  padding: 8px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-secondary-bg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.chip.selected {
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  border-color: var(--tg-button);
+}
