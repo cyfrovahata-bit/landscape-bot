@@ -3,3 +3,6 @@ export { runSyncCycle, startSyncLoop } from "./sync/syncWorker.js";
 export * as sheetsClient from "./google/sheets.js";
 export * as sheetNames from "./google/names.js";
 export { config } from "./config.js";
+export { validateInitData } from "./telegramAuth.js";
+export type { TelegramWebAppUser, ValidatedInitData } from "./telegramAuth.js";
+export * from "./writers.js";
