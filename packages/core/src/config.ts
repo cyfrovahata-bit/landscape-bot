@@ -2,6 +2,7 @@ import "dotenv/config";
 
 export const config = {
   sheetId: process.env.GOOGLE_SHEET_ID!,
+  driveFolderId: process.env.GOOGLE_FOLDER_ID || "",
   google: {
     clientEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!,
     privateKey: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),

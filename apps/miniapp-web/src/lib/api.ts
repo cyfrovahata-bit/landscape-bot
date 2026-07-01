@@ -24,9 +24,28 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+async function upload<T>(path: string, file: File | Blob, fieldName: string): Promise<T> {
+  const form = new FormData();
+  form.append(fieldName, file);
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "X-Telegram-Init-Data": getInitData() },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Upload failed: ${res.status}`);
+  }
+
+  return res.json();
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body: unknown) => request<T>(path, { method: "POST", body: JSON.stringify(body) }),
+  upload: <T>(path: string, file: File | Blob, fieldName = "photo") => upload<T>(path, file, fieldName),
 };
 
 export type Employee = { id: string; name: string; brigadeId: string | null; position: string | null; active: boolean };

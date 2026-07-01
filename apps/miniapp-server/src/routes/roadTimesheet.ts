@@ -1,4 +1,5 @@
 import { Router } from "express";
+import multer from "multer";
 import {
   db,
   schema,
@@ -8,33 +9,61 @@ import {
   writeTimesheetRows,
   writeDayStatus,
   makeEventId,
+  uploadPhotoFromBuffer,
 } from "@landscape/core";
 import { and, eq } from "drizzle-orm";
 
 export const roadTimesheetRouter = Router();
 
-type WorkInput = { workId: string; workName: string; volume?: string | number };
-type HoursInput = { employeeId: string; employeeName: string; hours: number };
-type ObjectInput = { objectId: string; works: WorkInput[]; hours: HoursInput[] };
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 /**
- * POST /api/road-timesheet — final save for the day.
- *
- * This is a deliberately scoped-down version of the bot's road timesheet
- * flow (apps/bot/src/bot/flows/roadTimesheet.flow.ts): the bot walks the
- * foreman through picking works first, then filling in a volume for each
- * one (RTS_PLAN_WORKS -> QTY_MENU), with a live drive/pause/object state
- * machine in between. Here the mini-app collects the same end data (car,
- * odometer, people, objects with works+volumes, hours per person) in one
- * screen and submits it as a single request; the live drive-state tracking
- * (RTS_DRIVE_START/PAUSE, pick-up/drop-off events) is not reproduced yet.
+ * POST /api/road-timesheet/photo — uploads one odometer photo to Drive,
+ * used by the ODO_START / ODO_END steps. Returns a viewable URL that gets
+ * stored alongside the odometer row, same as the bot's `odoStartPhotoFileId`.
+ */
+roadTimesheetRouter.post("/photo", upload.single("photo"), async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "photo file is required" });
+    return;
+  }
+  const fileName = `odo_${req.user!.tgId}_${Date.now()}.jpg`;
+  const url = await uploadPhotoFromBuffer(fileName, req.file.buffer);
+  res.json({ url });
+});
+
+// A work session: an employee was dropped at an object and (usually) later picked back up.
+type WorkSession = { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string };
+type WorkInput = { workId: string; workName: string; volume?: string | number };
+type ObjectInput = { objectId: string; objectName: string; works: WorkInput[]; sessions: WorkSession[] };
+
+/**
+ * POST /api/road-timesheet — final save for the day, submitted once the
+ * whole trip (drive out -> visit objects -> drop off/pick up people ->
+ * drive back) is finished on the client. Mirrors the bot's road timesheet
+ * flow (apps/bot/src/bot/flows/roadTimesheet.flow.ts): pick car -> record
+ * start odometer (+optional photo) -> pick people -> pick route objects ->
+ * plan works per object -> drive -> drop off/pick up people per object
+ * (hours are derived from those timestamps, same idea as the bot's
+ * AT_OBJECT_RUN session timer) -> record end odometer (+optional photo).
  */
 roadTimesheetRouter.post("/", async (req, res) => {
-  const { date, carId, odoStart, odoEnd, employeeIds, objects } = req.body as {
+  const {
+    date,
+    carId,
+    odoStart,
+    odoStartPhoto,
+    odoEnd,
+    odoEndPhoto,
+    employeeIds,
+    objects,
+  } = req.body as {
     date: string;
     carId: string;
     odoStart: number;
+    odoStartPhoto?: string;
     odoEnd: number;
+    odoEndPhoto?: string;
     employeeIds: string[];
     objects: ObjectInput[];
   };
@@ -51,7 +80,9 @@ roadTimesheetRouter.post("/", async (req, res) => {
     carId,
     foremanTgId,
     startValue: odoStart,
+    startPhoto: odoStartPhoto,
     endValue: odoEnd,
+    endPhoto: odoEndPhoto,
   });
 
   for (const obj of objects) {
@@ -70,14 +101,27 @@ roadTimesheetRouter.post("/", async (req, res) => {
       );
     }
 
-    if (obj.hours?.length) {
+    // Hours per employee at this object = sum of (pickedUpAt - droppedAt) across
+    // their sessions there (an employee can be dropped off and picked up more
+    // than once at the same object over the course of the trip).
+    const hoursByEmployee = new Map<string, { name: string; ms: number }>();
+    for (const s of obj.sessions ?? []) {
+      const start = new Date(s.droppedAt).getTime();
+      const end = new Date(s.pickedUpAt ?? new Date().toISOString()).getTime();
+      const ms = Math.max(0, end - start);
+      const cur = hoursByEmployee.get(s.employeeId) ?? { name: s.employeeName, ms: 0 };
+      cur.ms += ms;
+      hoursByEmployee.set(s.employeeId, cur);
+    }
+
+    if (hoursByEmployee.size) {
       await writeTimesheetRows(
-        obj.hours.map((h) => ({
+        [...hoursByEmployee.entries()].map(([employeeId, v]) => ({
           date,
           objectId: obj.objectId,
-          employeeId: h.employeeId,
-          employeeName: h.employeeName,
-          hours: h.hours,
+          employeeId,
+          employeeName: v.name,
+          hours: Math.round((v.ms / 3_600_000) * 100) / 100,
           source: "ROAD",
         })),
       );
@@ -91,7 +135,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
       status: "ЗДАНО",
       hasReports: (obj.works ?? []).length > 0,
       hasReportsVolumeOk: allVolumesFilled,
-      hasTimesheet: (obj.hours ?? []).length > 0,
+      hasTimesheet: hoursByEmployee.size > 0,
       hasRoad: true,
       hasOdoStart: odoStart !== undefined,
       hasOdoEnd: odoEnd !== undefined,
