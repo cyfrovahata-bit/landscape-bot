@@ -12,7 +12,7 @@ import { NumericKeypad } from "../components/NumericKeypad";
 // its own sub-flow and returns back to HUB when done, so any parameter can be
 // revisited/changed at any point before (or even after) departure. Once
 // everything is filled in, "Виїхати" opens a final READY check, then DRIVE ->
-// AT_OBJECT (per-object work tracking, multiple concurrent sessions) -> RETURN
+// AT_OBJECT (one shift covering everyone dropped there, all planned works) -> RETURN
 // -> REVIEW -> submit. The whole day is autosaved to localStorage (task: the
 // mini-app is state-in-memory only otherwise, and Telegram can evict it), and
 // once a day is submitted it's locked (with a "request edit" escape hatch)
@@ -34,14 +34,18 @@ type Step =
   | "DONE";
 
 type PlannedWork = { workId: string; workName: string; unit: string; volume: string };
-type WorkSession = { workId: string; workName: string; employeeIds: string[]; startedAt: string; endedAt?: string };
+// One shared "shift" per object visit: started by a single button covering
+// everyone currently dropped there, working on all of that object's planned
+// works together (not tracked per-work -- payroll only cares about total
+// object-level presence time, not which specific work someone did).
+type Shift = { startedAt: string; endedAt?: string; employeeIds: string[] };
 type ObjPlan = {
   objectId: string;
   objectName: string;
   works: PlannedWork[];
   assignedEmployeeIds: string[]; // planned before departure
   here: string[]; // physically dropped off at this object right now
-  sessions: WorkSession[];
+  shift: Shift | null;
   visited: boolean; // reached (formally, or via a quick drop-off during the drive)
   notes: string;
   photoUrls: string[];
@@ -202,9 +206,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // --- at object ---
   const [atObjectId, setAtObjectId] = useState<string | null>(null);
-  const [startingWorkId, setStartingWorkId] = useState<string | null>(null);
-  const [startPeopleSelected, setStartPeopleSelected] = useState<string[]>([]);
-  const [finishingSessionKey, setFinishingSessionKey] = useState<string | null>(null);
+  const [volumesReturnStep, setVolumesReturnStep] = useState<Step>("AT_OBJECT");
   const [dropSelected, setDropSelected] = useState<string[]>([]);
   const [showDropPicker, setShowDropPicker] = useState(false);
   const [moveSelected, setMoveSelected] = useState<string[]>([]);
@@ -376,7 +378,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         works: o.works.map((w) => ({ workId: w.workId, workName: w.workName, unit: works.find((x) => x.id === w.workId)?.unit || "шт", volume: "" })),
         assignedEmployeeIds: [],
         here: [],
-        sessions: [],
+        shift: null,
         visited: false,
         notes: "",
         photoUrls: [],
@@ -406,7 +408,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function removeObjectFromRoute(objectId: string) {
     const plan = plans.find((p) => p.objectId === objectId);
     if (!plan) return;
-    if (plan.works.length || plan.sessions.length) {
+    if (plan.works.length || plan.shift) {
       pushUndo(`Обʼєкт "${plan.objectName}" видалено`, () => setPlans((prev) => [...prev, plan]));
       logChange(`Обʼєкт видалено: ${plan.objectName}`);
     }
@@ -421,7 +423,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
     setPlans((prev) => [
       ...prev,
-      { objectId: obj.id, objectName: obj.name, works: [], assignedEmployeeIds: [], here: [], sessions: [], visited: false, notes: "", photoUrls: [] },
+      { objectId: obj.id, objectName: obj.name, works: [], assignedEmployeeIds: [], here: [], shift: null, visited: false, notes: "", photoUrls: [] },
     ]);
     haptic("selection");
   }
@@ -552,9 +554,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     const plan = planFor(objectId);
     if (!plan.here.length) return;
     setOnboard((prev) => [...new Set([...prev, ...plan.here])]);
-    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, here: [] })));
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId
+          ? p
+          : { ...p, here: [], shift: p.shift && !p.shift.endedAt ? { ...p.shift, endedAt: new Date().toISOString() } : p.shift },
+      ),
+    );
     haptic("light");
     logChange(`Забрано з ${plan.objectName}`);
+  }
+
+  function openVolumesForObject(objectId: string, returnTo: Step) {
+    setPlanObjectId(objectId);
+    setVolumesReturnStep(returnTo);
+    setStep("PLAN_VOLUMES");
   }
 
   // ---------- at object ----------
@@ -562,62 +576,29 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     return plans.find((p) => p.objectId === atObjectId) ?? null;
   }
 
-  function runningSessions(plan: ObjPlan) {
-    return plan.sessions.filter((s) => !s.endedAt);
-  }
-
-  function confirmStartWork() {
-    if (!atObjectId || !startingWorkId || !startPeopleSelected.length) return;
-    const plan = currentAtPlan()!;
-    const work = plan.works.find((w) => w.workId === startingWorkId)!;
+  // A single shift covers everyone dropped at the object working on all of
+  // that object's planned works together -- one button starts it, one button
+  // ends it (then walks straight into entering volumes for each work).
+  function startShift() {
+    if (!atObjectId) return;
+    const plan = currentAtPlan();
+    if (!plan || !plan.here.length) return;
     setPlans((prev) =>
-      prev.map((p) =>
-        p.objectId !== atObjectId
-          ? p
-          : {
-              ...p,
-              sessions: [
-                ...p.sessions,
-                { workId: work.workId, workName: work.workName, employeeIds: startPeopleSelected, startedAt: new Date().toISOString() },
-              ],
-            },
-      ),
+      prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, shift: { startedAt: new Date().toISOString(), employeeIds: p.here } })),
     );
     haptic("light");
-    logChange(`Почато: ${work.workName} (${plan.objectName})`);
-    setStartingWorkId(null);
-    setStartPeopleSelected([]);
+    logChange(`Почато роботи на ${plan.objectName} (${plan.here.length} людей)`);
   }
 
-  function confirmFinishWork() {
-    if (!atObjectId || !finishingSessionKey) return;
+  function finishShift() {
+    if (!atObjectId) return;
+    const plan = currentAtPlan();
+    if (!plan?.shift) return;
     const endedAt = new Date().toISOString();
-    let finishedWorkId = "";
-    const objectName = currentAtPlan()?.objectName ?? "";
-    setPlans((prev) =>
-      prev.map((p) => {
-        if (p.objectId !== atObjectId) return p;
-        return {
-          ...p,
-          sessions: p.sessions.map((s) => {
-            const key = `${s.workId}#${s.startedAt}`;
-            if (key !== finishingSessionKey) return s;
-            finishedWorkId = s.workId;
-            return { ...s, endedAt };
-          }),
-        };
-      }),
-    );
-    setFinishingSessionKey(null);
+    setPlans((prev) => prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, shift: p.shift ? { ...p.shift, endedAt } : null })));
     haptic("success");
-    // If that work's volume isn't filled yet, prompt for it right away.
-    const plan = currentAtPlan()!;
-    const work = plan.works.find((w) => w.workId === finishedWorkId);
-    logChange(`Завершено: ${work?.workName ?? finishedWorkId} (${objectName})`);
-    if (work && (!work.volume || work.volume === "?")) {
-      openVolumeDetail(atObjectId, work);
-      setStep("PLAN_VOLUMES");
-    }
+    logChange(`Завершено роботи на ${plan.objectName}`);
+    openVolumesForObject(atObjectId, "AT_OBJECT");
   }
 
   function confirmDrop() {
@@ -658,15 +639,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     return plans.map((p) => ({
       objectId: p.objectId,
       objectName: p.objectName,
-      works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.assignedEmployeeIds })),
-      sessions: p.sessions.flatMap((s) =>
-        s.employeeIds.map((employeeId) => ({
-          employeeId,
-          employeeName: employeeName(employeeId),
-          droppedAt: s.startedAt,
-          pickedUpAt: s.endedAt,
-        })),
-      ),
+      works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.shift?.employeeIds ?? [] })),
+      sessions: p.shift
+        ? p.shift.employeeIds.map((employeeId) => ({
+            employeeId,
+            employeeName: employeeName(employeeId),
+            droppedAt: p.shift!.startedAt,
+            pickedUpAt: p.shift!.endedAt,
+          }))
+        : [],
       coefs: coefList,
       notes: p.notes,
       photoUrls: p.photoUrls,
@@ -722,12 +703,24 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     PICK_OBJECTS: "HUB",
     PLAN: "HUB",
     PLAN_WORKS: "PLAN",
-    PLAN_VOLUMES: "AT_OBJECT",
     READY: "HUB",
     RETURN: "DRIVE",
     REVIEW: "RETURN",
   };
-  const goBack = () => (backTargets[step] ? setStep(backTargets[step]!) : onBack());
+  // PLAN_VOLUMES can be reached from more than one place (finishing a shift
+  // at the object, or catching up on unfilled volumes from RETURN), so its
+  // back target is wherever it was actually opened from, not a fixed step.
+  const goBack = () => {
+    if (step === "PLAN_VOLUMES") {
+      setStep(volumesReturnStep);
+      return;
+    }
+    if (backTargets[step]) {
+      setStep(backTargets[step]!);
+      return;
+    }
+    onBack();
+  };
   useTelegramBackButton(goBack);
 
   if (step === "DONE" && result) {
@@ -913,12 +906,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <div className="section-title">Маршрут</div>
               <div className="list">
                 {plans.map((p) => {
-                  const activeCount = p.sessions.filter((s) => !s.endedAt).length;
-                  const label = !p.visited ? "заплановано" : activeCount ? `🔧 роботи тривають (${activeCount})` : p.here.length ? "тут є люди" : "завершено";
+                  const shiftActive = !!(p.shift && !p.shift.endedAt);
+                  const label = !p.visited ? "заплановано" : shiftActive ? "🔧 роботи тривають" : p.here.length ? "тут є люди" : "завершено";
                   return (
                     <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
                       <span className="cell-title">📍 {p.objectName}</span>
-                      <span className={`badge ${p.visited ? (activeCount ? "warn" : "ok") : ""}`}>{label}</span>
+                      <span className={`badge ${p.visited ? (shiftActive ? "warn" : "ok") : ""}`}>{label}</span>
                     </div>
                   );
                 })}
@@ -1268,7 +1261,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 {unfilled.length > 0 && (
                   <div className="empty-state">🟡 Є роботи без обсягу: {unfilled.map((w) => w.workName).join(", ")}</div>
                 )}
-                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep("AT_OBJECT")} />
+                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep(volumesReturnStep)} />
               </>
             );
           })()}
@@ -1432,99 +1425,43 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           {(() => {
             const plan = currentAtPlan()!;
-            const running = runningSessions(plan);
-            const busyHere = new Set(running.flatMap((s) => s.employeeIds));
-            const availableHere = plan.here.filter((id) => !busyHere.has(id));
-            const notStarted = plan.works.filter((w) => !plan.sessions.some((s) => s.workId === w.workId));
+            const shiftOpen = !!(plan.shift && !plan.shift.endedAt);
             return (
               <>
                 <div className="step-badge">НА ОБʼЄКТІ</div>
                 <div className="section-title">📍 {plan.objectName}</div>
 
-                {running.length > 0 ? (
-                  running.map((s) => (
-                    <div key={`${s.workId}#${s.startedAt}`} className="active-work-card">
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                        <div>
-                          <div style={{ fontWeight: 700 }}>{s.workName}</div>
-                          <div className="hint">{s.employeeIds.map(employeeName).join(", ")}</div>
-                        </div>
-                        <button className="chip danger-btn" onClick={() => setFinishingSessionKey(`${s.workId}#${s.startedAt}`)}>
-                          ⏹ Завершити
-                        </button>
+                {shiftOpen ? (
+                  <div className="active-work-card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>Роботи тривають</div>
+                        <div className="hint">{plan.works.map((w) => w.workName).join(", ") || "—"}</div>
+                        <div className="hint">{plan.shift!.employeeIds.map(employeeName).join(", ")}</div>
                       </div>
-                      <div className="timer-big" style={{ padding: "4px 0" }}>{fmtHMS(now - new Date(s.startedAt).getTime())}</div>
+                      <button className="chip danger-btn" onClick={finishShift}>
+                        ⏹ Завершити
+                      </button>
                     </div>
-                  ))
+                    <div className="timer-big" style={{ padding: "4px 0" }}>{fmtHMS(now - new Date(plan.shift!.startedAt).getTime())}</div>
+                  </div>
                 ) : (
-                  <div className="empty-state">Немає активної роботи</div>
+                  <div className="empty-state">Роботи ще не розпочато</div>
                 )}
 
-                {startingWorkId === null && !showDropPicker && !showMovePicker && !finishingSessionKey && (
+                {!showDropPicker && !showMovePicker && (
                   <div className="list" style={{ marginTop: 8 }}>
-                    <button
-                      className="cell"
-                      onClick={() => setStartingWorkId(notStarted[0]?.workId ?? "__PICK__")}
-                      disabled={!availableHere.length || !notStarted.length}
-                    >
-                      <span className="cell-title">▶️ Почати роботу{running.length > 0 ? " (ще одна)" : ""}</span>
-                    </button>
+                    {!shiftOpen && (
+                      <button className="cell" onClick={startShift} disabled={!plan.here.length || !plan.works.length}>
+                        <span className="cell-title">▶️ Почати роботи</span>
+                        <span className="cell-sub">{plan.here.length ? `${plan.here.length} людей` : "нікого не висаджено"}</span>
+                      </button>
+                    )}
                     <button className="cell" onClick={() => setShowMovePicker(true)} disabled={!plan.here.length}>
                       <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
                     </button>
                     <button className="cell" onClick={() => setShowDropPicker(true)} disabled={!onboard.length}>
                       <span className="cell-title">👥 Висадити людей тут</span>
-                    </button>
-                  </div>
-                )}
-
-                {startingWorkId !== null && (
-                  <>
-                    <div className="section-title">Яку роботу почати</div>
-                    <div className="chip-row">
-                      {notStarted.map((w) => (
-                        <div key={w.workId} className={`chip ${startingWorkId === w.workId ? "selected" : ""}`} onClick={() => setStartingWorkId(w.workId)}>
-                          {w.workName}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="section-title">Хто виконує</div>
-                    {!availableHere.length && <div className="hint" style={{ padding: "0 16px" }}>Усі, хто тут, вже зайняті іншою роботою</div>}
-                    <div className="chip-row">
-                      {availableHere.map((id) => (
-                        <div
-                          key={id}
-                          className={`chip ${startPeopleSelected.includes(id) ? "selected" : ""}`}
-                          onClick={() => setStartPeopleSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
-                        >
-                          {employeeName(id)}
-                        </div>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                      <button
-                        className="chip"
-                        onClick={() => {
-                          setStartingWorkId(null);
-                          setStartPeopleSelected([]);
-                        }}
-                      >
-                        Скасувати
-                      </button>
-                      <button className="chip selected" onClick={confirmStartWork} disabled={!startPeopleSelected.length || startingWorkId === "__PICK__"}>
-                        Почати
-                      </button>
-                    </div>
-                  </>
-                )}
-
-                {finishingSessionKey && (
-                  <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                    <button className="chip" onClick={() => setFinishingSessionKey(null)}>
-                      Скасувати
-                    </button>
-                    <button className="chip selected" onClick={confirmFinishWork}>
-                      Підтвердити завершення
                     </button>
                   </div>
                 )}
@@ -1592,7 +1529,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </>
                 )}
 
-                <MainButton text="➡️ Продовжити маршрут" onClick={() => setStep("DRIVE")} disabled={running.length > 0} />
+                <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center" }}>
+                  Можна їхати далі з тими, хто залишився в машині — робота тут триватиме без вас.
+                </div>
+                <MainButton text="➡️ Продовжити маршрут" onClick={() => setStep("DRIVE")} />
               </>
             );
           })()}
@@ -1607,18 +1547,28 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="list">
             {plans
               .filter((p) => p.visited)
-              .map((p) => (
-                <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
-                  <span className="cell-title">📍 {p.objectName}</span>
-                  {p.here.length ? (
-                    <button className="chip" onClick={() => pickUpHere(p.objectId)}>
-                      Забрати ({p.here.map(employeeName).join(", ")})
-                    </button>
-                  ) : (
-                    <span className="badge ok">забрано</span>
-                  )}
-                </div>
-              ))}
+              .map((p) => {
+                const unfilled = p.works.filter((w) => !w.volume || w.volume === "?").length;
+                return (
+                  <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span className="cell-title">📍 {p.objectName}</span>
+                      {p.here.length ? (
+                        <button className="chip" onClick={() => pickUpHere(p.objectId)}>
+                          Забрати ({p.here.map(employeeName).join(", ")})
+                        </button>
+                      ) : (
+                        <span className="badge ok">забрано</span>
+                      )}
+                    </div>
+                    {unfilled > 0 && (
+                      <button className="chip" style={{ marginTop: 6 }} onClick={() => openVolumesForObject(p.objectId, "RETURN")}>
+                        🟡 Ввести обсяги ({unfilled})
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
           </div>
 
           <div className="section-title">Одометр на фініші</div>
@@ -1675,14 +1625,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title">Години працівників</div>
           <div className="list">
             {employeeIds.map((id) => {
-              const totalMs = plans.reduce(
-                (acc, p) =>
-                  acc +
-                  p.sessions
-                    .filter((s) => s.employeeIds.includes(id))
-                    .reduce((a, s) => a + (new Date(s.endedAt ?? new Date().toISOString()).getTime() - new Date(s.startedAt).getTime()), 0),
-                0,
-              );
+              const totalMs = plans.reduce((acc, p) => {
+                if (!p.shift || !p.shift.employeeIds.includes(id)) return acc;
+                const start = new Date(p.shift.startedAt).getTime();
+                const end = new Date(p.shift.endedAt ?? new Date().toISOString()).getTime();
+                return acc + Math.max(0, end - start);
+              }, 0);
               return (
                 <div key={id} className="cell" style={{ cursor: "default" }}>
                   <span className="cell-title">{employeeName(id)}</span>
