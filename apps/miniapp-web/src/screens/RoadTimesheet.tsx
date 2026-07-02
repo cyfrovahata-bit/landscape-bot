@@ -878,22 +878,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <span className="cell-sub">{employeeIds.map(employeeName).join(", ")}</span>
             </div>
           </div>
-          <div className="section-title">Обʼєкти · роботи · обсяги</div>
+          <div className="section-title">Обʼєкти · роботи</div>
           <div className="list">
-            {plans.map((p) => {
-              const unfilled = p.works.filter((w) => !w.volume || w.volume === "?");
-              return (
-                <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
-                  <div className="cell-title">📍 {p.objectName}</div>
-                  <div className="hint">{p.works.map((w) => `${w.workName} ${w.volume && w.volume !== "?" ? w.volume + w.unit : ""}`).join(" · ")}</div>
-                  {unfilled.length > 0 && <div className="badge warn">🟡 {unfilled.map((w) => w.workName).join(", ")}</div>}
-                </div>
-              );
-            })}
+            {plans.map((p) => (
+              <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
+                <div className="cell-title">📍 {p.objectName}</div>
+                <div className="hint">{p.works.map((w) => w.workName).join(" · ")}</div>
+              </div>
+            ))}
           </div>
-          {plans.some((p) => p.works.some((w) => !w.volume || w.volume === "?")) && (
-            <div className="empty-state">Є незаповнені обсяги — можна заповнити зі списку планування</div>
-          )}
           <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center" }}>
             Щось треба змінити? <button className="back-btn" onClick={() => setStep("HUB")}>← До меню поїздки</button>
           </div>
