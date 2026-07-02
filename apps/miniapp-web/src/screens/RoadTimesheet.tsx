@@ -144,7 +144,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [planVolumeWorkId, setPlanVolumeWorkId] = useState<string | null>(null);
   const [volumeBuffer, setVolumeBuffer] = useState("");
   const [volumeUnit, setVolumeUnit] = useState("");
-  const [assignOpenObjectId, setAssignOpenObjectId] = useState<string | null>(null);
 
   // --- drive ---
   const [onboard, setOnboard] = useState<string[]>([]);
@@ -232,16 +231,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // ---------- plan helpers ----------
   function planFor(objectId: string) {
     return plans.find((p) => p.objectId === objectId)!;
-  }
-
-  function toggleAssigned(objectId: string, employeeId: string) {
-    setPlans((prev) =>
-      prev.map((p) => {
-        if (p.objectId !== objectId) return p;
-        const has = p.assignedEmployeeIds.includes(employeeId);
-        return { ...p, assignedEmployeeIds: has ? p.assignedEmployeeIds.filter((x) => x !== employeeId) : [...p.assignedEmployeeIds, employeeId] };
-      }),
-    );
   }
 
   // ---------- works helpers ----------
@@ -511,7 +500,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     REVIEW: "RETURN",
   };
 
-  const allObjectsPlanned = plans.length > 0 && plans.every((p) => p.works.length > 0 && p.assignedEmployeeIds.length > 0);
+  const allObjectsPlanned = plans.length > 0 && plans.every((p) => p.works.length > 0);
   const readyToDepart = !!carId && !!odoStart && employeeIds.length > 0 && allObjectsPlanned;
 
   return (
@@ -536,11 +525,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               {employeeIds.length ? <span className="badge ok">{employeeIds.length} обрано</span> : <span className="badge warn">не обрано</span>}
             </button>
             <button className="cell" onClick={() => setStep("PICK_OBJECTS")}>
-              <span className="cell-title">📍 Обʼєкти та роботи</span>
+              <span className="cell-title">📍 Обʼєкти</span>
+              {plans.length ? <span className="badge ok">{plans.length} обрано</span> : <span className="badge warn">не обрано</span>}
+            </button>
+            <button className="cell" onClick={() => plans.length && setStep("PLAN")} disabled={!plans.length}>
+              <span className="cell-title">🧱 Роботи</span>
               {plans.length ? (
-                <span className={`badge ${allObjectsPlanned ? "ok" : "warn"}`}>{plans.length} обʼєктів{allObjectsPlanned ? "" : " · не готово"}</span>
+                <span className={`badge ${allObjectsPlanned ? "ok" : "warn"}`}>
+                  {plans.filter((p) => p.works.length).length}/{plans.length} з роботами
+                </span>
               ) : (
-                <span className="badge warn">не обрано</span>
+                <span className="badge warn">спочатку обʼєкти</span>
               )}
             </button>
           </div>
@@ -736,54 +731,36 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               );
             })}
           </div>
-          <MainButton text="Далі → Планування" onClick={() => setStep("PLAN")} disabled={!plans.length} />
+          <MainButton text="Зберегти" onClick={() => setStep("HUB")} />
         </>
       )}
 
       {step === "PLAN" && (
         <>
-          <div className="step-badge">📍 ОБʼЄКТИ · ПЛАНУВАННЯ</div>
-          <div className="section-title">Планування обʼєктів</div>
-          <div className="hint" style={{ padding: "0 16px 8px" }}>Заповніть роботи й людей на кожному обʼєкті</div>
-          {plans.map((plan) => {
-            const ready = plan.works.length > 0 && plan.assignedEmployeeIds.length > 0;
-            const open = assignOpenObjectId === plan.objectId;
-            return (
-              <div key={plan.objectId} className="list" style={{ marginTop: 8 }}>
-                <div className="cell" style={{ cursor: "default" }}>
-                  <span className="cell-title">📍 {plan.objectName}</span>
-                  <span className={`badge ${ready ? "ok" : "warn"}`}>{ready ? "Готово з обʼєктом" : "не готово"}</span>
-                </div>
+          <div className="step-badge">🧱 РОБОТИ</div>
+          <div className="section-title">Роботи на обʼєктах</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>
+            Оберіть обʼєкт і призначте роботи. Людей на роботах визначите по прибуттю на обʼєкт.
+          </div>
+          <div className="list">
+            {plans.map((plan) => {
+              const ready = plan.works.length > 0;
+              return (
                 <button
+                  key={plan.objectId}
                   className="cell"
                   onClick={() => {
                     setPlanObjectId(plan.objectId);
                     setStep("PLAN_WORKS");
                   }}
                 >
-                  <span className="cell-title">🧱 Роботи (обрані зі списку)</span>
-                  <span className="badge">{plan.works.length} обрано</span>
+                  <span className="cell-title">📍 {plan.objectName}</span>
+                  <span className={`badge ${ready ? "ok" : "warn"}`}>{plan.works.length ? `${plan.works.length} робіт` : "не обрано"}</span>
                 </button>
-                <button className="cell" onClick={() => setAssignOpenObjectId(open ? null : plan.objectId)}>
-                  <span className="cell-title">👥 Призначити людей</span>
-                  <span className="badge">{plan.assignedEmployeeIds.length} люди</span>
-                </button>
-                {open && (
-                  <div className="chip-row">
-                    {employeeIds.map((id) => (
-                      <div
-                        key={id}
-                        className={`chip ${plan.assignedEmployeeIds.includes(id) ? "selected" : ""}`}
-                        onClick={() => toggleAssigned(plan.objectId, id)}
-                      >
-                        {employeeName(id)}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+          {!plans.length && <div className="empty-state">Спочатку оберіть обʼєкти маршруту</div>}
           <MainButton text="Зберегти" onClick={() => setStep("HUB")} />
         </>
       )}
