@@ -5,6 +5,7 @@ coverage/
 *.log
 credentials.json
 .env
+*.tsbuildinfo
 
 # generated TS files in src and scripts (any workspace)
 **/src/**/*.js
