@@ -13,10 +13,12 @@ import { NumericKeypad } from "../components/NumericKeypad";
 // revisited/changed at any point before (or even after) departure. Once
 // everything is filled in, "Виїхати" opens a final READY check, then DRIVE ->
 // AT_OBJECT (one shift covering everyone dropped there, all planned works) -> RETURN
-// -> REVIEW -> submit. The whole day is autosaved to localStorage (task: the
-// mini-app is state-in-memory only otherwise, and Telegram can evict it), and
-// once a day is submitted it's locked (with a "request edit" escape hatch)
-// instead of silently allowing a re-opened day to be re-planned from scratch.
+// -> REVIEW -> submit. The whole day is autosaved to localStorage (the
+// mini-app is state-in-memory only otherwise, and Telegram can evict it). A
+// submitted-but-not-yet-approved day is NOT locked: reopening it restores the
+// last submission straight from the server (so the foreman always sees the
+// report), and resubmitting just overwrites it. Only an admin-approved day
+// locks, with a "request edit" escape hatch.
 type Step =
   | "HUB"
   | "PICK_CAR"
@@ -64,7 +66,27 @@ type PayrollPreview = {
   seniorEmployeeIds: string[];
 };
 
-type DayStatus = { submitted: boolean; eventId: string | null; editRequested: boolean };
+type DayStatus = { hasSubmission: boolean; approved: boolean; eventId: string | null; editRequested: boolean };
+type SubmittedTodayResponse =
+  | { found: false }
+  | {
+      found: true;
+      eventId: string;
+      carId: string | null;
+      employeeIds: string[];
+      odoStart: number | null;
+      odoStartPhoto: string | null;
+      odoEnd: number | null;
+      odoEndPhoto: string | null;
+      objects: {
+        objectId: string;
+        objectName: string;
+        works: { workId: string; workName: string; volume?: string | number }[];
+        sessions: { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string }[];
+        notes?: string;
+        photoUrls?: string[];
+      }[];
+    };
 type LastTripResponse =
   | { found: false }
   | {
@@ -215,10 +237,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // --- undo / change log / draft / submitted-lock / copy-yesterday ---
   const undoTimeoutRef = useRef<number | null>(null);
+  const draftRestoredRef = useRef(false);
   const [undo, setUndo] = useState<{ label: string; restore: () => void } | null>(null);
   const [changeLog, setChangeLog] = useState<{ ts: number; label: string }[]>([]);
   const [showChangeLog, setShowChangeLog] = useState(false);
   const [restoredBanner, setRestoredBanner] = useState(false);
+  const [submittedEditBanner, setSubmittedEditBanner] = useState(false);
   const [dayStatus, setDayStatus] = useState<DayStatus | null>(null);
   const [lastTrip, setLastTrip] = useState<LastTripSuggestion | null>(null);
 
@@ -245,10 +269,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
       .catch(() => {});
     api
-      .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
-      .then(setDayStatus)
-      .catch(() => setDayStatus({ submitted: false, eventId: null, editRequested: false }));
-    api
       .get<LastTripResponse>(`/api/road-timesheet/last-trip?before=${date}`)
       .then((res) => {
         if (res.found) setLastTrip({ date: res.date, carId: res.carId ?? "", employeeIds: res.employeeIds, objects: res.objects });
@@ -274,9 +294,76 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setCoefs(draft.coefs ?? {});
       setStep(draft.step);
       setRestoredBanner(true);
+      draftRestoredRef.current = true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Not-yet-approved submissions aren't locked -- the foreman can keep
+  // viewing/editing them. If there's no more-recent local draft already in
+  // play, pull the last submission straight from the server so a re-opened
+  // (or freshly-installed) app still shows exactly what was sent.
+  useEffect(() => {
+    api
+      .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
+      .then(async (status) => {
+        setDayStatus(status);
+        if (draftRestoredRef.current || !status.hasSubmission || status.approved) return;
+        const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
+        if (!res.found) return;
+        setCarId(res.carId ?? "");
+        setOdoStart(res.odoStart !== null ? String(res.odoStart) : "");
+        setOdoStartPhoto(res.odoStartPhoto);
+        setOdoEnd(res.odoEnd !== null ? String(res.odoEnd) : "");
+        setOdoEndPhoto(res.odoEndPhoto);
+        setEmployeeIds(res.employeeIds);
+        setOnboard(res.employeeIds);
+        const restoredPlans: ObjPlan[] = res.objects.map((o) => ({
+          objectId: o.objectId,
+          objectName: o.objectName,
+          works: o.works.map((w) => ({
+            workId: w.workId,
+            workName: w.workName,
+            unit: works.find((x) => x.id === w.workId)?.unit || "шт",
+            volume: w.volume !== undefined && w.volume !== null ? String(w.volume) : "",
+          })),
+          assignedEmployeeIds: [],
+          here: [],
+          shift: o.sessions.length
+            ? { startedAt: o.sessions[0].droppedAt, endedAt: o.sessions[0].pickedUpAt, employeeIds: o.sessions.map((s) => s.employeeId) }
+            : null,
+          visited: true,
+          notes: o.notes ?? "",
+          photoUrls: o.photoUrls ?? [],
+        }));
+        setPlans(restoredPlans);
+        setStep("REVIEW");
+        setSubmittedEditBanner(true);
+        api
+          .post<PayrollPreview>("/api/road-timesheet/preview", {
+            odoStart: res.odoStart ?? 0,
+            odoEnd: res.odoEnd ?? 0,
+            employeeIds: res.employeeIds,
+            objects: restoredPlans.map((p) => ({
+              objectId: p.objectId,
+              objectName: p.objectName,
+              works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.shift?.employeeIds ?? [] })),
+              sessions: p.shift
+                ? p.shift.employeeIds.map((employeeId) => ({
+                    employeeId,
+                    employeeName: employeeName(employeeId),
+                    droppedAt: p.shift!.startedAt,
+                    pickedUpAt: p.shift!.endedAt,
+                  }))
+                : [],
+            })),
+          })
+          .then(setPreview)
+          .catch(() => {});
+      })
+      .catch(() => setDayStatus({ hasSubmission: false, approved: false, eventId: null, editRequested: false }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date]);
 
   useEffect(() => {
     if (step === "DONE") return;
@@ -687,7 +774,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       clearDraft();
       logChange("Звіт відправлено");
       haptic("success");
-      onSaved();
     } catch (e) {
       setError((e as Error).message);
       haptic("error");
@@ -728,6 +814,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       <div>
         <div className="header">
           <h1>✅ Відправлено на підтвердження</h1>
+          <div className="hint">Можна й далі редагувати та надсилати повторно, поки адміністратор не затвердить день.</div>
         </div>
         <div className="list">
           <div className="cell">
@@ -758,7 +845,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           </div>
         ))}
-        <MainButton text="До меню" onClick={onBack} />
+        <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
+          <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати ще</button>
+        </div>
+        <MainButton text="До меню" onClick={onSaved} />
       </div>
     );
   }
@@ -775,7 +865,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     );
   }
 
-  if (dayStatus.submitted) {
+  if (dayStatus.approved) {
     return (
       <div>
         <BackRow onBack={onBack} />
@@ -784,7 +874,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         </div>
         <div className="list">
           <div className="cell" style={{ cursor: "default" }}>
-            <span className="cell-title">✅ День вже відправлено</span>
+            <span className="cell-title">✅ День затверджено адміністратором</span>
             <span className="cell-sub">{date}</span>
           </div>
         </div>
@@ -813,6 +903,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       </div>
 
       {error && <div className="empty-state">⚠️ {error}</div>}
+
+      {submittedEditBanner && (
+        <div className="hint" style={{ padding: "0 16px 8px" }}>
+          📤 Це вже відправлений звіт. Можна редагувати — після збереження буде надіслано нову версію, поки адміністратор не затвердить.
+        </div>
+      )}
 
       {undo && (
         <div className="undo-toast">
@@ -1711,7 +1807,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </>
           )}
 
-          <MainButton text={saving ? "Відправлення…" : "📤 Відправити на підтвердження"} onClick={save} disabled={saving} />
+          <MainButton
+            text={saving ? "Відправлення…" : dayStatus.hasSubmission ? "📤 Оновити звіт" : "📤 Відправити на підтвердження"}
+            onClick={save}
+            disabled={saving}
+          />
         </>
       )}
     </div>

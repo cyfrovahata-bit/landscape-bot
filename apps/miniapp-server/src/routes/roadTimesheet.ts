@@ -432,9 +432,12 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
 
 /**
  * GET /api/road-timesheet/day-status?date=YYYY-MM-DD — has this foreman
- * already submitted (RTS_SAVE) a road timesheet for this date? Used to lock
- * the mini-app into a read-only "already submitted" view instead of quietly
- * letting a re-opened day be re-planned from scratch and double-submitted.
+ * submitted (RTS_SAVE) a road timesheet for this date, and has an admin
+ * already approved it (status "ЗАТВЕРДЖЕНО" on the event, set by the admin
+ * approval flow)? A submission that isn't approved yet is NOT locked -- the
+ * foreman can keep viewing and re-editing it (each save just overwrites the
+ * same date's rows and appends a new RTS_SAVE event for the audit trail).
+ * Only an approved day is locked, with "request edit" as the escape hatch.
  */
 roadTimesheetRouter.get("/day-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -449,8 +452,7 @@ roadTimesheetRouter.get("/day-status", async (req, res) => {
       .select()
       .from(schema.events)
       .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_SAVE")))
-      .orderBy(desc(schema.events.ts))
-      .limit(1),
+      .orderBy(desc(schema.events.ts)),
     db
       .select()
       .from(schema.events)
@@ -460,14 +462,76 @@ roadTimesheetRouter.get("/day-status", async (req, res) => {
   ]);
 
   res.json({
-    submitted: saveRows.length > 0,
+    hasSubmission: saveRows.length > 0,
+    approved: saveRows.some((r) => r.status === "ЗАТВЕРДЖЕНО"),
     eventId: saveRows[0]?.eventId ?? null,
     editRequested: editRequestRows.length > 0,
   });
 });
 
 /**
- * POST /api/road-timesheet/request-edit — after a day is submitted and
+ * GET /api/road-timesheet/submitted-today?date=YYYY-MM-DD — the foreman's
+ * latest submission for today, in a shape that can be loaded straight back
+ * into the editable client state (so a re-opened, not-yet-approved day shows
+ * exactly what was sent and can be corrected/resubmitted).
+ */
+roadTimesheetRouter.get("/submitted-today", async (req, res) => {
+  const date = String(req.query.date || "");
+  if (!date) {
+    res.status(400).json({ error: "date query param is required" });
+    return;
+  }
+  const foremanTgId = BigInt(req.user!.tgId);
+
+  const [saveRows, odometerRows] = await Promise.all([
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_SAVE")))
+      .orderBy(desc(schema.events.ts))
+      .limit(1),
+    db
+      .select()
+      .from(schema.odometerDays)
+      .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.foremanTgId, foremanTgId)))
+      .limit(1),
+  ]);
+
+  const latest = saveRows[0];
+  if (!latest) {
+    res.json({ found: false });
+    return;
+  }
+
+  let payload: { odoStart?: number; odoEnd?: number; objects?: ObjectInput[] } = {};
+  try {
+    payload = JSON.parse(latest.payload ?? "{}");
+  } catch {
+    payload = {};
+  }
+  let employeeIds: string[] = [];
+  try {
+    employeeIds = JSON.parse(latest.employeeIds ?? "[]");
+  } catch {
+    employeeIds = [];
+  }
+  const odo = odometerRows[0];
+
+  res.json({
+    found: true,
+    eventId: latest.eventId,
+    carId: latest.carId,
+    employeeIds,
+    odoStart: payload.odoStart ?? odo?.startValue ?? null,
+    odoStartPhoto: odo?.startPhoto ?? null,
+    odoEnd: payload.odoEnd ?? odo?.endValue ?? null,
+    odoEndPhoto: odo?.endPhoto ?? null,
+    objects: payload.objects ?? [],
+  });
+});
+
+/**
+ * POST /api/road-timesheet/request-edit — after a day is approved and
  * locked, the foreman can ask an admin to unlock it instead of the mini-app
  * silently allowing (or silently refusing) further edits. Just logs an event
  * for the admin to see -- no automatic unlocking happens here.
