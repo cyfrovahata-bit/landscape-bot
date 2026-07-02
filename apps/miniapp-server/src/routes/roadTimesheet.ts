@@ -15,8 +15,19 @@ import {
   pickSeniorsFromRiders,
   buildSalaryPacksWithRoles,
   DEFAULT_ROAD_ALLOWANCE_BY_CLASS,
+  withLock,
+  type LockedTx,
 } from "@landscape/core";
 import { and, eq, inArray, desc, lt } from "drizzle-orm";
+
+/** Thrown to signal a 409 (reservation conflict) from inside a withLock() callback. */
+class ReservationConflictError extends Error {}
+
+/** Bounds coefficients server-side -- the client UI only offers 0.7-1.2 presets, but a
+ * direct API call could send anything, and this number directly drives payroll splits. */
+function clampCoef(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.min(2, Math.max(0.1, value as number)) : 1;
+}
 
 export const roadTimesheetRouter = Router();
 
@@ -115,8 +126,8 @@ async function computePayroll(params: { odoStart: number; odoEnd: number; employ
         employeeId,
         employeeName: v.name,
         hours: v.ms / 3_600_000,
-        disciplineCoef: coefByEmployee.get(employeeId)?.disciplineCoef ?? 1,
-        productivityCoef: coefByEmployee.get(employeeId)?.productivityCoef ?? 1,
+        disciplineCoef: clampCoef(coefByEmployee.get(employeeId)?.disciplineCoef),
+        productivityCoef: clampCoef(coefByEmployee.get(employeeId)?.productivityCoef),
       })),
     });
   }
@@ -167,14 +178,68 @@ roadTimesheetRouter.post("/preview", async (req, res) => {
   });
 });
 
+/** Employee ids among `employeeIds` already claimed by a DIFFERENT foreman today
+ * (via an earlier /reserve or a final save), per the same "latest wins, RTS_SAVE
+ * frees them" rule as GET /people-status. Runs inside the caller's locked
+ * transaction so the check and the write that follows are atomic together. */
+async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: string[], myForemanTgId: number): Promise<string[]> {
+  if (!employeeIds.length) return [];
+  const events = await tx
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", "RTS_SAVE"])));
+
+  const latestByEmployee = new Map<string, { type: string; ts: Date }>();
+  for (const e of events) {
+    if (Number(e.foremanTgId) === myForemanTgId) continue;
+    let ids: string[] = [];
+    try {
+      ids = JSON.parse(e.employeeIds ?? "[]");
+    } catch {
+      ids = [];
+    }
+    for (const id of ids) {
+      const cur = latestByEmployee.get(id);
+      if (!cur || e.ts > cur.ts) latestByEmployee.set(id, { type: e.type, ts: e.ts });
+    }
+  }
+
+  const takenIds = new Set([...latestByEmployee.entries()].filter(([, v]) => v.type !== "RTS_SAVE").map(([id]) => id));
+  return employeeIds.filter((id) => takenIds.has(id));
+}
+
+/** This foreman's most recent submission for `date`, if any -- used to reconcile
+ * (soft-cancel) objects/works that were part of a previous submission but are
+ * missing from the current one, so editing-and-resubmitting never leaves stale
+ * "ghost" rows behind in reports/timesheet/dayStatus. */
+async function fetchPreviousSubmission(date: string, foremanTgId: number): Promise<{ objects: ObjectInput[] } | null> {
+  const rows = await db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")))
+    .orderBy(desc(schema.events.ts))
+    .limit(1);
+  const latest = rows[0];
+  if (!latest) return null;
+  try {
+    const payload = JSON.parse(latest.payload ?? "{}") as { objects?: ObjectInput[] };
+    return { objects: payload.objects ?? [] };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * POST /api/road-timesheet — final save for the day, submitted once the
  * whole trip (drive out -> visit objects -> drop off/pick up people ->
  * drive back) is finished on the client. Mirrors the bot's road timesheet
- * flow (apps/bot/src/bot/flows/roadTimesheet.flow.ts).
+ * flow (apps/bot/src/bot/flows/roadTimesheet.flow.ts). Can be called more
+ * than once for the same day (editing an unapproved submission) -- each call
+ * overwrites the same date's rows and reconciles anything removed since the
+ * last submission.
  */
 roadTimesheetRouter.post("/", async (req, res) => {
-  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects } = req.body as {
+  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects, idempotencyKey } = req.body as {
     date: string;
     carId: string;
     odoStart: number;
@@ -183,6 +248,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
     odoEndPhoto?: string;
     employeeIds: string[];
     objects: ObjectInput[];
+    idempotencyKey?: string;
   };
 
   if (!date || !carId || !Array.isArray(objects) || !objects.length) {
@@ -192,107 +258,184 @@ roadTimesheetRouter.post("/", async (req, res) => {
 
   const foremanTgId = req.user!.tgId;
 
-  // Enforce the car reservation server-side too, not just as a UI hint: a car
-  // already started by a different foreman today can't be double-booked.
-  const existingForCar = await db
-    .select()
-    .from(schema.odometerDays)
-    .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-  const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
-  if (takenBySomeoneElse) {
-    res.status(409).json({ error: "Це авто вже зарезервоване іншим бригадиром на сьогодні" });
-    return;
-  }
-
+  // Read-only work (dictionary lookups, payroll math, diffing against the
+  // previous submission) happens before the lock so we hold it -- and block
+  // other foremen's reservation calls -- for as little time as possible.
   const { salaryPacks, roadAllowance, brigadierEmployeeId, seniorEmployeeIds, employeeById, perObjectHours, km, tripClass } =
     await computePayroll({ odoStart, odoEnd, employeeIds, objects });
+  const previous = await fetchPreviousSubmission(date, foremanTgId);
 
-  await writeOdometerDay({
-    date,
-    carId,
-    foremanTgId,
-    startValue: odoStart,
-    startPhoto: odoStartPhoto,
-    endValue: odoEnd,
-    endPhoto: odoEndPhoto,
-  });
+  // The idempotency key (generated once per "Відправити" tap on the client,
+  // reused across its own network retries) makes the eventId stable across
+  // retries of the *same* attempt, so a lost response + automatic retry
+  // reuses/updates one event row instead of appending a duplicate "attempt"
+  // to the audit trail. A genuinely new submission later gets a new key.
+  const safeKey = idempotencyKey && /^[a-zA-Z0-9_-]{8,80}$/.test(idempotencyKey) ? idempotencyKey : null;
+  const eventId = safeKey ? `RTS_${safeKey}` : makeEventId("RTS");
 
-  for (const obj of objects) {
-    if (obj.works?.length) {
-      await writeReports(
-        obj.works.map((w) => ({
+  try {
+    await withLock(`reserve:${date}`, async (tx) => {
+      // Enforce the car reservation server-side too, not just as a UI hint --
+      // and do the check-then-write atomically under the lock, so two
+      // concurrent requests can't both pass the check before either commits.
+      const existingForCar = await tx
+        .select()
+        .from(schema.odometerDays)
+        .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
+      const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+      if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+
+      const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
+      if (employeeConflicts.length) {
+        throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
+      }
+
+      await writeOdometerDay(
+        { date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto },
+        tx,
+      );
+
+      const currentObjectIds = new Set(objects.map((o) => o.objectId));
+
+      for (const obj of objects) {
+        if (obj.works?.length) {
+          await writeReports(
+            obj.works.map((w) => ({
+              date,
+              objectId: obj.objectId,
+              foremanTgId,
+              workId: w.workId,
+              workName: w.workName,
+              volume: w.volume,
+              volumeStatus: w.volume === undefined || w.volume === "" || w.volume === "?" ? "НЕ_ЗАПОВНЕНО" : "ЗАПОВНЕНО",
+              dayStatus: "ЗДАНО",
+            })),
+            tx,
+          );
+        }
+
+        const hoursByEmployee = perObjectHours.find((h) => h.objectId === obj.objectId)!.hoursByEmployee;
+        if (hoursByEmployee.size) {
+          await writeTimesheetRows(
+            [...hoursByEmployee.entries()].map(([employeeId, v]) => ({
+              date,
+              objectId: obj.objectId,
+              employeeId,
+              employeeName: v.name,
+              hours: Math.round((v.ms / 3_600_000) * 100) / 100,
+              source: "ROAD",
+            })),
+            tx,
+          );
+        }
+
+        const allVolumesFilled = (obj.works ?? []).every((w) => w.volume !== undefined && w.volume !== "" && w.volume !== "?");
+        await writeDayStatus(
+          {
+            date,
+            objectId: obj.objectId,
+            foremanTgId,
+            status: "ЗДАНО",
+            hasReports: (obj.works ?? []).length > 0,
+            hasReportsVolumeOk: allVolumesFilled,
+            hasTimesheet: hoursByEmployee.size > 0,
+            hasRoad: true,
+            hasOdoStart: odoStart !== undefined,
+            hasOdoEnd: odoEnd !== undefined,
+          },
+          tx,
+        );
+      }
+
+      // Reconcile against the previous submission: anything reported before
+      // but missing now gets soft-cancelled (status set to СКАСОВАНО / hours
+      // zeroed), never physically deleted, so admin-side views can still see
+      // what happened but stop counting it -- editing-and-resubmitting must
+      // not leave stale "ghost" data that silently inflates totals.
+      if (previous) {
+        for (const prevObj of previous.objects) {
+          const currentObj = objects.find((o) => o.objectId === prevObj.objectId);
+          const currentWorkIds = new Set((currentObj?.works ?? []).map((w) => w.workId));
+          const removedWorks = (prevObj.works ?? []).filter((w) => !currentWorkIds.has(w.workId));
+
+          if (removedWorks.length) {
+            await writeReports(
+              removedWorks.map((w) => ({
+                date,
+                objectId: prevObj.objectId,
+                foremanTgId,
+                workId: w.workId,
+                workName: w.workName,
+                volume: w.volume,
+                volumeStatus: "НЕ_ЗАПОВНЕНО",
+                dayStatus: "СКАСОВАНО",
+              })),
+              tx,
+            );
+          }
+
+          if (!currentObjectIds.has(prevObj.objectId)) {
+            const prevEmployeeIds = [...new Set((prevObj.sessions ?? []).map((s) => s.employeeId))];
+            if (prevEmployeeIds.length) {
+              await writeTimesheetRows(
+                prevEmployeeIds.map((employeeId) => ({
+                  date,
+                  objectId: prevObj.objectId,
+                  employeeId,
+                  employeeName: employeeById.get(employeeId)?.name ?? employeeId,
+                  hours: 0,
+                  source: "ROAD_СКАСОВАНО",
+                })),
+                tx,
+              );
+            }
+            await writeDayStatus({ date, objectId: prevObj.objectId, foremanTgId, status: "СКАСОВАНО" }, tx);
+          }
+        }
+      }
+
+      // Road allowance: a fixed per-trip amount by trip class, split evenly
+      // among everyone who rode along (not just those who worked), written
+      // as its own ROAD_TRIP allowance row per rider -- matches the bot.
+      const riders = employeeIds ?? [];
+      if (riders.length) {
+        await writeAllowanceRows(
+          riders.map((employeeId) => ({
+            date,
+            foremanTgId,
+            type: "ROAD_TRIP",
+            employeeId,
+            employeeName: employeeById.get(employeeId)?.name ?? employeeId,
+            objectId: "ROAD",
+            amount: roadAllowance.perPerson,
+            meta: JSON.stringify({ km, tripClass, carId }),
+            dayStatus: "ЧЕРНЕТКА",
+          })),
+          tx,
+        );
+      }
+
+      await writeEvent(
+        {
+          eventId,
+          status: "АКТИВНА",
           date,
-          objectId: obj.objectId,
           foremanTgId,
-          workId: w.workId,
-          workName: w.workName,
-          volume: w.volume,
-          volumeStatus: w.volume === undefined || w.volume === "" || w.volume === "?" ? "НЕ_ЗАПОВНЕНО" : "ЗАПОВНЕНО",
-          dayStatus: "ЗДАНО",
-        })),
+          type: "RTS_SAVE",
+          carId,
+          employeeIds: JSON.stringify(employeeIds ?? []),
+          payload: JSON.stringify({ odoStart, odoEnd, km, tripClass, objects, salaryPacks, roadAllowance }),
+        },
+        tx,
       );
-    }
-
-    const hoursByEmployee = perObjectHours.find((h) => h.objectId === obj.objectId)!.hoursByEmployee;
-    if (hoursByEmployee.size) {
-      await writeTimesheetRows(
-        [...hoursByEmployee.entries()].map(([employeeId, v]) => ({
-          date,
-          objectId: obj.objectId,
-          employeeId,
-          employeeName: v.name,
-          hours: Math.round((v.ms / 3_600_000) * 100) / 100,
-          source: "ROAD",
-        })),
-      );
-    }
-
-    const allVolumesFilled = (obj.works ?? []).every((w) => w.volume !== undefined && w.volume !== "" && w.volume !== "?");
-    await writeDayStatus({
-      date,
-      objectId: obj.objectId,
-      foremanTgId,
-      status: "ЗДАНО",
-      hasReports: (obj.works ?? []).length > 0,
-      hasReportsVolumeOk: allVolumesFilled,
-      hasTimesheet: hoursByEmployee.size > 0,
-      hasRoad: true,
-      hasOdoStart: odoStart !== undefined,
-      hasOdoEnd: odoEnd !== undefined,
     });
+  } catch (e) {
+    if (e instanceof ReservationConflictError) {
+      res.status(409).json({ error: e.message });
+      return;
+    }
+    throw e;
   }
-
-  // Road allowance: a fixed per-trip amount by trip class, split evenly among
-  // everyone who rode along (not just those who worked), written as its own
-  // ROAD_TRIP allowance row per rider -- matches the bot exactly.
-  const riders = employeeIds ?? [];
-  if (riders.length) {
-    await writeAllowanceRows(
-      riders.map((employeeId) => ({
-        date,
-        foremanTgId,
-        type: "ROAD_TRIP",
-        employeeId,
-        employeeName: employeeById.get(employeeId)?.name ?? employeeId,
-        objectId: "ROAD",
-        amount: roadAllowance.perPerson,
-        meta: JSON.stringify({ km, tripClass, carId }),
-        dayStatus: "ЧЕРНЕТКА",
-      })),
-    );
-  }
-
-  const eventId = makeEventId("RTS");
-  await writeEvent({
-    eventId,
-    status: "АКТИВНА",
-    date,
-    foremanTgId,
-    type: "RTS_SAVE",
-    carId,
-    employeeIds: JSON.stringify(employeeIds ?? []),
-    payload: JSON.stringify({ odoStart, odoEnd, km, tripClass, objects, salaryPacks, roadAllowance }),
-  });
 
   res.json({ eventId, km, tripClass, salaryPacks, roadAllowance, brigadierEmployeeId, seniorEmployeeIds });
 });
@@ -303,7 +446,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
  * the bot's real-time car/people locking (buildBusyCarsMap/buildBusyEmployeesMap
  * in roadTimesheet.utils.ts): without an early write, two foremen could pick
  * the same car or the same person, since the mini-app otherwise only saves
- * everything in one batch at the very end of the day.
+ * everything in one batch at the very end of the day. Uses the same
+ * per-date lock as the final save, so the two can't race each other either.
  */
 roadTimesheetRouter.post("/reserve", async (req, res) => {
   const { date, carId, employeeIds } = req.body as { date: string; carId?: string; employeeIds?: string[] };
@@ -313,30 +457,44 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
   }
   const foremanTgId = req.user!.tgId;
 
-  if (carId) {
-    const existingForCar = await db
-      .select()
-      .from(schema.odometerDays)
-      .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-    const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
-    if (takenBySomeoneElse) {
-      res.status(409).json({ error: "Це авто вже зарезервоване іншим бригадиром на сьогодні" });
+  try {
+    await withLock(`reserve:${date}`, async (tx) => {
+      if (carId) {
+        const existingForCar = await tx
+          .select()
+          .from(schema.odometerDays)
+          .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
+        const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+        if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+        // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
+        // date+carId, so the real ODO_START value submitted later just updates it.
+        await writeOdometerDay({ date, carId, foremanTgId }, tx);
+      }
+
+      if (employeeIds?.length) {
+        const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds, foremanTgId);
+        if (employeeConflicts.length) {
+          throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
+        }
+        await writeEvent(
+          {
+            eventId: makeEventId("RTSRSV"),
+            status: "АКТИВНА",
+            date,
+            foremanTgId,
+            type: "RTS_RESERVE_PEOPLE",
+            employeeIds: JSON.stringify(employeeIds),
+          },
+          tx,
+        );
+      }
+    });
+  } catch (e) {
+    if (e instanceof ReservationConflictError) {
+      res.status(409).json({ error: e.message });
       return;
     }
-    // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
-    // date+carId, so the real ODO_START value submitted later just updates it.
-    await writeOdometerDay({ date, carId, foremanTgId });
-  }
-
-  if (employeeIds?.length) {
-    await writeEvent({
-      eventId: makeEventId("RTSRSV"),
-      status: "АКТИВНА",
-      date,
-      foremanTgId,
-      type: "RTS_RESERVE_PEOPLE",
-      employeeIds: JSON.stringify(employeeIds),
-    });
+    throw e;
   }
 
   res.json({ ok: true });

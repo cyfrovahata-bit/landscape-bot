@@ -1,4 +1,6 @@
 export { db, schema } from "./db.js";
+export { withLock } from "./lock.js";
+export type { LockedTx } from "./lock.js";
 export { runMigrations } from "./migrate.js";
 export { runSyncCycle, startSyncLoop } from "./sync/syncWorker.js";
 export * as sheetsClient from "./google/sheets.js";

@@ -129,7 +129,10 @@ export const reports = pgTable(
   },
   (t) => [
     index("reports_date_object_idx").on(t.date, t.objectId),
-    uniqueIndex("reports_date_object_work_uq").on(t.date, t.objectId, t.workId),
+    // Includes foremanTgId: two different brigades can legitimately both
+    // report volumes for the same work on the same object on the same day,
+    // and must not silently overwrite each other's numbers (see writers.ts).
+    uniqueIndex("reports_date_object_work_foreman_uq").on(t.date, t.objectId, t.workId, t.foremanTgId),
   ],
 );
 

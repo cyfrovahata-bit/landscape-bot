@@ -18,17 +18,24 @@ function dedupeByKey<T extends Record<string, any>>(rows: T[], keyFields: string
   return [...byKey.values()];
 }
 
+type Executor = Pick<typeof db, "insert">;
+
 /**
  * Generic batch upsert: insert rows, on conflict overwrite with the incoming values.
  * `updateColumns` are the TS field names as defined in the schema (e.g. "foremanTgId"),
  * NOT the underlying snake_case DB column names — Drizzle's `set` keys must match the
  * schema's field names, it resolves the real column internally.
+ *
+ * Accepts an optional `executor` (a `db.transaction()` callback's `tx`) so callers that
+ * need several upserts to commit-or-rollback together can pass the same transaction
+ * through instead of each call using its own implicit one-statement transaction.
  */
 export async function upsertBatch<T extends Record<string, any>>(
   table: PgTable,
   rows: T[],
   conflictColumn: any,
   updateColumns: string[],
+  executor: Executor = db,
 ) {
   if (!rows.length) return;
 
@@ -53,7 +60,7 @@ export async function upsertBatch<T extends Record<string, any>>(
   const CHUNK = 500;
   for (let i = 0; i < deduped.length; i += CHUNK) {
     const chunk = deduped.slice(i, i + CHUNK);
-    await db
+    await executor
       .insert(table)
       .values(chunk as any)
       .onConflictDoUpdate({ target: conflictColumn, set });

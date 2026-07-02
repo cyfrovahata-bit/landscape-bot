@@ -53,6 +53,10 @@ type ObjPlan = {
   photoUrls: string[];
 };
 
+// Where an employee currently is: exactly one of onboard, one specific
+// object's `here`, or nowhere (taken off the day's active roster entirely).
+type Location = { kind: "onboard" } | { kind: "object"; objectId: string } | { kind: "nowhere" };
+
 type CoefPair = { disciplineCoef: number; productivityCoef: number };
 
 type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
@@ -182,7 +186,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     return () => clearInterval(t);
   }, []);
 
-  const [date] = useState(() => todayISO());
+  const [date, setDate] = useState(() => todayISO());
 
   // --- dictionaries ---
   const [cars, setCars] = useState<Car[]>([]);
@@ -277,10 +281,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   }, [date]);
 
   // Restore an autosaved draft once on mount (survives the mini-app being
-  // killed/reopened on the same device). Ignored if it's for a different day.
+  // killed/reopened on the same device). Deliberately does NOT require
+  // draft.date === today: a night shift started at 23:00 and reopened after
+  // an app crash at 01:30 is a different calendar date by then, but it's
+  // still the same unfinished day and must not silently vanish. Instead the
+  // draft's own date is adopted (`setDate` below), and every date-scoped
+  // fetch (car/people status, day-status, submitted-today) naturally re-runs
+  // against the corrected date once it changes.
   useEffect(() => {
     const draft = loadDraft<DraftShape>();
-    if (draft && draft.date === date && draft.step !== "DONE") {
+    if (draft && draft.step !== "DONE") {
+      if (draft.date !== date) setDate(draft.date);
       setCarId(draft.carId);
       setOdoStart(draft.odoStart);
       setOdoStartPhoto(draft.odoStartPhoto);
@@ -476,6 +487,29 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   }
 
   // ---------- people helpers ----------
+  // The single place an employee's physical location ever changes. Every
+  // drop-off/pick-up/transfer/removal funnels through this so "an employee
+  // is never in two places at once" is guaranteed by construction, not by
+  // every call site remembering to clean up both `onboard` and every
+  // object's `here` array by hand.
+  function moveEmployeesTo(ids: string[], location: Location) {
+    if (!ids.length) return;
+    const idSet = new Set(ids);
+    setOnboard((prev) => {
+      const rest = prev.filter((id) => !idSet.has(id));
+      return location.kind === "onboard" ? [...new Set([...rest, ...ids])] : rest;
+    });
+    setPlans((prev) =>
+      prev.map((p) => {
+        const isTarget = location.kind === "object" && p.objectId === location.objectId;
+        const hadAny = p.here.some((id) => idSet.has(id));
+        if (!isTarget && !hadAny) return p;
+        const rest = p.here.filter((id) => !idSet.has(id));
+        return { ...p, here: isTarget ? [...new Set([...rest, ...ids])] : rest };
+      }),
+    );
+  }
+
   function toggleEmployee(id: string) {
     if (busyEmployees.has(id)) return;
     if (employeeIds.includes(id)) {
@@ -485,6 +519,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         logChange(`${name} видалено з поїздки`);
       }
       setEmployeeIds((prev) => prev.filter((x) => x !== id));
+      moveEmployeesTo([id], { kind: "nowhere" });
     } else {
       setEmployeeIds((prev) => [...prev, id]);
     }
@@ -631,8 +666,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function dropAtObject(objectId: string, ids: string[]) {
     if (!ids.length) return;
     const objectName = planFor(objectId).objectName;
-    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, here: [...new Set([...p.here, ...ids])], visited: true })));
-    setOnboard((prev) => prev.filter((id) => !ids.includes(id)));
+    moveEmployeesTo(ids, { kind: "object", objectId });
+    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
     haptic("light");
     logChange(`Висаджено ${ids.length} на ${objectName}`);
   }
@@ -640,12 +675,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function pickUpHere(objectId: string) {
     const plan = planFor(objectId);
     if (!plan.here.length) return;
-    setOnboard((prev) => [...new Set([...prev, ...plan.here])]);
+    moveEmployeesTo(plan.here, { kind: "onboard" });
     setPlans((prev) =>
       prev.map((p) =>
-        p.objectId !== objectId
-          ? p
-          : { ...p, here: [], shift: p.shift && !p.shift.endedAt ? { ...p.shift, endedAt: new Date().toISOString() } : p.shift },
+        p.objectId !== objectId ? p : { ...p, shift: p.shift && !p.shift.endedAt ? { ...p.shift, endedAt: new Date().toISOString() } : p.shift },
       ),
     );
     haptic("light");
@@ -691,8 +724,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function confirmDrop() {
     if (!atObjectId || !dropSelected.length) return;
     const objectName = currentAtPlan()?.objectName ?? "";
-    setPlans((prev) => prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, here: [...new Set([...p.here, ...dropSelected])] })));
-    setOnboard((prev) => prev.filter((id) => !dropSelected.includes(id)));
+    moveEmployeesTo(dropSelected, { kind: "object", objectId: atObjectId });
     haptic("light");
     logChange(`Висаджено ${dropSelected.length} на ${objectName}`);
     setDropSelected([]);
@@ -704,13 +736,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     const fromName = currentAtPlan()?.objectName ?? "";
     const toName = plans.find((p) => p.objectId === moveTargetId)?.objectName ?? "";
     const count = moveSelected.length;
-    setPlans((prev) =>
-      prev.map((p) => {
-        if (p.objectId === atObjectId) return { ...p, here: p.here.filter((id) => !moveSelected.includes(id)) };
-        if (p.objectId === moveTargetId) return { ...p, here: [...new Set([...p.here, ...moveSelected])] };
-        return p;
-      }),
-    );
+    moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId });
     haptic("light");
     logChange(`Перенесено ${count} з ${fromName} на ${toName}`);
     setMoveSelected([]);
@@ -759,6 +785,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setSaving(true);
     setError(null);
     try {
+      // Generated once per tap and reused across this call's own automatic
+      // network retries (see lib/api.ts): if a retry happens because the
+      // response was lost but the write actually succeeded, the server
+      // treats it as the same submission attempt instead of logging a
+      // second, phantom one. A later tap (a genuinely new edit/resubmit)
+      // gets a fresh key from a fresh call to save().
+      const idempotencyKey = crypto.randomUUID();
       const res = await api.post<PayrollPreview & { eventId: string }>("/api/road-timesheet", {
         date,
         carId,
@@ -768,6 +801,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         odoEndPhoto,
         employeeIds,
         objects: buildObjectsPayload(),
+        idempotencyKey,
       });
       setResult(res);
       setStep("DONE");

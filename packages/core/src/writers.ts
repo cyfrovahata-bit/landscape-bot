@@ -9,8 +9,10 @@ import {
   MATERIALS_MOVE_HEADERS,
   TOOLS_MOVE_HEADERS,
 } from "./google/names.js";
-import { schema } from "./db.js";
+import { db, schema } from "./db.js";
 import { upsertBatch } from "./sync/upsert.js";
+
+type Executor = Pick<typeof db, "insert">;
 
 /**
  * Writers used by the mini-app server. Google Sheets is always written
@@ -40,7 +42,7 @@ export type EventInput = {
   msgId?: number;
 };
 
-export async function writeEvent(e: EventInput) {
+export async function writeEvent(e: EventInput, tx?: Executor) {
   const ts = e.ts ?? nowISO();
   const updatedAt = nowISO();
 
@@ -85,6 +87,7 @@ export async function writeEvent(e: EventInput) {
     ],
     schema.events.eventId,
     ["status", "refEventId", "chatId", "ts", "date", "foremanTgId", "type", "objectId", "carId", "employeeIds", "payload", "msgId"],
+    tx,
   );
 }
 
@@ -106,7 +109,7 @@ function classifyTripByKm(km: number): "S" | "M" | "L" | "XL" {
   return "XL";
 }
 
-export async function writeOdometerDay(row: OdometerDayInput) {
+export async function writeOdometerDay(row: OdometerDayInput, tx?: Executor) {
   const updatedAt = nowISO();
   const km =
     typeof row.startValue === "number" && typeof row.endValue === "number"
@@ -149,6 +152,7 @@ export async function writeOdometerDay(row: OdometerDayInput) {
     ],
     [schema.odometerDays.date, schema.odometerDays.carId],
     ["foremanTgId", "startValue", "startPhoto", "endValue", "endPhoto", "kmDay", "tripClass"],
+    tx,
   );
 
   return { km, tripClass };
@@ -163,7 +167,7 @@ export type TimesheetRowInput = {
   source: string;
 };
 
-export async function writeTimesheetRows(rows: TimesheetRowInput[]) {
+export async function writeTimesheetRows(rows: TimesheetRowInput[], tx?: Executor) {
   for (const row of rows) {
     await upsertRowByKeys(
       SHEET_NAMES.timesheet,
@@ -193,6 +197,7 @@ export async function writeTimesheetRows(rows: TimesheetRowInput[]) {
     })),
     [schema.timesheetEntries.date, schema.timesheetEntries.objectId, schema.timesheetEntries.employeeId],
     ["employeeName", "hours", "source"],
+    tx,
   );
 }
 
@@ -207,17 +212,21 @@ export type ReportRowInput = {
   dayStatus: string;
 };
 
-export async function writeReports(rows: ReportRowInput[]) {
+export async function writeReports(rows: ReportRowInput[], tx?: Executor) {
   for (const row of rows) {
+    // Keyed by date+objectId+workId+foremanTgId (not just date+objectId+workId):
+    // two different brigades can legitimately both report volumes for the same
+    // work on the same object on the same day, and must not silently overwrite
+    // each other's numbers.
     await upsertRowByKeys(
       SHEET_NAMES.reports,
       {
         ["ДАТА"]: row.date,
         ["ОБʼЄКТ_ID"]: row.objectId,
         ["РОБОТА_ID"]: row.workId,
+        ["БРИГАДИР_TG_ID"]: row.foremanTgId,
       },
       {
-        ["БРИГАДИР_TG_ID"]: row.foremanTgId,
         ["НАЗВА_РОБОТИ"]: row.workName,
         ["ОБСЯГ"]: row.volume ?? "",
         ["СТАТУС_ОБСЯГУ"]: row.volumeStatus,
@@ -239,8 +248,9 @@ export async function writeReports(rows: ReportRowInput[]) {
       volumeStatus: row.volumeStatus,
       dayStatus: row.dayStatus,
     })),
-    [schema.reports.date, schema.reports.objectId, schema.reports.workId],
-    ["foremanTgId", "workName", "volume", "volumeStatus", "dayStatus"],
+    [schema.reports.date, schema.reports.objectId, schema.reports.workId, schema.reports.foremanTgId],
+    ["workName", "volume", "volumeStatus", "dayStatus"],
+    tx,
   );
 }
 
@@ -259,7 +269,7 @@ export type DayStatusInput = {
   hasMaterials?: boolean;
 };
 
-export async function writeDayStatus(row: DayStatusInput) {
+export async function writeDayStatus(row: DayStatusInput, tx?: Executor) {
   const yn = (b?: boolean) => (b ? "так" : "ні");
 
   await upsertRowByKeys(
@@ -313,6 +323,7 @@ export async function writeDayStatus(row: DayStatusInput) {
       "hasLogistics",
       "hasMaterials",
     ],
+    tx,
   );
 }
 
@@ -329,7 +340,7 @@ export type AllowanceInput = {
 };
 
 /** Mirrors the bot's upsertAllowanceRow: keyed by date+foremanTgId+type+employeeId+objectId. */
-export async function writeAllowanceRows(rows: AllowanceInput[]) {
+export async function writeAllowanceRows(rows: AllowanceInput[], tx?: Executor) {
   for (const row of rows) {
     await upsertRowByKeys(
       SHEET_NAMES.allowances,
@@ -365,6 +376,7 @@ export async function writeAllowanceRows(rows: AllowanceInput[]) {
     })),
     [schema.allowances.date, schema.allowances.foremanTgId, schema.allowances.type, schema.allowances.employeeId, schema.allowances.objectId],
     ["employeeName", "amount", "meta", "dayStatus"],
+    tx,
   );
 }
 
