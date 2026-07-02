@@ -6,6 +6,7 @@ import { Materials } from "./screens/Materials";
 import { Stats } from "./screens/Stats";
 import { RoadTimesheet } from "./screens/RoadTimesheet";
 import { ComingSoon } from "./screens/ComingSoon";
+import { SyncStatusPill } from "./components/SyncStatusPill";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
@@ -26,6 +27,7 @@ export default function App() {
 
   return (
     <>
+      <SyncStatusPill />
       {toast && <div className="toast">{toast}</div>}
 
       {screen === "menu" && <Menu userName={user?.first_name} onNavigate={setScreen} />}

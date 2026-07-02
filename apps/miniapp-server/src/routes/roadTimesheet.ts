@@ -16,7 +16,7 @@ import {
   buildSalaryPacksWithRoles,
   DEFAULT_ROAD_ALLOWANCE_BY_CLASS,
 } from "@landscape/core";
-import { and, eq, inArray, desc } from "drizzle-orm";
+import { and, eq, inArray, desc, lt } from "drizzle-orm";
 
 export const roadTimesheetRouter = Router();
 
@@ -52,6 +52,8 @@ type ObjectInput = {
   works: WorkInput[];
   sessions: WorkSession[];
   coefs?: CoefInput[];
+  notes?: string;
+  photoUrls?: string[];
 };
 
 /**
@@ -426,6 +428,122 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
     .map(([employeeId, v]) => ({ employeeId, foremanName: nameByTgId.get(v.foremanTgId) ?? `Бригадир ${v.foremanTgId}` }));
 
   res.json({ taken });
+});
+
+/**
+ * GET /api/road-timesheet/day-status?date=YYYY-MM-DD — has this foreman
+ * already submitted (RTS_SAVE) a road timesheet for this date? Used to lock
+ * the mini-app into a read-only "already submitted" view instead of quietly
+ * letting a re-opened day be re-planned from scratch and double-submitted.
+ */
+roadTimesheetRouter.get("/day-status", async (req, res) => {
+  const date = String(req.query.date || "");
+  if (!date) {
+    res.status(400).json({ error: "date query param is required" });
+    return;
+  }
+  const foremanTgId = BigInt(req.user!.tgId);
+
+  const [saveRows, editRequestRows] = await Promise.all([
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_SAVE")))
+      .orderBy(desc(schema.events.ts))
+      .limit(1),
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_EDIT_REQUEST")))
+      .orderBy(desc(schema.events.ts))
+      .limit(1),
+  ]);
+
+  res.json({
+    submitted: saveRows.length > 0,
+    eventId: saveRows[0]?.eventId ?? null,
+    editRequested: editRequestRows.length > 0,
+  });
+});
+
+/**
+ * POST /api/road-timesheet/request-edit — after a day is submitted and
+ * locked, the foreman can ask an admin to unlock it instead of the mini-app
+ * silently allowing (or silently refusing) further edits. Just logs an event
+ * for the admin to see -- no automatic unlocking happens here.
+ */
+roadTimesheetRouter.post("/request-edit", async (req, res) => {
+  const { date, eventId, reason } = req.body as { date: string; eventId?: string; reason?: string };
+  if (!date) {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+  const foremanTgId = req.user!.tgId;
+
+  await writeEvent({
+    eventId: makeEventId("RTSEDIT"),
+    status: "АКТИВНА",
+    date,
+    foremanTgId,
+    type: "RTS_EDIT_REQUEST",
+    refEventId: eventId,
+    payload: JSON.stringify({ reason: reason ?? "" }),
+  });
+
+  res.json({ ok: true });
+});
+
+/**
+ * GET /api/road-timesheet/last-trip?before=YYYY-MM-DD — the foreman's most
+ * recently submitted road timesheet strictly before the given date, used to
+ * offer "repeat yesterday's route" on a fresh empty day instead of making
+ * the foreman re-enter a route they drive every week.
+ */
+roadTimesheetRouter.get("/last-trip", async (req, res) => {
+  const before = String(req.query.before || "");
+  if (!before) {
+    res.status(400).json({ error: "before query param is required" });
+    return;
+  }
+  const foremanTgId = BigInt(req.user!.tgId);
+
+  const rows = await db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_SAVE"), lt(schema.events.date, before)))
+    .orderBy(desc(schema.events.date), desc(schema.events.ts))
+    .limit(1);
+
+  const prior = rows[0];
+  if (!prior) {
+    res.json({ found: false });
+    return;
+  }
+
+  let payload: { objects?: ObjectInput[] } = {};
+  try {
+    payload = JSON.parse(prior.payload ?? "{}");
+  } catch {
+    payload = {};
+  }
+  let employeeIds: string[] = [];
+  try {
+    employeeIds = JSON.parse(prior.employeeIds ?? "[]");
+  } catch {
+    employeeIds = [];
+  }
+
+  res.json({
+    found: true,
+    date: prior.date,
+    carId: prior.carId,
+    employeeIds,
+    objects: (payload.objects ?? []).map((o) => ({
+      objectId: o.objectId,
+      objectName: o.objectName,
+      works: (o.works ?? []).map((w) => ({ workId: w.workId, workName: w.workName })),
+    })),
+  });
 });
 
 /** GET /api/road-timesheet/today?date=YYYY-MM-DD — for the review screen. */

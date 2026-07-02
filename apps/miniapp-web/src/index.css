@@ -369,3 +369,96 @@ body {
   border-color: rgba(255, 59, 48, 0.4) !important;
   color: #d70015;
 }
+
+.sync-pill {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 1001;
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #1c1c1e;
+  color: #fff;
+}
+
+.sync-pill.offline {
+  background: #d70015;
+}
+
+.undo-toast {
+  position: fixed;
+  bottom: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #1c1c1e;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  max-width: calc(100% - 32px);
+}
+
+.undo-toast button {
+  border: none;
+  background: none;
+  color: #6ab0ff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.notes-textarea {
+  width: calc(100% - 24px);
+  margin: 8px 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  font: inherit;
+  min-height: 64px;
+  resize: vertical;
+}
+
+.cell-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--tg-border);
+}
+
+.cell-row:last-child {
+  border-bottom: none;
+}
+
+.cell-row .cell {
+  flex: 1;
+  border-bottom: none;
+}
+
+.cell-row .cell-action {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  padding: 0 16px;
+  cursor: pointer;
+}
+
+.suggestion-card {
+  margin: 8px 12px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(0, 122, 255, 0.08);
+  border: 1px solid rgba(0, 122, 255, 0.25);
+}
+
+.suggestion-card .cell-title {
+  font-size: 15px;
+  font-weight: 600;
+}
