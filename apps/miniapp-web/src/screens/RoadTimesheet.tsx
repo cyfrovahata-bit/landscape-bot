@@ -124,6 +124,30 @@ type DraftShape = {
   coefs: Record<string, CoefPair>;
 };
 
+// Autosaved drafts can predate a schema change (e.g. the old singular
+// `shift` field replaced by per-employee `sessions`) and sit in localStorage
+// for up to MAX_AGE_MS, so restoring one has to tolerate whatever shape an
+// older build of this screen last wrote instead of crashing on load.
+function normalizeDraftPlan(raw: unknown): ObjPlan {
+  const p = raw as Partial<ObjPlan> & { shift?: { startedAt: string; endedAt?: string; employeeIds: string[] } | null };
+  const sessions: EmployeeSession[] = Array.isArray(p.sessions)
+    ? p.sessions
+    : p.shift
+      ? p.shift.employeeIds.map((employeeId) => ({ employeeId, startedAt: p.shift!.startedAt, endedAt: p.shift!.endedAt }))
+      : [];
+  return {
+    objectId: p.objectId ?? "",
+    objectName: p.objectName ?? "",
+    works: (p.works ?? []).map((w) => ({ ...w, active: w.active ?? true })),
+    assignedEmployeeIds: p.assignedEmployeeIds ?? [],
+    here: p.here ?? [],
+    sessions,
+    visited: p.visited ?? false,
+    notes: p.notes ?? "",
+    photoUrls: p.photoUrls ?? [],
+  };
+}
+
 const UNITS = ["м²", "м", "пог.м", "шт"];
 const COEF_PRESETS = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
 
@@ -325,7 +349,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setOdoEnd(draft.odoEnd);
       setOdoEndPhoto(draft.odoEndPhoto);
       setEmployeeIds(draft.employeeIds);
-      setPlans(draft.plans);
+      setPlans((draft.plans ?? []).map(normalizeDraftPlan));
       setOnboard(draft.onboard);
       setTripStartedAt(draft.tripStartedAt);
       setAtObjectId(draft.atObjectId);
