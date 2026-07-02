@@ -31,23 +31,24 @@ type Step =
   | "READY"
   | "DRIVE"
   | "AT_OBJECT"
+  | "RETURN_PICKUP"
   | "RETURN"
   | "REVIEW"
   | "DONE";
 
-type PlannedWork = { workId: string; workName: string; unit: string; volume: string };
-// One shared "shift" per object visit: started by a single button covering
-// everyone currently dropped there, working on all of that object's planned
-// works together (not tracked per-work -- payroll only cares about total
-// object-level presence time, not which specific work someone did).
-type Shift = { startedAt: string; endedAt?: string; employeeIds: string[] };
+type PlannedWork = { workId: string; workName: string; unit: string; volume: string; active: boolean };
+// Per-employee work session at an object: started when work begins for that
+// person, ended either individually (picked up early / stopped alone) or all
+// together via "Завершити". Lets people finish and leave an object at
+// different times instead of a single all-or-nothing shift.
+type EmployeeSession = { employeeId: string; startedAt: string; endedAt?: string };
 type ObjPlan = {
   objectId: string;
   objectName: string;
   works: PlannedWork[];
   assignedEmployeeIds: string[]; // planned before departure
   here: string[]; // physically dropped off at this object right now
-  shift: Shift | null;
+  sessions: EmployeeSession[];
   visited: boolean; // reached (formally, or via a quick drop-off during the drive)
   notes: string;
   photoUrls: string[];
@@ -165,6 +166,20 @@ function groupByCity(objects: WorkObject[]) {
     .sort((a, b) => (a.id === NO_CITY ? 1 : b.id === NO_CITY ? -1 : a.title.localeCompare(b.title)));
 }
 
+function groupByWorkCategory(worksList: Work[]) {
+  const NO_CATEGORY = "__NO_CATEGORY__";
+  const map = new Map<string, Work[]>();
+  for (const w of worksList) {
+    const cat = (w.category ?? "").trim() || NO_CATEGORY;
+    const list = map.get(cat) ?? [];
+    list.push(w);
+    map.set(cat, list);
+  }
+  return [...map.entries()]
+    .map(([id, members]) => ({ id, title: id === NO_CATEGORY ? "Без категорії" : id, members: [...members].sort((a, b) => a.name.localeCompare(b.name)) }))
+    .sort((a, b) => (a.id === NO_CATEGORY ? 1 : b.id === NO_CATEGORY ? -1 : a.title.localeCompare(b.title)));
+}
+
 function fmtHMS(ms: number) {
   const total = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(total / 3600);
@@ -216,9 +231,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // --- planning (works / people per object / volumes) ---
   const [planObjectId, setPlanObjectId] = useState<string | null>(null);
   const [planWorksSearch, setPlanWorksSearch] = useState("");
+  const [expandedWorkCategoryId, setExpandedWorkCategoryId] = useState<string | null>(null);
   const [planVolumeWorkId, setPlanVolumeWorkId] = useState<string | null>(null);
   const [volumeBuffer, setVolumeBuffer] = useState("");
   const [volumeUnit, setVolumeUnit] = useState("");
+
+  // --- pre-departure review (READY) ---
+  const [editReturnStep, setEditReturnStep] = useState<Step>("HUB");
+  const [worksReturnStep, setWorksReturnStep] = useState<Step>("PLAN");
+  const [readyPeopleExpanded, setReadyPeopleExpanded] = useState(false);
+  const [readyExpandedObjectId, setReadyExpandedObjectId] = useState<string | null>(null);
 
   // --- payroll coefficients (day-wide, applied to every object) ---
   const [coefs, setCoefs] = useState<Record<string, CoefPair>>({});
@@ -229,9 +251,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [tripStartedAt, setTripStartedAt] = useState<string | null>(null);
   const [driveDropTargetId, setDriveDropTargetId] = useState<string | null>(null);
   const [driveDropSelected, setDriveDropSelected] = useState<string[]>([]);
+  const [showRoadsideActions, setShowRoadsideActions] = useState(false);
+  const [expandedDriveObjectId, setExpandedDriveObjectId] = useState<string | null>(null);
+  const [showArrivePicker, setShowArrivePicker] = useState(false);
 
   // --- at object ---
   const [atObjectId, setAtObjectId] = useState<string | null>(null);
+  const [atObjectDetailsExpanded, setAtObjectDetailsExpanded] = useState(false);
   const [volumesReturnStep, setVolumesReturnStep] = useState<Step>("AT_OBJECT");
   const [dropSelected, setDropSelected] = useState<string[]>([]);
   const [showDropPicker, setShowDropPicker] = useState(false);
@@ -249,6 +275,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [submittedEditBanner, setSubmittedEditBanner] = useState(false);
   const [dayStatus, setDayStatus] = useState<DayStatus | null>(null);
   const [lastTrip, setLastTrip] = useState<LastTripSuggestion | null>(null);
+  const [lastTripExpanded, setLastTripExpanded] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -337,12 +364,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             workName: w.workName,
             unit: works.find((x) => x.id === w.workId)?.unit || "шт",
             volume: w.volume !== undefined && w.volume !== null ? String(w.volume) : "",
+            active: true,
           })),
           assignedEmployeeIds: [],
           here: [],
-          shift: o.sessions.length
-            ? { startedAt: o.sessions[0].droppedAt, endedAt: o.sessions[0].pickedUpAt, employeeIds: o.sessions.map((s) => s.employeeId) }
-            : null,
+          sessions: o.sessions.map((s) => ({ employeeId: s.employeeId, startedAt: s.droppedAt, endedAt: s.pickedUpAt })),
           visited: true,
           notes: o.notes ?? "",
           photoUrls: o.photoUrls ?? [],
@@ -358,15 +384,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             objects: restoredPlans.map((p) => ({
               objectId: p.objectId,
               objectName: p.objectName,
-              works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.shift?.employeeIds ?? [] })),
-              sessions: p.shift
-                ? p.shift.employeeIds.map((employeeId) => ({
-                    employeeId,
-                    employeeName: employeeName(employeeId),
-                    droppedAt: p.shift!.startedAt,
-                    pickedUpAt: p.shift!.endedAt,
-                  }))
-                : [],
+              works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.sessions.map((s) => s.employeeId) })),
+              sessions: p.sessions.map((s) => ({
+                employeeId: s.employeeId,
+                employeeName: employeeName(s.employeeId),
+                droppedAt: s.startedAt,
+                pickedUpAt: s.endedAt,
+              })),
             })),
           })
           .then(setPreview)
@@ -478,10 +502,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       lastTrip.objects.map((o) => ({
         objectId: o.objectId,
         objectName: o.objectName,
-        works: o.works.map((w) => ({ workId: w.workId, workName: w.workName, unit: works.find((x) => x.id === w.workId)?.unit || "шт", volume: "" })),
+        works: o.works.map((w) => ({
+          workId: w.workId,
+          workName: w.workName,
+          unit: works.find((x) => x.id === w.workId)?.unit || "шт",
+          volume: "",
+          active: true,
+        })),
         assignedEmployeeIds: [],
         here: [],
-        shift: null,
+        sessions: [],
         visited: false,
         notes: "",
         photoUrls: [],
@@ -535,7 +565,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function removeObjectFromRoute(objectId: string) {
     const plan = plans.find((p) => p.objectId === objectId);
     if (!plan) return;
-    if (plan.works.length || plan.shift) {
+    if (plan.works.length || plan.sessions.length) {
       pushUndo(`Обʼєкт "${plan.objectName}" видалено`, () => setPlans((prev) => [...prev, plan]));
       logChange(`Обʼєкт видалено: ${plan.objectName}`);
     }
@@ -550,8 +580,26 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
     setPlans((prev) => [
       ...prev,
-      { objectId: obj.id, objectName: obj.name, works: [], assignedEmployeeIds: [], here: [], shift: null, visited: false, notes: "", photoUrls: [] },
+      { objectId: obj.id, objectName: obj.name, works: [], assignedEmployeeIds: [], here: [], sessions: [], visited: false, notes: "", photoUrls: [] },
     ]);
+    haptic("selection");
+  }
+
+  function toggleAllInCity(cityObjects: WorkObject[]) {
+    const allSelected = cityObjects.length > 0 && cityObjects.every((o) => plans.some((p) => p.objectId === o.id));
+    if (allSelected) {
+      cityObjects.forEach((o) => {
+        if (plans.some((p) => p.objectId === o.id)) removeObjectFromRoute(o.id);
+      });
+    } else {
+      setPlans((prev) => {
+        const existingIds = new Set(prev.map((p) => p.objectId));
+        const toAdd = cityObjects
+          .filter((o) => !existingIds.has(o.id))
+          .map((o) => ({ objectId: o.id, objectName: o.name, works: [], assignedEmployeeIds: [], here: [], sessions: [], visited: false, notes: "", photoUrls: [] }));
+        return [...prev, ...toAdd];
+      });
+    }
     haptic("selection");
   }
 
@@ -587,24 +635,47 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           ...p,
           works: has
             ? p.works.filter((w) => w.workId !== work.id)
-            : [...p.works, { workId: work.id, workName: work.name, unit: work.unit || "шт", volume: "" }],
+            : [...p.works, { workId: work.id, workName: work.name, unit: work.unit || "шт", volume: "", active: true }],
         };
       }),
     );
     haptic("selection");
   }
 
-  function applyWorksToAllObjects(sourceObjectId: string) {
-    const source = planFor(sourceObjectId);
+  function clearWorks(objectId: string) {
+    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, works: [] })));
+    haptic("selection");
+  }
+
+  // Marks a single planned work as no longer in progress at this object,
+  // independent of whether other works or people there are still active.
+  function toggleWorkActive(objectId: string, workId: string) {
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId ? p : { ...p, works: p.works.map((w) => (w.workId !== workId ? w : { ...w, active: !w.active })) },
+      ),
+    );
+    haptic("selection");
+  }
+
+  function toggleAllWorksInCategory(objectId: string, categoryWorks: Work[]) {
+    const plan = planFor(objectId);
+    const allSelected = categoryWorks.length > 0 && categoryWorks.every((w) => plan.works.some((pw) => pw.workId === w.id));
     setPlans((prev) =>
       prev.map((p) => {
-        if (p.objectId === sourceObjectId) return p;
-        const existingIds = new Set(p.works.map((w) => w.workId));
-        const toAdd = source.works.filter((w) => !existingIds.has(w.workId)).map((w) => ({ ...w, volume: "" }));
-        return toAdd.length ? { ...p, works: [...p.works, ...toAdd] } : p;
+        if (p.objectId !== objectId) return p;
+        if (allSelected) {
+          const removeIds = new Set(categoryWorks.map((w) => w.id));
+          return { ...p, works: p.works.filter((pw) => !removeIds.has(pw.workId)) };
+        }
+        const existingIds = new Set(p.works.map((pw) => pw.workId));
+        const toAdd = categoryWorks
+          .filter((w) => !existingIds.has(w.id))
+          .map((w) => ({ workId: w.id, workName: w.name, unit: w.unit || "шт", volume: "", active: true }));
+        return { ...p, works: [...p.works, ...toAdd] };
       }),
     );
-    logChange(`Роботи з "${source.objectName}" застосовано до інших обʼєктів`);
+    haptic("selection");
   }
 
   // ---------- volume helpers ----------
@@ -658,13 +729,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   const nextUnvisited = plans.find((p) => !p.visited) ?? null;
 
-  function arriveAtObject() {
-    if (!nextUnvisited) return;
-    setPlans((prev) => prev.map((p) => (p.objectId !== nextUnvisited.objectId ? p : { ...p, visited: true })));
-    setAtObjectId(nextUnvisited.objectId);
+  function arriveAt(objectId: string) {
+    const target = plans.find((p) => p.objectId === objectId);
+    if (!target) return;
+    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
+    setAtObjectId(objectId);
+    setShowArrivePicker(false);
     setStep("AT_OBJECT");
     haptic("medium");
-    logChange(`Прибули: ${nextUnvisited.objectName}`);
+    logChange(`Прибули: ${target.objectName}`);
   }
 
   // ---------- quick pickup / drop-off during the drive ----------
@@ -680,14 +753,34 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function pickUpHere(objectId: string) {
     const plan = planFor(objectId);
     if (!plan.here.length) return;
-    moveEmployeesTo(plan.here, { kind: "onboard" });
+    const ids = plan.here;
+    const now = new Date().toISOString();
+    moveEmployeesTo(ids, { kind: "onboard" });
     setPlans((prev) =>
       prev.map((p) =>
-        p.objectId !== objectId ? p : { ...p, shift: p.shift && !p.shift.endedAt ? { ...p.shift, endedAt: new Date().toISOString() } : p.shift },
+        p.objectId !== objectId ? p : { ...p, sessions: p.sessions.map((s) => (ids.includes(s.employeeId) && !s.endedAt ? { ...s, endedAt: now } : s)) },
       ),
     );
     haptic("light");
     logChange(`Забрано з ${plan.objectName}`);
+  }
+
+  // Picks up (and clocks out, if still working) one specific person without
+  // disturbing anyone else still at the object.
+  function pickUpOne(objectId: string, employeeId: string) {
+    const plan = planFor(objectId);
+    if (!plan.here.includes(employeeId)) return;
+    const now = new Date().toISOString();
+    moveEmployeesTo([employeeId], { kind: "onboard" });
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId
+          ? p
+          : { ...p, sessions: p.sessions.map((s) => (s.employeeId === employeeId && !s.endedAt ? { ...s, endedAt: now } : s)) },
+      ),
+    );
+    haptic("light");
+    logChange(`Забрано ${employeeName(employeeId)} з ${plan.objectName}`);
   }
 
   function openVolumesForObject(objectId: string, returnTo: Step) {
@@ -696,31 +789,52 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setStep("PLAN_VOLUMES");
   }
 
+  // Guided end-of-day pickup: picks everyone up from one object (which also
+  // clocks out anyone still working there), then drops into volumes +
+  // coefficients for that object so the foreman can fill them in on the way
+  // to the next pickup, with an explicit "later" escape hatch either way.
+  function returnPickupObject(objectId: string) {
+    const plan = planFor(objectId);
+    pickUpHere(objectId);
+    if (plan.works.length) {
+      openVolumesForObject(objectId, "RETURN_PICKUP");
+    }
+  }
+
   // ---------- at object ----------
   function currentAtPlan() {
     return plans.find((p) => p.objectId === atObjectId) ?? null;
   }
 
-  // A single shift covers everyone dropped at the object working on all of
-  // that object's planned works together -- one button starts it, one button
-  // ends it (then walks straight into entering volumes for each work).
+  // Clocks in everyone currently dropped at the object who isn't already
+  // clocked in -- can be pressed again later to pick up newcomers without
+  // disturbing sessions already in progress.
   function startShift() {
     if (!atObjectId) return;
     const plan = currentAtPlan();
     if (!plan || !plan.here.length) return;
+    const now = new Date().toISOString();
     setPlans((prev) =>
-      prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, shift: { startedAt: new Date().toISOString(), employeeIds: p.here } })),
+      prev.map((p) => {
+        if (p.objectId !== atObjectId) return p;
+        const openIds = new Set(p.sessions.filter((s) => !s.endedAt).map((s) => s.employeeId));
+        const newSessions = p.here.filter((id) => !openIds.has(id)).map((employeeId) => ({ employeeId, startedAt: now }));
+        return { ...p, sessions: [...p.sessions, ...newSessions] };
+      }),
     );
     haptic("light");
     logChange(`Почато роботи на ${plan.objectName} (${plan.here.length} людей)`);
   }
 
+  // Stops every still-open session at the object at once.
   function finishShift() {
     if (!atObjectId) return;
     const plan = currentAtPlan();
-    if (!plan?.shift) return;
-    const endedAt = new Date().toISOString();
-    setPlans((prev) => prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, shift: p.shift ? { ...p.shift, endedAt } : null })));
+    if (!plan || !plan.sessions.some((s) => !s.endedAt)) return;
+    const now = new Date().toISOString();
+    setPlans((prev) =>
+      prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, sessions: p.sessions.map((s) => (s.endedAt ? s : { ...s, endedAt: now })) })),
+    );
     haptic("success");
     logChange(`Завершено роботи на ${plan.objectName}`);
     openVolumesForObject(atObjectId, "AT_OBJECT");
@@ -741,7 +855,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     const fromName = currentAtPlan()?.objectName ?? "";
     const toName = plans.find((p) => p.objectId === moveTargetId)?.objectName ?? "";
     const count = moveSelected.length;
+    const now = new Date().toISOString();
     moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId });
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== atObjectId
+          ? p
+          : { ...p, sessions: p.sessions.map((s) => (moveSelected.includes(s.employeeId) && !s.endedAt ? { ...s, endedAt: now } : s)) },
+      ),
+    );
     haptic("light");
     logChange(`Перенесено ${count} з ${fromName} на ${toName}`);
     setMoveSelected([]);
@@ -757,15 +879,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     return plans.map((p) => ({
       objectId: p.objectId,
       objectName: p.objectName,
-      works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.shift?.employeeIds ?? [] })),
-      sessions: p.shift
-        ? p.shift.employeeIds.map((employeeId) => ({
-            employeeId,
-            employeeName: employeeName(employeeId),
-            droppedAt: p.shift!.startedAt,
-            pickedUpAt: p.shift!.endedAt,
-          }))
-        : [],
+      works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.sessions.map((s) => s.employeeId) })),
+      sessions: p.sessions.map((s) => ({
+        employeeId: s.employeeId,
+        employeeName: employeeName(s.employeeId),
+        droppedAt: s.startedAt,
+        pickedUpAt: s.endedAt,
+      })),
       coefs: coefList,
       notes: p.notes,
       photoUrls: p.photoUrls,
@@ -827,9 +947,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     PICK_PEOPLE: "HUB",
     PICK_OBJECTS: "HUB",
     PLAN: "HUB",
-    PLAN_WORKS: "PLAN",
     READY: "HUB",
-    RETURN: "DRIVE",
+    RETURN_PICKUP: "DRIVE",
+    RETURN: "RETURN_PICKUP",
     REVIEW: "RETURN",
   };
   // PLAN_VOLUMES can be reached from more than one place (finishing a shift
@@ -838,6 +958,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const goBack = () => {
     if (step === "PLAN_VOLUMES") {
       setStep(volumesReturnStep);
+      return;
+    }
+    if ((step === "PICK_CAR" || step === "PICK_PEOPLE") && editReturnStep === "READY") {
+      setStep("READY");
+      setEditReturnStep("HUB");
+      return;
+    }
+    if (step === "PLAN_WORKS") {
+      setStep(worksReturnStep);
       return;
     }
     if (backTargets[step]) {
@@ -989,6 +1118,23 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <div className="hint">
                 {cars.find((c) => c.id === lastTrip.carId)?.name ?? lastTrip.carId} · {lastTrip.employeeIds.length} людей · {lastTrip.objects.length} обʼєктів
               </div>
+              <div style={{ marginTop: 6 }}>
+                <button className="chip" onClick={() => setLastTripExpanded((v) => !v)}>
+                  {lastTripExpanded ? "▾ Сховати деталі" : "▸ Показати деталі"}
+                </button>
+              </div>
+              {lastTripExpanded && (
+                <div style={{ marginTop: 10 }}>
+                  <div className="hint" style={{ fontWeight: 600 }}>👥 Люди</div>
+                  <div className="hint" style={{ marginBottom: 8 }}>{lastTrip.employeeIds.map(employeeName).join(", ") || "—"}</div>
+                  <div className="hint" style={{ fontWeight: 600 }}>📍 Обʼєкти та роботи</div>
+                  {lastTrip.objects.map((o) => (
+                    <div key={o.objectId} className="hint" style={{ marginBottom: 4 }}>
+                      <b>{o.objectName}</b>: {o.works.map((w) => w.workName).join(", ") || "без робіт"}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button className="chip" onClick={() => setLastTrip(null)}>
                   Приховати
@@ -1001,11 +1147,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           )}
 
           <div className="list">
-            <button className="cell" onClick={() => setStep("PICK_CAR")}>
+            <button className="cell" onClick={() => { setEditReturnStep("HUB"); setStep("PICK_CAR"); }}>
               <span className="cell-title">🚙 Авто{carId ? `: ${cars.find((c) => c.id === carId)?.name ?? ""}` : ""}</span>
               {carId && odoStart ? <span className="badge ok">{odoStart} км</span> : <span className="badge warn">не обрано</span>}
             </button>
-            <button className="cell" onClick={() => setStep("PICK_PEOPLE")}>
+            <button className="cell" onClick={() => { setEditReturnStep("HUB"); setStep("PICK_PEOPLE"); }}>
               <span className="cell-title">👥 Люди</span>
               {employeeIds.length ? <span className="badge ok">{employeeIds.length} обрано</span> : <span className="badge warn">не обрано</span>}
             </button>
@@ -1047,7 +1193,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <div className="section-title">Маршрут</div>
               <div className="list">
                 {plans.map((p) => {
-                  const shiftActive = !!(p.shift && !p.shift.endedAt);
+                  const shiftActive = p.sessions.some((s) => !s.endedAt);
                   const label = !p.visited ? "заплановано" : shiftActive ? "🔧 роботи тривають" : p.here.length ? "тут є люди" : "завершено";
                   return (
                     <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
@@ -1125,7 +1271,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           <div className="step-badge">🚙 АВТО · ОДОМЕТР</div>
           <div className="section-title">Одометр на старті</div>
-          {lastOdometer[carId] !== undefined && <div className="hint" style={{ padding: "0 16px" }}>Попереднє значення: {lastOdometer[carId]} км</div>}
+          {lastOdometer[carId] !== undefined && (
+            <div
+              className="hint"
+              style={{ padding: "0 16px", textDecoration: "underline", cursor: "pointer" }}
+              onClick={() => setOdoStart(String(lastOdometer[carId]))}
+            >
+              Попереднє значення: {lastOdometer[carId]} км (натисніть, щоб підставити)
+            </div>
+          )}
           <div className="big-number">{odoStart || "0"} км</div>
           {odoStart && lastOdometer[carId] !== undefined && Number(odoStart) >= lastOdometer[carId] && (
             <div className="hint" style={{ textAlign: "center" }}>
@@ -1153,7 +1307,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             onClick={async () => {
               await reserveIfPossible();
               logChange(`Авто: ${cars.find((c) => c.id === carId)?.name ?? carId}, одометр ${odoStart} км`);
-              setStep("HUB");
+              setStep(editReturnStep);
+              setEditReturnStep("HUB");
             }}
             disabled={!odoStart || uploadingPhoto}
           />
@@ -1163,7 +1318,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PICK_PEOPLE" && (
         <>
           <div className="step-badge">👥 ЛЮДИ</div>
-          <div className="section-title">Люди в поїздці — Обрано {employeeIds.length}</div>
+          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Люди в поїздці — Обрано {employeeIds.length}</span>
+            {employeeIds.length > 0 && (
+              <button className="chip" onClick={() => setEmployeeIds([])}>
+                🗑 Очистити вибір
+              </button>
+            )}
+          </div>
           <input className="search-box" placeholder="Пошук людини…" value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} />
           <div className="list">
             {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase()))).map((g) => {
@@ -1184,7 +1346,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   {expanded && (
                     <div style={{ paddingLeft: 12 }}>
                       <button
-                        className="cell"
+                        className={`bulk-select-btn ${allSelected ? "active" : ""}`}
                         onClick={() =>
                           setEmployeeIds((prev) =>
                             allSelected
@@ -1194,7 +1356,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         }
                         disabled={!selectable.length}
                       >
-                        <span className="cell-title">{allSelected ? "❌ Зняти всю бригаду" : "✅ Обрати всю бригаду"}</span>
+                        {allSelected ? "✕ Зняти всю бригаду" : "✓ Обрати всю бригаду"}
                       </button>
                       {g.members.map((emp) => {
                         const busyBy = busyEmployees.get(emp.id);
@@ -1207,8 +1369,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             disabled={!!busyBy}
                             style={busyBy ? { opacity: 0.4 } : undefined}
                           >
-                            <span className="cell-title">
-                              {checked ? "✅ " : "☐ "}
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center" }}>
+                              <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
                               {emp.name}
                             </span>
                             {busyBy ? <span className="badge warn">🔒 {busyBy}</span> : <span className="role-tag">{employeeRole(emp)}</span>}
@@ -1226,7 +1388,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             onClick={async () => {
               await reserveIfPossible();
               logChange(`Люди оновлено: ${employeeIds.length}`);
-              setStep("HUB");
+              setStep(editReturnStep);
+              setEditReturnStep("HUB");
             }}
           />
         </>
@@ -1235,12 +1398,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PICK_OBJECTS" && (
         <>
           <div className="step-badge">📍 ОБʼЄКТИ</div>
-          <div className="section-title">Обʼєкти маршруту — Обрано {plans.length}</div>
+          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Обʼєкти маршруту — Обрано {plans.length}</span>
+            {plans.length > 0 && (
+              <button className="chip" onClick={() => setPlans([])}>
+                🗑 Очистити вибір
+              </button>
+            )}
+          </div>
           <input className="search-box" placeholder="Пошук обʼєкта…" value={objectSearch} onChange={(e) => setObjectSearch(e.target.value)} />
           <div className="list">
             {groupByCity(objects.filter((o) => `${o.name} ${o.address ?? ""}`.toLowerCase().includes(objectSearch.toLowerCase()))).map((g) => {
               const expanded = expandedCityId === g.id || !!objectSearch;
               const selectedCount = g.members.filter((o) => plans.some((p) => p.objectId === o.id)).length;
+              const allSelected = g.members.length > 0 && selectedCount === g.members.length;
               return (
                 <div key={g.id}>
                   <button className="cell" onClick={() => setExpandedCityId(expandedCityId === g.id ? null : g.id)}>
@@ -1253,12 +1424,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </button>
                   {expanded && (
                     <div style={{ paddingLeft: 12 }}>
+                      <button className={`bulk-select-btn ${allSelected ? "active" : ""}`} onClick={() => toggleAllInCity(g.members)}>
+                        {allSelected ? "✕ Зняти всі в місті" : "✓ Обрати всі в місті"}
+                      </button>
                       {g.members.map((obj) => {
                         const checked = plans.some((p) => p.objectId === obj.id);
                         return (
                           <button key={obj.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleRouteObject(obj)}>
-                            <span className="cell-title">
-                              {checked ? "✅" : "☐"} 📍 {obj.name}
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center" }}>
+                              <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                              📍 {obj.name}
                             </span>
                             <span className="cell-sub">{obj.address}</span>
                           </button>
@@ -1290,6 +1465,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     className="cell"
                     onClick={() => {
                       setPlanObjectId(plan.objectId);
+                      setWorksReturnStep("PLAN");
                       setStep("PLAN_WORKS");
                     }}
                   >
@@ -1311,32 +1487,57 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PLAN_WORKS" && planObjectId && (
         <>
           <div className="step-badge">{planFor(planObjectId).objectName.toUpperCase()} · РОБОТИ</div>
-          <div className="section-title">Вибір робіт</div>
+          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Вибір робіт — Обрано {planFor(planObjectId).works.length}</span>
+            {planFor(planObjectId).works.length > 0 && (
+              <button className="chip" onClick={() => clearWorks(planObjectId)}>
+                🗑 Очистити вибір
+              </button>
+            )}
+          </div>
           <div className="hint" style={{ padding: "0 16px 8px" }}>Обери роботи. Обсяги вкажете пізніше, під час виконання на обʼєкті</div>
           <input className="search-box" placeholder="Пошук роботи…" value={planWorksSearch} onChange={(e) => setPlanWorksSearch(e.target.value)} />
           <div className="list">
-            {works
-              .filter((w) => w.name.toLowerCase().includes(planWorksSearch.toLowerCase()))
-              .slice(0, 60)
-              .map((w) => {
-                const checked = planFor(planObjectId).works.some((pw) => pw.workId === w.id);
-                return (
-                  <button key={w.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleWork(planObjectId, w)}>
+            {groupByWorkCategory(works.filter((w) => w.name.toLowerCase().includes(planWorksSearch.toLowerCase()))).map((g) => {
+              const expanded = expandedWorkCategoryId === g.id || !!planWorksSearch;
+              const selectedCount = g.members.filter((w) => planFor(planObjectId).works.some((pw) => pw.workId === w.id)).length;
+              const allSelected = g.members.length > 0 && selectedCount === g.members.length;
+              return (
+                <div key={g.id}>
+                  <button className="cell" onClick={() => setExpandedWorkCategoryId(expandedWorkCategoryId === g.id ? null : g.id)}>
                     <span className="cell-title">
-                      {checked ? "✅" : "☐"} {w.name}
+                      {expanded ? "▾" : "▸"} {g.title}
+                    </span>
+                    <span className="badge">
+                      {selectedCount}/{g.members.length}
                     </span>
                   </button>
-                );
-              })}
+                  {expanded && (
+                    <div style={{ paddingLeft: 12 }}>
+                      <button
+                        className={`bulk-select-btn ${allSelected ? "active" : ""}`}
+                        onClick={() => toggleAllWorksInCategory(planObjectId, g.members)}
+                      >
+                        {allSelected ? "✕ Зняти всі в категорії" : "✓ Обрати всі в категорії"}
+                      </button>
+                      {g.members.map((w) => {
+                        const checked = planFor(planObjectId).works.some((pw) => pw.workId === w.id);
+                        return (
+                          <button key={w.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleWork(planObjectId, w)}>
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center" }}>
+                              <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                              {w.name}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
           <div className="hint" style={{ padding: "0 16px" }}>Робіт у пакеті: {planFor(planObjectId).works.length}</div>
-          {plans.length > 1 && (
-            <div style={{ padding: "0 16px 8px" }}>
-              <button className="chip" onClick={() => applyWorksToAllObjects(planObjectId)} disabled={!planFor(planObjectId).works.length}>
-                📋 Застосувати ці роботи до всіх обʼєктів
-              </button>
-            </div>
-          )}
 
           <div className="section-title">Нотатки (необовʼязково)</div>
           <textarea
@@ -1355,7 +1556,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             text="Готово"
             onClick={() => {
               logChange(`Роботи на "${planFor(planObjectId).objectName}": ${planFor(planObjectId).works.length}`);
-              setStep("PLAN");
+              setStep(worksReturnStep);
             }}
             disabled={!planFor(planObjectId).works.length}
           />
@@ -1394,7 +1595,53 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 {unfilled.length > 0 && (
                   <div className="empty-state">🟡 Є роботи без обсягу: {unfilled.map((w) => w.workName).join(", ")}</div>
                 )}
-                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep(volumesReturnStep)} />
+
+                {volumesReturnStep === "RETURN_PICKUP" &&
+                  (() => {
+                    const workerIds = [...new Set(plan.sessions.map((s) => s.employeeId))].filter((id) => roleFor(id) === "робітник");
+                    if (!workerIds.length) return null;
+                    return (
+                      <>
+                        <div className="section-title">Коефіцієнти для тих, кого забрали</div>
+                        <div className="hint" style={{ padding: "0 16px 8px" }}>
+                          Впливає лише на розподіл частки робітників у фонді обʼєкта. За замовчуванням 1.0.
+                        </div>
+                        <div className="list">
+                          {workerIds.map((id) => (
+                            <div key={id} className="cell" style={{ cursor: "default", display: "block" }}>
+                              <div className="cell-title">{employeeName(id)}</div>
+                              <div className="hint">Дисципліна</div>
+                              <div className="chip-row">
+                                {COEF_PRESETS.map((v) => (
+                                  <div
+                                    key={v}
+                                    className={`chip ${coefFor(id).disciplineCoef === v ? "selected" : ""}`}
+                                    onClick={() => setCoef(id, "disciplineCoef", v)}
+                                  >
+                                    {v}
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="hint">Продуктивність</div>
+                              <div className="chip-row">
+                                {COEF_PRESETS.map((v) => (
+                                  <div
+                                    key={v}
+                                    className={`chip ${coefFor(id).productivityCoef === v ? "selected" : ""}`}
+                                    onClick={() => setCoef(id, "productivityCoef", v)}
+                                  >
+                                    {v}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  })()}
+
+                <MainButton text="Зберегти (можна пізніше)" onClick={() => setStep(volumesReturnStep)} />
               </>
             );
           })()}
@@ -1434,25 +1681,83 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="step-badge">ПЕРЕВІРКА ПЕРЕД ВИЇЗДОМ</div>
           <div className="section-title">Готовність до виїзду</div>
           <div className="list">
-            <div className="cell">
-              <span className="cell-title">🚙 Авто</span>
-              <span className="cell-sub">
-                {cars.find((c) => c.id === carId)?.name} · {odoStart} км
-              </span>
+            <div className="cell-row">
+              <div className="cell" style={{ cursor: "default" }}>
+                <span className="cell-title">🚙 Авто</span>
+                <span className="cell-sub">
+                  {cars.find((c) => c.id === carId)?.name} · {odoStart} км
+                </span>
+              </div>
+              <button className="cell-action" onClick={() => { setEditReturnStep("READY"); setStep("PICK_CAR"); }} title="Редагувати">
+                ✏️
+              </button>
             </div>
-            <div className="cell">
-              <span className="cell-title">👥 Люди</span>
-              <span className="cell-sub">{employeeIds.map(employeeName).join(", ")}</span>
+            <div className="cell-row">
+              <button className="cell" onClick={() => setReadyPeopleExpanded((v) => !v)}>
+                <span className="cell-title">
+                  {readyPeopleExpanded ? "▾" : "▸"} 👥 Люди
+                </span>
+                <span className="badge">{employeeIds.length}</span>
+              </button>
+              <button className="cell-action" onClick={() => { setEditReturnStep("READY"); setStep("PICK_PEOPLE"); }} title="Редагувати">
+                ✏️
+              </button>
             </div>
+            {readyPeopleExpanded && (
+              <div style={{ padding: "4px 16px 12px" }}>
+                {employeeIds.length ? (
+                  employeeIds.map((id) => (
+                    <div key={id} className="hint">
+                      • {employeeName(id)}
+                    </div>
+                  ))
+                ) : (
+                  <div className="hint">Нікого не обрано</div>
+                )}
+              </div>
+            )}
           </div>
           <div className="section-title">Обʼєкти · роботи</div>
           <div className="list">
-            {plans.map((p) => (
-              <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
-                <div className="cell-title">📍 {p.objectName}</div>
-                <div className="hint">{p.works.map((w) => w.workName).join(" · ")}</div>
-              </div>
-            ))}
+            {plans.map((p) => {
+              const expanded = readyExpandedObjectId === p.objectId;
+              return (
+                <div key={p.objectId}>
+                  <div className="cell-row">
+                    <button className="cell" onClick={() => setReadyExpandedObjectId(expanded ? null : p.objectId)}>
+                      <span className="cell-title">
+                        {expanded ? "▾" : "▸"} 📍 {p.objectName}
+                      </span>
+                      <span className="badge">{p.works.length ? `${p.works.length} робіт` : "не обрано"}</span>
+                    </button>
+                    <button
+                      className="cell-action"
+                      onClick={() => {
+                        setPlanObjectId(p.objectId);
+                        setWorksReturnStep("READY");
+                        setStep("PLAN_WORKS");
+                      }}
+                      title="Редагувати"
+                    >
+                      ✏️
+                    </button>
+                  </div>
+                  {expanded && (
+                    <div style={{ padding: "4px 16px 12px" }}>
+                      {p.works.length ? (
+                        p.works.map((w) => (
+                          <div key={w.workId} className="hint">
+                            • {w.workName}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="hint">Робіт не обрано</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
           <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center" }}>
             Щось треба змінити? <button className="back-btn" onClick={() => setStep("HUB")}>← До меню поїздки</button>
@@ -1480,76 +1785,170 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             )}
           </div>
 
-          <div className="section-title">Маршрут — швидкі дії</div>
-          <div className="list">
-            {plans.map((p) => (
-              <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="cell-title">📍 {p.objectName}</span>
-                  <span className={`badge ${p.visited ? "ok" : ""}`}>{p.here.length ? `${p.here.length} тут` : p.visited ? "відвідано" : ""}</span>
-                </div>
-                <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                  <button
-                    className="chip"
-                    onClick={() => {
-                      setDriveDropTargetId(p.objectId);
-                      setDriveDropSelected([]);
-                    }}
-                    disabled={!onboard.length}
-                  >
-                    🔽 Висадити тут
-                  </button>
-                  <button className="chip" onClick={() => pickUpHere(p.objectId)} disabled={!p.here.length}>
-                    🔼 Забрати ({p.here.length})
-                  </button>
-                </div>
-              </div>
-            ))}
+          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Маршрут</span>
+            <button className="chip" onClick={() => setShowRoadsideActions((v) => !v)}>
+              🚏 {showRoadsideActions ? "Сховати дії" : "Висадити/забрати по дорозі"}
+            </button>
           </div>
 
-          {driveDropTargetId && (
+          {showRoadsideActions && (
             <>
-              <div className="section-title">Кого висадити на {plans.find((p) => p.objectId === driveDropTargetId)?.objectName}</div>
-              <div className="chip-row">
-                {onboard.map((id) => (
-                  <div
-                    key={id}
-                    className={`chip ${driveDropSelected.includes(id) ? "selected" : ""}`}
-                    onClick={() => setDriveDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
-                  >
-                    {employeeName(id)}
+              <div className="list" style={{ marginBottom: 8 }}>
+                {plans.map((p) => (
+                  <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
+                    <div className="cell-title" style={{ marginBottom: 6 }}>📍 {p.objectName}</div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        className="chip"
+                        onClick={() => {
+                          setDriveDropTargetId(p.objectId);
+                          setDriveDropSelected([]);
+                        }}
+                        disabled={!onboard.length}
+                      >
+                        🔽 Висадити тут
+                      </button>
+                      <button className="chip" onClick={() => pickUpHere(p.objectId)} disabled={!p.here.length}>
+                        🔼 Забрати ({p.here.length})
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                <button
-                  className="chip"
-                  onClick={() => {
-                    setDriveDropTargetId(null);
-                    setDriveDropSelected([]);
-                  }}
-                >
+
+              {driveDropTargetId && (
+                <>
+                  <div className="section-title">Кого висадити на {plans.find((p) => p.objectId === driveDropTargetId)?.objectName}</div>
+                  <div className="chip-row">
+                    {onboard.map((id) => (
+                      <div
+                        key={id}
+                        className={`chip ${driveDropSelected.includes(id) ? "selected" : ""}`}
+                        onClick={() => setDriveDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                      >
+                        {employeeName(id)}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                    <button
+                      className="chip"
+                      onClick={() => {
+                        setDriveDropTargetId(null);
+                        setDriveDropSelected([]);
+                      }}
+                    >
+                      Скасувати
+                    </button>
+                    <button
+                      className="chip selected"
+                      onClick={() => {
+                        dropAtObject(driveDropTargetId, driveDropSelected);
+                        setDriveDropTargetId(null);
+                        setDriveDropSelected([]);
+                      }}
+                      disabled={!driveDropSelected.length}
+                    >
+                      Підтвердити
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          <div className="list">
+            {plans.map((p) => {
+              const expanded = expandedDriveObjectId === p.objectId;
+              const peopleEverHere = new Set(p.sessions.map((s) => s.employeeId)).size;
+              const peopleTotal = peopleEverHere || p.here.length;
+              const peopleHere = p.here.length;
+              const peopleBadge = peopleTotal === 0 ? "" : peopleHere === 0 ? "danger" : peopleHere === peopleTotal ? "ok" : "warn";
+              const worksTotal = p.works.length;
+              const worksFilled = p.works.filter((w) => w.volume && w.volume !== "?").length;
+              const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
+              const openSessions = p.sessions.filter((s) => !s.endedAt);
+              const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
+              return (
+                <div key={p.objectId}>
+                  <div className="cell-row">
+                    <button className="cell" onClick={() => setExpandedDriveObjectId(expanded ? null : p.objectId)}>
+                      <span className="cell-title">
+                        {expanded ? "▾" : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
+                      </span>
+                      <span style={{ display: "flex", gap: 6 }}>
+                        {peopleTotal > 0 && (
+                          <span className={`badge ${peopleBadge}`}>
+                            👤 {peopleHere}/{peopleTotal}
+                          </span>
+                        )}
+                        {worksTotal > 0 && (
+                          <span className={`badge ${worksBadge}`}>
+                            🛠 {worksFilled}/{worksTotal}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      className="cell-action"
+                      onClick={() => {
+                        setAtObjectId(p.objectId);
+                        setStep("AT_OBJECT");
+                      }}
+                      title="Редагувати"
+                    >
+                      ✏️
+                    </button>
+                  </div>
+                  {expanded && (
+                    <div style={{ padding: "4px 16px 12px" }}>
+                      <div className="hint" style={{ fontWeight: 600 }}>👥 Зараз тут</div>
+                      <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
+                      {openSessions.length > 0 && (
+                        <div className="hint" style={{ marginBottom: 8 }}>
+                          ⏱ Роботи тривають: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
+                        </div>
+                      )}
+                      <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                      <div className="hint">
+                        {p.works.length
+                          ? p.works.map((w) => `${w.workName}${w.volume && w.volume !== "?" ? ` (${w.volume} ${w.unit})` : ""}`).join(", ")
+                          : "не заплановано"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {showArrivePicker && (
+            <>
+              <div className="section-title">На який обʼєкт ви прибули?</div>
+              <div className="list" style={{ marginBottom: 8 }}>
+                {plans.map((p) => (
+                  <button key={p.objectId} className="cell" onClick={() => arriveAt(p.objectId)}>
+                    <span className="cell-title">📍 {p.objectName}</span>
+                    {p.visited && <span className="badge ok">вже були</span>}
+                  </button>
+                ))}
+              </div>
+              <div style={{ padding: "0 16px 8px" }}>
+                <button className="chip" onClick={() => setShowArrivePicker(false)}>
                   Скасувати
-                </button>
-                <button
-                  className="chip selected"
-                  onClick={() => {
-                    dropAtObject(driveDropTargetId, driveDropSelected);
-                    setDriveDropTargetId(null);
-                    setDriveDropSelected([]);
-                  }}
-                  disabled={!driveDropSelected.length}
-                >
-                  Підтвердити
                 </button>
               </div>
             </>
           )}
 
           {nextUnvisited ? (
-            <MainButton text="📍 Прибув на обʼєкт" onClick={arriveAtObject} />
+            <MainButton text="📍 Прибув на обʼєкт" onClick={() => setShowArrivePicker(true)} />
           ) : (
-            <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} />
+            <MainButton
+              text="🏁 Повернутись на базу"
+              onClick={() => setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN")}
+            />
           )}
         </>
       )}
@@ -1558,38 +1957,118 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           {(() => {
             const plan = currentAtPlan()!;
-            const shiftOpen = !!(plan.shift && !plan.shift.endedAt);
+            const openSessions = plan.sessions.filter((s) => !s.endedAt);
+            const openSessionIds = new Set(openSessions.map((s) => s.employeeId));
+            const everSessionIds = new Set(plan.sessions.map((s) => s.employeeId));
+            const peopleTotal = everSessionIds.size || plan.here.length;
+            const peopleActive = openSessions.length;
+            const worksTotal = plan.works.length;
+            const worksActive = plan.works.filter((w) => w.active).length;
+            const shiftOpen = openSessions.length > 0;
+            const notStarted = plan.here.filter((id) => !openSessionIds.has(id));
+            const earliestOpenStart = openSessions.length
+              ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime()))
+              : null;
             return (
               <>
                 <div className="step-badge">НА ОБʼЄКТІ</div>
-                <div className="section-title">📍 {plan.objectName}</div>
+                <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>📍 {plan.objectName}</span>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    {peopleTotal > 0 && (
+                      <span className={`badge ${peopleActive === 0 ? "danger" : peopleActive === peopleTotal ? "ok" : "warn"}`}>
+                        👤 {peopleActive}/{peopleTotal}
+                      </span>
+                    )}
+                    {worksTotal > 0 && (
+                      <span className={`badge ${worksActive === 0 ? "danger" : worksActive === worksTotal ? "ok" : "warn"}`}>
+                        🛠 {worksActive}/{worksTotal}
+                      </span>
+                    )}
+                  </span>
+                </div>
 
                 {shiftOpen ? (
                   <div className="active-work-card">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>Роботи тривають</div>
-                        <div className="hint">{plan.works.map((w) => w.workName).join(", ") || "—"}</div>
-                        <div className="hint">{plan.shift!.employeeIds.map(employeeName).join(", ")}</div>
-                      </div>
+                      <div style={{ fontWeight: 700 }}>Роботи тривають</div>
                       <button className="chip danger-btn" onClick={finishShift}>
-                        ⏹ Завершити
+                        ⏹ Завершити все
                       </button>
                     </div>
-                    <div className="timer-big" style={{ padding: "4px 0" }}>{fmtHMS(now - new Date(plan.shift!.startedAt).getTime())}</div>
+                    <div className="timer-big" style={{ padding: "4px 0" }}>
+                      {earliestOpenStart ? fmtHMS(now - earliestOpenStart) : "00:00:00"}
+                    </div>
+                    <button className="back-btn" onClick={() => setAtObjectDetailsExpanded((v) => !v)}>
+                      {atObjectDetailsExpanded ? "▾ Сховати деталі" : "▸ Показати деталі (роботи, люди)"}
+                    </button>
                   </div>
                 ) : (
                   <div className="empty-state">Роботи ще не розпочато</div>
                 )}
 
+                {(shiftOpen ? atObjectDetailsExpanded : true) && (worksTotal > 0 || plan.here.length > 0) && (
+                  <>
+                    {worksTotal > 0 && (
+                      <>
+                        <div className="section-title">Роботи</div>
+                        <div className="list">
+                          {plan.works.map((w) => (
+                            <div key={w.workId} className="cell" style={{ cursor: "default" }}>
+                              <span className="cell-title" style={{ opacity: w.active ? 1 : 0.5, textDecoration: w.active ? "none" : "line-through" }}>
+                                {w.workName}
+                              </span>
+                              <button className="chip" onClick={() => toggleWorkActive(atObjectId, w.workId)}>
+                                {w.active ? "⏸ Зупинити" : "▶️ Відновити"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                    {plan.here.length > 0 && (
+                      <>
+                        <div className="section-title">Люди тут</div>
+                        <div className="list">
+                          {plan.here.map((id) => {
+                            const session = plan.sessions.find((s) => s.employeeId === id && !s.endedAt);
+                            return (
+                              <div key={id} className="cell" style={{ cursor: "default" }}>
+                                <span className="cell-title">{employeeName(id)}</span>
+                                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                  {session && <span className="hint">{fmtHMS(now - new Date(session.startedAt).getTime())}</span>}
+                                  <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
+                                    🔼 Забрати
+                                  </button>
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+
                 {!showDropPicker && !showMovePicker && (
                   <div className="list" style={{ marginTop: 8 }}>
-                    {!shiftOpen && (
-                      <button className="cell" onClick={startShift} disabled={!plan.here.length || !plan.works.length}>
-                        <span className="cell-title">▶️ Почати роботи</span>
-                        <span className="cell-sub">{plan.here.length ? `${plan.here.length} людей` : "нікого не висаджено"}</span>
+                    {notStarted.length > 0 && (
+                      <button className="cell" onClick={startShift} disabled={!plan.works.length}>
+                        <span className="cell-title">▶️ {shiftOpen ? "Додати до роботи" : "Почати роботи"}</span>
+                        <span className="cell-sub">{notStarted.length} людей</span>
                       </button>
                     )}
+                    <button
+                      className="cell"
+                      onClick={() => {
+                        setPlanObjectId(atObjectId);
+                        setWorksReturnStep("AT_OBJECT");
+                        setStep("PLAN_WORKS");
+                      }}
+                    >
+                      <span className="cell-title">✏️ Додати/змінити роботи</span>
+                      <span className="cell-sub">{plan.works.length} робіт</span>
+                    </button>
                     <button className="cell" onClick={() => setShowMovePicker(true)} disabled={!plan.here.length}>
                       <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
                     </button>
@@ -1665,7 +2144,54 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center" }}>
                   Можна їхати далі з тими, хто залишився в машині — робота тут триватиме без вас.
                 </div>
-                <MainButton text="➡️ Продовжити маршрут" onClick={() => setStep("DRIVE")} />
+                <MainButton
+                  text={nextUnvisited ? "➡️ Продовжити маршрут" : "🏁 Повертатись на базу"}
+                  onClick={() => setStep("DRIVE")}
+                />
+              </>
+            );
+          })()}
+        </>
+      )}
+
+      {step === "RETURN_PICKUP" && (
+        <>
+          {(() => {
+            const withPeople = plans.filter((p) => p.here.length > 0);
+            const suggested = withPeople[0] ?? null;
+            return (
+              <>
+                <div className="step-badge">ПОВЕРНЕННЯ НА БАЗУ</div>
+                {suggested ? (
+                  <>
+                    <div className="section-title">Кого забрати першим</div>
+                    <div className="suggestion-card">
+                      <div className="cell-title">📍 {suggested.objectName}</div>
+                      <div className="hint" style={{ margin: "4px 0 10px" }}>{suggested.here.map(employeeName).join(", ")}</div>
+                      <button className="chip selected" onClick={() => returnPickupObject(suggested.objectId)}>
+                        🔼 Забрати усіх ({suggested.here.length})
+                      </button>
+                    </div>
+                    {withPeople.length > 1 && (
+                      <>
+                        <div className="section-title">Або спершу інший обʼєкт</div>
+                        <div className="list">
+                          {withPeople.slice(1).map((p) => (
+                            <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
+                              <span className="cell-title">📍 {p.objectName}</span>
+                              <button className="chip" onClick={() => returnPickupObject(p.objectId)}>
+                                Забрати ({p.here.length})
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <div className="empty-state">✅ Усіх забрано — можна їхати на базу</div>
+                )}
+                <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} disabled={!!suggested} />
               </>
             );
           })()}
@@ -1759,10 +2285,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="list">
             {employeeIds.map((id) => {
               const totalMs = plans.reduce((acc, p) => {
-                if (!p.shift || !p.shift.employeeIds.includes(id)) return acc;
-                const start = new Date(p.shift.startedAt).getTime();
-                const end = new Date(p.shift.endedAt ?? new Date().toISOString()).getTime();
-                return acc + Math.max(0, end - start);
+                const ms = p.sessions
+                  .filter((s) => s.employeeId === id)
+                  .reduce((sum, s) => {
+                    const start = new Date(s.startedAt).getTime();
+                    const end = new Date(s.endedAt ?? new Date().toISOString()).getTime();
+                    return sum + Math.max(0, end - start);
+                  }, 0);
+                return acc + ms;
               }, 0);
               return (
                 <div key={id} className="cell" style={{ cursor: "default" }}>

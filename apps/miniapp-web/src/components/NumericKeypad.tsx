@@ -6,6 +6,10 @@ export function NumericKeypad({ value, onChange }: { value: string; onChange: (n
       onChange(value.slice(0, -1));
       return;
     }
+    if (key === "clear") {
+      onChange("");
+      return;
+    }
     if (key === "." && value.includes(".")) return;
     onChange(value + key);
   }
@@ -14,7 +18,7 @@ export function NumericKeypad({ value, onChange }: { value: string; onChange: (n
     ["1", "2", "3"],
     ["4", "5", "6"],
     ["7", "8", "9"],
-    ["000", "0", "back"],
+    ["clear", "0", "back"],
   ];
 
   return (
@@ -22,8 +26,13 @@ export function NumericKeypad({ value, onChange }: { value: string; onChange: (n
       {rows.map((row, i) => (
         <div className="keypad-row" key={i}>
           {row.map((key) => (
-            <button key={key} className="keypad-key" onClick={() => press(key)}>
-              {key === "back" ? "⌫" : key}
+            <button
+              key={key}
+              className="keypad-key"
+              style={key === "clear" ? { fontSize: 14 } : undefined}
+              onClick={() => press(key)}
+            >
+              {key === "back" ? "⌫" : key === "clear" ? "Очистити" : key}
             </button>
           ))}
         </div>
