@@ -492,9 +492,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     ODO_START: "PICK_CAR",
     PICK_PEOPLE: "HUB",
     PICK_OBJECTS: "HUB",
-    PLAN: "PICK_OBJECTS",
+    PLAN: "HUB",
     PLAN_WORKS: "PLAN",
-    PLAN_VOLUMES: "PLAN",
+    PLAN_VOLUMES: "AT_OBJECT",
     READY: "HUB",
     RETURN: "DRIVE",
     REVIEW: "RETURN",
@@ -769,7 +769,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           <div className="step-badge">{planFor(planObjectId).objectName.toUpperCase()} · РОБОТИ</div>
           <div className="section-title">Вибір робіт</div>
-          <div className="hint" style={{ padding: "0 16px 8px" }}>Обери роботи. Для кожної потім постав обсяг</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>Обери роботи. Обсяги вкажете пізніше, під час виконання на обʼєкті</div>
           <input className="search-box" placeholder="Пошук роботи…" value={planWorksSearch} onChange={(e) => setPlanWorksSearch(e.target.value)} />
           <div className="list">
             {works
@@ -788,8 +788,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
           <div className="hint" style={{ padding: "0 16px" }}>Робіт у пакеті: {planFor(planObjectId).works.length}</div>
           <MainButton
-            text="Готово → Обсяги"
-            onClick={() => setStep("PLAN_VOLUMES")}
+            text="Готово"
+            onClick={() => setStep("PLAN")}
             disabled={!planFor(planObjectId).works.length}
           />
         </>
@@ -827,7 +827,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 {unfilled.length > 0 && (
                   <div className="empty-state">🟡 Є роботи без обсягу: {unfilled.map((w) => w.workName).join(", ")}</div>
                 )}
-                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep("PLAN")} />
+                <MainButton text="Зберегти пакет (можна пізніше)" onClick={() => setStep("AT_OBJECT")} />
               </>
             );
           })()}
