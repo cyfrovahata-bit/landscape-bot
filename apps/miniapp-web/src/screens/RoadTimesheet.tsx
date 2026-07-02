@@ -448,7 +448,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   }
 
   function resetDay() {
-    if (!window.confirm("Точно почати день заново? Усі незбережені дані буде видалено.")) return;
+    if (!window.confirm("Точно почати день заново? Усі дані поточної поїздки буде видалено з цього екрана (уже відправлений звіт на сервері це не видаляє, лише перезапише його наступною відправкою).")) return;
     clearDraft();
     setCarId("");
     setOdoStart("");
@@ -462,6 +462,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setTripStartedAt(null);
     setAtObjectId(null);
     setChangeLog([]);
+    setRestoredBanner(false);
+    setSubmittedEditBanner(false);
+    setResult(null);
+    setPreview(null);
+    haptic("success");
     setStep("HUB");
   }
 
@@ -944,6 +949,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         </div>
       )}
 
+      {(carId || employeeIds.length > 0 || plans.length > 0) && (
+        <div style={{ padding: "0 16px 8px", textAlign: "right" }}>
+          <button className="back-btn" onClick={resetDay}>🗑 Скинути день</button>
+        </div>
+      )}
+
       {undo && (
         <div className="undo-toast">
           <span>{undo.label}</span>
@@ -1063,14 +1074,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   <span className="cell-sub">{new Date(entry.ts).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}</span>
                 </div>
               ))}
-            </div>
-          )}
-
-          {!tripStartedAt && (carId || employeeIds.length > 0 || plans.length > 0) && (
-            <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
-              <button className="back-btn" onClick={resetDay}>
-                🗑 Почати день заново
-              </button>
             </div>
           )}
 
