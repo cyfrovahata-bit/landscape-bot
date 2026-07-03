@@ -268,7 +268,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // --- payroll coefficients (day-wide, applied to every object) ---
   const [coefs, setCoefs] = useState<Record<string, CoefPair>>({});
-  const [showCoefs, setShowCoefs] = useState(false);
+  const [expandedCoefEmployeeId, setExpandedCoefEmployeeId] = useState<string | null>(null);
+  const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
+  const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
 
   // --- drive ---
   const [onboard, setOnboard] = useState<string[]>([]);
@@ -283,9 +285,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [atObjectId, setAtObjectId] = useState<string | null>(null);
   const [atObjectReturnStep, setAtObjectReturnStep] = useState<Step>("DRIVE");
   const [atObjectDetailsExpanded, setAtObjectDetailsExpanded] = useState(false);
-  const [showSwitchObjectPicker, setShowSwitchObjectPicker] = useState(false);
+  const [atObjectWorksExpanded, setAtObjectWorksExpanded] = useState(false);
   const [volumesReturnStep, setVolumesReturnStep] = useState<Step>("AT_OBJECT");
   const [expandedReturnObjectId, setExpandedReturnObjectId] = useState<string | null>(null);
+  const [expandedReturnPickupObjectId, setExpandedReturnPickupObjectId] = useState<string | null>(null);
   const [dropSelected, setDropSelected] = useState<string[]>([]);
   const [showDropPicker, setShowDropPicker] = useState(false);
   const [moveSelected, setMoveSelected] = useState<string[]>([]);
@@ -756,6 +759,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   const nextUnvisited = plans.find((p) => !p.visited) ?? null;
 
+  // Where "↩️ Повернутися до поїздки" on HUB should actually land -- always
+  // sending it to DRIVE was wrong once the trip had already moved past that
+  // stage (e.g. everyone's back and the day's submitted, but the foreman
+  // popped into HUB to tweak something and now wants back in).
+  const tripResumeStep: Step = dayStatus?.hasSubmission
+    ? "REVIEW"
+    : nextUnvisited
+      ? "DRIVE"
+      : plans.some((p) => p.here.length > 0)
+        ? "RETURN_PICKUP"
+        : "RETURN";
+
   function arriveAt(objectId: string) {
     const target = plans.find((p) => p.objectId === objectId);
     if (!target) return;
@@ -777,7 +792,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     if (!target) return;
     setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
     setAtObjectId(objectId);
-    setShowSwitchObjectPicker(false);
     haptic("selection");
   }
 
@@ -972,6 +986,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setResult(res);
       setStep("DONE");
       clearDraft();
+      setDayStatus((prev) => (prev ? { ...prev, hasSubmission: true, eventId: res.eventId } : prev));
       logChange("Звіт відправлено");
       haptic("success");
     } catch (e) {
@@ -998,6 +1013,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // back target is wherever it was actually opened from, not a fixed step.
   const goBack = () => {
     if (step === "PLAN_VOLUMES") {
+      // Mid-entry for one specific work's number -- back should return to
+      // that object's works list, not skip past it to wherever the whole
+      // volumes screen was opened from.
+      if (planVolumeWorkId) {
+        setPlanVolumeWorkId(null);
+        return;
+      }
       setStep(volumesReturnStep);
       return;
     }
@@ -1011,8 +1033,36 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       return;
     }
     if (step === "AT_OBJECT") {
+      // Close whichever sub-picker is open instead of leaving the object
+      // entirely -- otherwise back mid-pick silently discards the pending
+      // selection and dumps you back a whole screen further than expected.
+      if (showDropPicker) {
+        setShowDropPicker(false);
+        return;
+      }
+      if (showMovePicker) {
+        setShowMovePicker(false);
+        return;
+      }
       setStep(atObjectReturnStep);
       return;
+    }
+    if (step === "DRIVE") {
+      // Same idea as AT_OBJECT above: a picker open on top of DRIVE should
+      // just close, not exit the whole road timesheet.
+      if (showArrivePicker) {
+        setShowArrivePicker(false);
+        return;
+      }
+      if (driveDropTargetId) {
+        setDriveDropTargetId(null);
+        setDriveDropSelected([]);
+        return;
+      }
+      if (showRoadsideActions) {
+        setShowRoadsideActions(false);
+        return;
+      }
     }
     if (backTargets[step]) {
       setStep(backTargets[step]!);
@@ -1042,24 +1092,53 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
         </div>
         <div className="section-title">Фонд по обʼєктах</div>
-        {result.salaryPacks.map((pack) => (
-          <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
-            <div className="cell" style={{ cursor: "default" }}>
-              <span className="cell-title">📍 {pack.objectName}</span>
-              <span className="badge ok">{pack.objectTotal} грн</span>
-            </div>
-            <div style={{ padding: "0 16px 12px" }} className="hint">
-              {pack.rows.map((r) => (
-                <div key={r.employeeId}>
-                  {r.employeeName}: {r.pay} грн
+        {result.salaryPacks.map((pack) => {
+          const expanded = expandedDoneObjectId === pack.objectId;
+          const plan = plans.find((p) => p.objectId === pack.objectId);
+          return (
+            <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
+              <div className="cell-row">
+                <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
+                  <span className="cell-title">
+                    {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+                  </span>
+                  <span className="badge ok">{pack.objectTotal} грн</span>
+                </button>
+                <button
+                  className="cell-action"
+                  onClick={() => openVolumesForObject(pack.objectId, "REVIEW")}
+                  disabled={!plan?.works.length}
+                  title="Редагувати обсяги"
+                >
+                  📏
+                </button>
+                <button
+                  className="cell-action"
+                  onClick={() => {
+                    setAtObjectId(pack.objectId);
+                    setAtObjectReturnStep("REVIEW");
+                    setStep("AT_OBJECT");
+                  }}
+                  title="Редагувати обʼєкт"
+                >
+                  ✏️
+                </button>
+              </div>
+              {expanded && (
+                <div style={{ padding: "0 16px 12px" }} className="hint">
+                  {pack.rows.map((r) => (
+                    <div key={r.employeeId}>
+                      {r.employeeName}: {r.pay} грн
+                    </div>
+                  ))}
+                  {!pack.rows.length && "— без нарахувань —"}
                 </div>
-              ))}
-              {!pack.rows.length && "— без нарахувань —"}
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
         <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
-          <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати ще</button>
+          <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати все</button>
         </div>
         <MainButton text="До меню" onClick={onSaved} />
       </div>
@@ -1269,7 +1348,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           )}
 
           {tripStartedAt ? (
-            <MainButton text="↩️ Повернутися до поїздки" onClick={() => setStep("DRIVE")} />
+            <MainButton text="↩️ Повернутися до поїздки" onClick={() => setStep(tripResumeStep)} />
           ) : (
             <MainButton text="Далі → Перевірка перед виїздом" onClick={() => setStep("READY")} disabled={!readyToDepart} />
           )}
@@ -2053,51 +2132,62 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   <div className="empty-state">Роботи ще не розпочато</div>
                 )}
 
-                {(shiftOpen ? atObjectDetailsExpanded : true) && (worksTotal > 0 || plan.here.length > 0) && (
+                {/* Stop/resume controls only make sense once work has actually
+                    started -- before that, "Зупинити" on a work nobody has
+                    touched yet is just misleading. Collapsed by default (just
+                    a count) since the full list with a button per work eats
+                    a lot of screen. */}
+                {shiftOpen && atObjectDetailsExpanded && worksTotal > 0 && (
+                  <div className="list" style={{ marginBottom: 8 }}>
+                    <button className="cell" onClick={() => setAtObjectWorksExpanded((v) => !v)}>
+                      <span className="cell-title">
+                        {atObjectWorksExpanded ? "▾" : "▸"} 🛠 Роботи в процесі
+                      </span>
+                      <span className={`badge ${worksActive === 0 ? "danger" : worksActive === worksTotal ? "ok" : "warn"}`}>
+                        {worksActive}/{worksTotal}
+                      </span>
+                    </button>
+                    {atObjectWorksExpanded &&
+                      plan.works.map((w) => (
+                        <div key={w.workId} className="cell" style={{ cursor: "default" }}>
+                          <span className="cell-title" style={{ opacity: w.active ? 1 : 0.5, textDecoration: w.active ? "none" : "line-through" }}>
+                            {w.workName}
+                          </span>
+                          <button className="chip" onClick={() => toggleWorkActive(atObjectId, w.workId)}>
+                            {w.active ? "⏸ Зупинити" : "▶️ Відновити"}
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+                {(shiftOpen ? atObjectDetailsExpanded : true) && plan.here.length > 0 && (
                   <>
-                    {worksTotal > 0 && (
-                      <>
-                        <div className="section-title">Роботи</div>
-                        <div className="list">
-                          {plan.works.map((w) => (
-                            <div key={w.workId} className="cell" style={{ cursor: "default" }}>
-                              <span className="cell-title" style={{ opacity: w.active ? 1 : 0.5, textDecoration: w.active ? "none" : "line-through" }}>
-                                {w.workName}
-                              </span>
-                              <button className="chip" onClick={() => toggleWorkActive(atObjectId, w.workId)}>
-                                {w.active ? "⏸ Зупинити" : "▶️ Відновити"}
+                    <div className="section-title">Люди тут</div>
+                    <div className="list">
+                      {plan.here.map((id) => {
+                        const session = plan.sessions.find((s) => s.employeeId === id && !s.endedAt);
+                        return (
+                          <div key={id} className="cell" style={{ cursor: "default" }}>
+                            <span className="cell-title">{employeeName(id)}</span>
+                            <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              {session && <span className="hint">{fmtHMS(now - new Date(session.startedAt).getTime())}</span>}
+                              <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
+                                🔼 Забрати
                               </button>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                    {plan.here.length > 0 && (
-                      <>
-                        <div className="section-title">Люди тут</div>
-                        <div className="list">
-                          {plan.here.map((id) => {
-                            const session = plan.sessions.find((s) => s.employeeId === id && !s.endedAt);
-                            return (
-                              <div key={id} className="cell" style={{ cursor: "default" }}>
-                                <span className="cell-title">{employeeName(id)}</span>
-                                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                                  {session && <span className="hint">{fmtHMS(now - new Date(session.startedAt).getTime())}</span>}
-                                  <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
-                                    🔼 Забрати
-                                  </button>
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </>
-                    )}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </>
                 )}
 
-                {!showDropPicker && !showMovePicker && !showSwitchObjectPicker && (
+                {!showDropPicker && !showMovePicker && (
                   <div className="list" style={{ marginTop: 8 }}>
+                    <button className="cell" onClick={() => setShowDropPicker(true)} disabled={!onboard.length}>
+                      <span className="cell-title">👥 Висадити людей тут</span>
+                      <span className="cell-sub">🚐 {onboard.length} в машині</span>
+                    </button>
                     {notStarted.length > 0 && (
                       <button className="cell" onClick={startShift} disabled={!plan.works.length}>
                         <span className="cell-title">▶️ {shiftOpen ? "Додати до роботи" : "Почати роботи"}</span>
@@ -2118,18 +2208,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     <button className="cell" onClick={() => setShowMovePicker(true)} disabled={!plan.here.length}>
                       <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
                     </button>
-                    <button className="cell" onClick={() => setShowDropPicker(true)} disabled={!onboard.length}>
-                      <span className="cell-title">👥 Висадити людей тут</span>
-                    </button>
-                    <button className="cell" onClick={() => setShowSwitchObjectPicker(true)} disabled={plans.length < 2}>
-                      <span className="cell-title">🔀 Переключитись на інший обʼєкт</span>
-                    </button>
                   </div>
                 )}
 
-                {showSwitchObjectPicker && (
+                {plans.length > 1 && !showDropPicker && !showMovePicker && (
                   <>
-                    <div className="section-title">На який обʼєкт переключитись</div>
+                    <div className="section-title">Інші обʼєкти — переключитись</div>
                     <div className="list">
                       {plans
                         .filter((p) => p.objectId !== atObjectId)
@@ -2139,11 +2223,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             <span className="badge">{p.here.length ? `${p.here.length} тут` : p.visited ? "відвідано" : "заплановано"}</span>
                           </button>
                         ))}
-                    </div>
-                    <div style={{ padding: "0 16px 8px" }}>
-                      <button className="chip" onClick={() => setShowSwitchObjectPicker(false)}>
-                        Скасувати
-                      </button>
                     </div>
                   </>
                 )}
@@ -2233,41 +2312,62 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "RETURN_PICKUP" && (
         <>
           {(() => {
-            const withPeople = plans.filter((p) => p.here.length > 0);
-            const suggested = withPeople[0] ?? null;
+            const visited = plans.filter((p) => p.visited);
+            const anyPending = visited.some((p) => p.here.length > 0);
             return (
               <>
                 <div className="step-badge">ПОВЕРНЕННЯ НА БАЗУ</div>
-                {suggested ? (
-                  <>
-                    <div className="section-title">Кого забрати першим</div>
-                    <div className="suggestion-card">
-                      <div className="cell-title">📍 {suggested.objectName}</div>
-                      <div className="hint" style={{ margin: "4px 0 10px" }}>{suggested.here.map(employeeName).join(", ")}</div>
-                      <button className="chip selected" onClick={() => returnPickupObject(suggested.objectId)}>
-                        🔼 Забрати усіх ({suggested.here.length})
-                      </button>
-                    </div>
-                    {withPeople.length > 1 && (
-                      <>
-                        <div className="section-title">Або спершу інший обʼєкт</div>
-                        <div className="list">
-                          {withPeople.slice(1).map((p) => (
-                            <div key={p.objectId} className="cell" style={{ cursor: "default" }}>
-                              <span className="cell-title">📍 {p.objectName}</span>
-                              <button className="chip" onClick={() => returnPickupObject(p.objectId)}>
-                                Забрати ({p.here.length})
-                              </button>
+                <div className="section-title">Обʼєкти</div>
+                <div className="list">
+                  {visited.map((p) => {
+                    const expanded = expandedReturnPickupObjectId === p.objectId;
+                    const peopleHere = p.here.length;
+                    const peopleActive = p.sessions.filter((s) => !s.endedAt).length;
+                    const worksTotal = p.works.length;
+                    const worksFilled = p.works.filter((w) => w.volume && w.volume !== "?").length;
+                    return (
+                      <div key={p.objectId}>
+                        <button className="cell" onClick={() => setExpandedReturnPickupObjectId(expanded ? null : p.objectId)}>
+                          <span className="cell-title">
+                            {expanded ? "▾" : "▸"} 📍 {p.objectName}
+                          </span>
+                          <span style={{ display: "flex", gap: 6 }}>
+                            {peopleHere === 0 ? (
+                              <span className="badge ok">✅ забрано</span>
+                            ) : (
+                              <span className={`badge ${peopleActive === 0 ? "danger" : "warn"}`}>👤 {peopleHere} тут</span>
+                            )}
+                            {worksTotal > 0 && (
+                              <span className={`badge ${worksFilled === worksTotal ? "ok" : "warn"}`}>
+                                🛠 {worksFilled}/{worksTotal}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                        {expanded && (
+                          <div style={{ padding: "4px 16px 8px" }}>
+                            <div className="hint" style={{ fontWeight: 600 }}>👥 Люди</div>
+                            <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "усіх забрано"}</div>
+                            <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                            <div className="hint">
+                              {p.works.length
+                                ? p.works.map((w) => `${w.workName}${w.volume && w.volume !== "?" ? ` (${w.volume} ${w.unit})` : ""}`).join(", ")
+                                : "без робіт"}
                             </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </>
-                ) : (
-                  <div className="empty-state">✅ Усіх забрано — можна їхати на базу</div>
-                )}
-                <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} disabled={!!suggested} />
+                          </div>
+                        )}
+                        {peopleHere > 0 && (
+                          <div style={{ padding: "0 16px 10px" }}>
+                            <button className="chip selected" onClick={() => returnPickupObject(p.objectId)}>
+                              🔼 Забрати усіх ({peopleHere})
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} disabled={anyPending} />
               </>
             );
           })()}
@@ -2398,33 +2498,58 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
           <div className="section-title">Обʼєкти · роботи · обсяги</div>
           <div className="list">
-            {plans.map((p) => (
-              <div key={p.objectId} className="cell-row">
-                <div className="cell" style={{ cursor: "default", display: "block" }}>
-                  <div className="cell-title">📍 {p.objectName}</div>
-                  <div className="hint">{p.works.map((w) => `${w.workName} ${w.volume !== "?" ? w.volume + w.unit : "?"}`).join(" · ") || "без робіт"}</div>
+            {plans.map((p) => {
+              const expanded = expandedReviewObjectId === p.objectId;
+              const unfilled = p.works.filter((w) => !w.volume || w.volume === "?").length;
+              return (
+                <div key={p.objectId}>
+                  <div className="cell-row">
+                    <button className="cell" onClick={() => setExpandedReviewObjectId(expanded ? null : p.objectId)}>
+                      <span className="cell-title">
+                        {expanded ? "▾" : "▸"} 📍 {p.objectName}
+                      </span>
+                      {p.works.length > 0 && (
+                        <span className={`badge ${unfilled === 0 ? "ok" : "warn"}`}>
+                          {unfilled === 0 ? "✅ обсяги є" : `🟡 ${unfilled} без обсягу`}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      className="cell-action"
+                      onClick={() => openVolumesForObject(p.objectId, "REVIEW")}
+                      disabled={!p.works.length}
+                      title="Редагувати обсяги"
+                    >
+                      📏
+                    </button>
+                    <button
+                      className="cell-action"
+                      onClick={() => {
+                        setAtObjectId(p.objectId);
+                        setAtObjectReturnStep("REVIEW");
+                        setStep("AT_OBJECT");
+                      }}
+                      title="Редагувати обʼєкт"
+                    >
+                      ✏️
+                    </button>
+                  </div>
+                  {expanded && (
+                    <div style={{ padding: "4px 16px 10px" }}>
+                      {p.works.length ? (
+                        p.works.map((w) => (
+                          <div key={w.workId} className="hint">
+                            • {w.workName}: {w.volume && w.volume !== "?" ? `${w.volume} ${w.unit}` : "не введено"}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="hint">без робіт</div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <button
-                  className="cell-action"
-                  onClick={() => openVolumesForObject(p.objectId, "REVIEW")}
-                  disabled={!p.works.length}
-                  title="Редагувати обсяги"
-                >
-                  📏
-                </button>
-                <button
-                  className="cell-action"
-                  onClick={() => {
-                    setAtObjectId(p.objectId);
-                    setAtObjectReturnStep("REVIEW");
-                    setStep("AT_OBJECT");
-                  }}
-                  title="Редагувати обʼєкт"
-                >
-                  ✏️
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="section-title">Години працівників</div>
@@ -2449,54 +2574,60 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             })}
           </div>
 
-          {employeeIds.length > 0 && (
+          {employeeIds.filter((id) => roleFor(id) === "робітник").length > 0 && (
             <>
-              <div className="section-title" style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>Коефіцієнти</span>
-                <button className="chip" onClick={() => setShowCoefs((v) => !v)}>
-                  {showCoefs ? "Сховати" : "Детальніше"}
-                </button>
+              <div className="section-title">Коефіцієнти</div>
+              <div className="hint" style={{ padding: "0 16px 8px" }}>
+                Впливає лише на розподіл частки робітників у фонді обʼєкта. За замовчуванням 1.0 для всіх. Тапни на працівника, щоб змінити.
               </div>
-              {showCoefs && (
-                <>
-                  <div className="hint" style={{ padding: "0 16px 8px" }}>
-                    Впливає лише на розподіл частки робітників у фонді обʼєкта. За замовчуванням 1.0 для всіх.
-                  </div>
-                  <div className="list">
-                    {employeeIds
-                      .filter((id) => roleFor(id) === "робітник")
-                      .map((id) => (
-                        <div key={id} className="cell" style={{ cursor: "default", display: "block" }}>
-                          <div className="cell-title">{employeeName(id)}</div>
-                          <div className="hint">Дисципліна</div>
-                          <div className="chip-row">
-                            {COEF_PRESETS.map((v) => (
-                              <div
-                                key={v}
-                                className={`chip ${coefFor(id).disciplineCoef === v ? "selected" : ""}`}
-                                onClick={() => setCoef(id, "disciplineCoef", v)}
-                              >
-                                {v}
-                              </div>
-                            ))}
+              <div className="list">
+                {employeeIds
+                  .filter((id) => roleFor(id) === "робітник")
+                  .map((id) => {
+                    const expanded = expandedCoefEmployeeId === id;
+                    const c = coefFor(id);
+                    return (
+                      <div key={id}>
+                        <button className="cell" onClick={() => setExpandedCoefEmployeeId(expanded ? null : id)}>
+                          <span className="cell-title">
+                            {expanded ? "▾" : "▸"} {employeeName(id)}
+                          </span>
+                          <span className="cell-sub">
+                            Дисц. {c.disciplineCoef} · Прод. {c.productivityCoef}
+                          </span>
+                        </button>
+                        {expanded && (
+                          <div style={{ padding: "4px 16px 10px" }}>
+                            <div className="hint">Дисципліна</div>
+                            <div className="chip-row">
+                              {COEF_PRESETS.map((v) => (
+                                <div
+                                  key={v}
+                                  className={`chip ${c.disciplineCoef === v ? "selected" : ""}`}
+                                  onClick={() => setCoef(id, "disciplineCoef", v)}
+                                >
+                                  {v}
+                                </div>
+                              ))}
+                            </div>
+                            <div className="hint">Продуктивність</div>
+                            <div className="chip-row">
+                              {COEF_PRESETS.map((v) => (
+                                <div
+                                  key={v}
+                                  className={`chip ${c.productivityCoef === v ? "selected" : ""}`}
+                                  onClick={() => setCoef(id, "productivityCoef", v)}
+                                >
+                                  {v}
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                          <div className="hint">Продуктивність</div>
-                          <div className="chip-row">
-                            {COEF_PRESETS.map((v) => (
-                              <div
-                                key={v}
-                                className={`chip ${coefFor(id).productivityCoef === v ? "selected" : ""}`}
-                                onClick={() => setCoef(id, "productivityCoef", v)}
-                              >
-                                {v}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </>
-              )}
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
             </>
           )}
 
