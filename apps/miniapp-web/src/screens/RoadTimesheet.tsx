@@ -271,7 +271,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [expandedCoefEmployeeId, setExpandedCoefEmployeeId] = useState<string | null>(null);
   const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
   const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
-  const [showFixData, setShowFixData] = useState(false);
+  const [reviewReturnStep, setReviewReturnStep] = useState<Step>("RETURN");
 
   // --- drive ---
   const [onboard, setOnboard] = useState<string[]>([]);
@@ -1015,7 +1015,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     READY: "HUB",
     RETURN_PICKUP: "DRIVE",
     RETURN: "RETURN_PICKUP",
-    REVIEW: "RETURN",
     DONE: "REVIEW",
   };
   // PLAN_VOLUMES can be reached from more than one place (finishing a shift
@@ -1040,6 +1039,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
     if (step === "PLAN_WORKS") {
       setStep(worksReturnStep);
+      return;
+    }
+    if (step === "REVIEW") {
+      // Reached either the normal way (finishing RETURN) or as the "fix
+      // data" entry point from an already-submitted report -- back should
+      // return to whichever of those actually opened it.
+      setStep(reviewReturnStep);
+      setReviewReturnStep("RETURN");
       return;
     }
     if (step === "AT_OBJECT") {
@@ -1098,48 +1105,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
         </div>
 
-        <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Фонд по обʼєктах</span>
-          <button className="chip" onClick={() => setShowFixData((v) => !v)}>
-            {showFixData ? "✅ Готово" : "✏️ Виправити дані"}
-          </button>
-        </div>
+        <div className="section-title">Фонд по обʼєктах</div>
         {result.salaryPacks.map((pack) => {
           const expanded = expandedDoneObjectId === pack.objectId;
-          const plan = plans.find((p) => p.objectId === pack.objectId);
           return (
             <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
-              <div className="cell-row">
-                <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
-                  <span className="cell-title">
-                    {expanded ? "▾" : "▸"} 📍 {pack.objectName}
-                  </span>
-                  <span className="badge ok">{pack.objectTotal} грн</span>
-                </button>
-                {showFixData && (
-                  <>
-                    <button
-                      className="cell-action"
-                      onClick={() => openVolumesForObject(pack.objectId, "DONE")}
-                      disabled={!plan?.works.length}
-                      title="Редагувати обсяги"
-                    >
-                      📏
-                    </button>
-                    <button
-                      className="cell-action"
-                      onClick={() => {
-                        setAtObjectId(pack.objectId);
-                        setAtObjectReturnStep("DONE");
-                        setStep("AT_OBJECT");
-                      }}
-                      title="Редагувати обʼєкт"
-                    >
-                      ✏️
-                    </button>
-                  </>
-                )}
-              </div>
+              <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
+                <span className="cell-title">
+                  {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+                </span>
+                <span className="badge ok">{pack.objectTotal} грн</span>
+              </button>
               {expanded && (
                 <div style={{ padding: "0 16px 12px" }} className="hint">
                   {pack.rows.map((r) => (
@@ -1154,14 +1130,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           );
         })}
 
-        <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
-          <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати все</button>
+        <div style={{ padding: "16px 16px 8px", textAlign: "center" }}>
+          <button
+            className="back-btn"
+            onClick={() => {
+              setReviewReturnStep("DONE");
+              setStep("REVIEW");
+            }}
+          >
+            ✏️ Виправити дані
+          </button>
         </div>
-        {showFixData ? (
-          <MainButton text={saving ? "Відправлення…" : "📤 Оновити звіт"} onClick={save} disabled={saving} />
-        ) : (
-          <MainButton text="До меню" onClick={onSaved} />
-        )}
+        <MainButton text="До меню" onClick={onSaved} />
       </div>
     );
   }
@@ -2453,6 +2433,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             text="Далі → Підсумок дня"
             onClick={async () => {
               logChange(`Повернення: одометр ${odoEnd} км`);
+              setReviewReturnStep("RETURN");
               setStep("REVIEW");
               await loadPreview();
             }}
