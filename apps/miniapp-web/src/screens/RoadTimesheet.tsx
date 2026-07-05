@@ -271,12 +271,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [expandedCoefEmployeeId, setExpandedCoefEmployeeId] = useState<string | null>(null);
   const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
   const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
+  const [showFixData, setShowFixData] = useState(false);
 
   // --- drive ---
   const [onboard, setOnboard] = useState<string[]>([]);
   const [tripStartedAt, setTripStartedAt] = useState<string | null>(null);
-  const [driveDropTargetId, setDriveDropTargetId] = useState<string | null>(null);
-  const [driveDropSelected, setDriveDropSelected] = useState<string[]>([]);
   const [showRoadsideActions, setShowRoadsideActions] = useState(false);
   const [expandedDriveObjectId, setExpandedDriveObjectId] = useState<string | null>(null);
   const [showArrivePicker, setShowArrivePicker] = useState(false);
@@ -795,14 +794,24 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     haptic("selection");
   }
 
-  // ---------- quick pickup / drop-off during the drive ----------
-  function dropAtObject(objectId: string, ids: string[]) {
-    if (!ids.length) return;
-    const objectName = planFor(objectId).objectName;
-    moveEmployeesTo(ids, { kind: "object", objectId });
-    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
+  // ---------- roadside pickup / drop-off during the drive ----------
+  // Not tied to any object -- just adjusts who's physically in the car
+  // right now (e.g. picking someone up along the way, or sending someone
+  // home early). Dropping someone at a specific object is a separate
+  // action, done from that object's own screen.
+  function roadsidePickup(employeeId: string) {
+    if (!employeeIds.includes(employeeId)) {
+      setEmployeeIds((prev) => [...prev, employeeId]);
+    }
+    moveEmployeesTo([employeeId], { kind: "onboard" });
     haptic("light");
-    logChange(`Висаджено ${ids.length} на ${objectName}`);
+    logChange(`Підібрано по дорозі: ${employeeName(employeeId)}`);
+  }
+
+  function roadsideDropoff(employeeId: string) {
+    moveEmployeesTo([employeeId], { kind: "nowhere" });
+    haptic("light");
+    logChange(`Висаджено по дорозі: ${employeeName(employeeId)}`);
   }
 
   function pickUpHere(objectId: string) {
@@ -1007,6 +1016,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     RETURN_PICKUP: "DRIVE",
     RETURN: "RETURN_PICKUP",
     REVIEW: "RETURN",
+    DONE: "REVIEW",
   };
   // PLAN_VOLUMES can be reached from more than one place (finishing a shift
   // at the object, or catching up on unfilled volumes from RETURN), so its
@@ -1054,11 +1064,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setShowArrivePicker(false);
         return;
       }
-      if (driveDropTargetId) {
-        setDriveDropTargetId(null);
-        setDriveDropSelected([]);
-        return;
-      }
       if (showRoadsideActions) {
         setShowRoadsideActions(false);
         return;
@@ -1075,6 +1080,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   if (step === "DONE" && result) {
     return (
       <div>
+        <BackRow onBack={goBack} />
         <div className="header">
           <h1>✅ Відправлено на підтвердження</h1>
           <div className="hint">Можна й далі редагувати та надсилати повторно, поки адміністратор не затвердить день.</div>
@@ -1091,7 +1097,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <span className="cell-sub">{result.roadAllowance.perPerson} грн/особу</span>
           </div>
         </div>
-        <div className="section-title">Фонд по обʼєктах</div>
+
+        <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Фонд по обʼєктах</span>
+          <button className="chip" onClick={() => setShowFixData((v) => !v)}>
+            {showFixData ? "✅ Готово" : "✏️ Виправити дані"}
+          </button>
+        </div>
         {result.salaryPacks.map((pack) => {
           const expanded = expandedDoneObjectId === pack.objectId;
           const plan = plans.find((p) => p.objectId === pack.objectId);
@@ -1104,25 +1116,29 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </span>
                   <span className="badge ok">{pack.objectTotal} грн</span>
                 </button>
-                <button
-                  className="cell-action"
-                  onClick={() => openVolumesForObject(pack.objectId, "REVIEW")}
-                  disabled={!plan?.works.length}
-                  title="Редагувати обсяги"
-                >
-                  📏
-                </button>
-                <button
-                  className="cell-action"
-                  onClick={() => {
-                    setAtObjectId(pack.objectId);
-                    setAtObjectReturnStep("REVIEW");
-                    setStep("AT_OBJECT");
-                  }}
-                  title="Редагувати обʼєкт"
-                >
-                  ✏️
-                </button>
+                {showFixData && (
+                  <>
+                    <button
+                      className="cell-action"
+                      onClick={() => openVolumesForObject(pack.objectId, "DONE")}
+                      disabled={!plan?.works.length}
+                      title="Редагувати обсяги"
+                    >
+                      📏
+                    </button>
+                    <button
+                      className="cell-action"
+                      onClick={() => {
+                        setAtObjectId(pack.objectId);
+                        setAtObjectReturnStep("DONE");
+                        setStep("AT_OBJECT");
+                      }}
+                      title="Редагувати обʼєкт"
+                    >
+                      ✏️
+                    </button>
+                  </>
+                )}
               </div>
               {expanded && (
                 <div style={{ padding: "0 16px 12px" }} className="hint">
@@ -1137,10 +1153,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           );
         })}
+
         <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
           <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати все</button>
         </div>
-        <MainButton text="До меню" onClick={onSaved} />
+        {showFixData ? (
+          <MainButton text={saving ? "Відправлення…" : "📤 Оновити звіт"} onClick={save} disabled={saving} />
+        ) : (
+          <MainButton text="До меню" onClick={onSaved} />
+        )}
       </div>
     );
   }
@@ -1912,75 +1933,39 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Маршрут</span>
             <button className="chip" onClick={() => setShowRoadsideActions((v) => !v)}>
-              🚏 {showRoadsideActions ? "Сховати дії" : "Висадити/забрати по дорозі"}
+              🚏 {showRoadsideActions ? "Сховати" : "Висадити/забрати по дорозі"}
             </button>
           </div>
 
-          {showRoadsideActions && (
-            <>
-              <div className="list" style={{ marginBottom: 8 }}>
-                {plans.map((p) => (
-                  <div key={p.objectId} className="cell" style={{ cursor: "default", display: "block" }}>
-                    <div className="cell-title" style={{ marginBottom: 6 }}>📍 {p.objectName}</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        className="chip"
-                        onClick={() => {
-                          setDriveDropTargetId(p.objectId);
-                          setDriveDropSelected([]);
-                        }}
-                        disabled={!onboard.length}
-                      >
-                        🔽 Висадити тут
-                      </button>
-                      <button className="chip" onClick={() => pickUpHere(p.objectId)} disabled={!p.here.length}>
-                        🔼 Забрати ({p.here.length})
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {driveDropTargetId && (
+          {showRoadsideActions &&
+            (() => {
+              const availableToPickUp = employees.filter(
+                (e) => !onboard.includes(e.id) && !plans.some((p) => p.here.includes(e.id)) && !busyEmployees.has(e.id),
+              );
+              return (
                 <>
-                  <div className="section-title">Кого висадити на {plans.find((p) => p.objectId === driveDropTargetId)?.objectName}</div>
+                  <div className="section-title">🔼 Забрати по дорозі</div>
                   <div className="chip-row">
-                    {onboard.map((id) => (
-                      <div
-                        key={id}
-                        className={`chip ${driveDropSelected.includes(id) ? "selected" : ""}`}
-                        onClick={() => setDriveDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
-                      >
-                        {employeeName(id)}
+                    {availableToPickUp.map((e) => (
+                      <div key={e.id} className="chip" onClick={() => roadsidePickup(e.id)}>
+                        + {e.name}
                       </div>
                     ))}
+                    {!availableToPickUp.length && <div className="hint">Немає кого забирати</div>}
                   </div>
-                  <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                    <button
-                      className="chip"
-                      onClick={() => {
-                        setDriveDropTargetId(null);
-                        setDriveDropSelected([]);
-                      }}
-                    >
-                      Скасувати
-                    </button>
-                    <button
-                      className="chip selected"
-                      onClick={() => {
-                        dropAtObject(driveDropTargetId, driveDropSelected);
-                        setDriveDropTargetId(null);
-                        setDriveDropSelected([]);
-                      }}
-                      disabled={!driveDropSelected.length}
-                    >
-                      Підтвердити
-                    </button>
+
+                  <div className="section-title">🔽 Висадити по дорозі — в машині {onboard.length}</div>
+                  <div className="chip-row">
+                    {onboard.map((id) => (
+                      <div key={id} className="chip" onClick={() => roadsideDropoff(id)}>
+                        − {employeeName(id)}
+                      </div>
+                    ))}
+                    {!onboard.length && <div className="hint">Нікого немає в машині</div>}
                   </div>
                 </>
-              )}
-            </>
-          )}
+              );
+            })()}
 
           <div className="list">
             {plans.map((p) => {
@@ -2552,7 +2537,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             })}
           </div>
 
-          <div className="section-title">Години працівників</div>
+          <div className="section-title">Працівники</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>
+            Коефіцієнти впливають лише на розподіл частки робітників у фонді обʼєкта, за замовчуванням 1.0. Тапни на робітника, щоб змінити.
+          </div>
           <div className="list">
             {employeeIds.map((id) => {
               const totalMs = plans.reduce((acc, p) => {
@@ -2565,71 +2553,58 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   }, 0);
                 return acc + ms;
               }, 0);
+              const isWorker = roleFor(id) === "робітник";
+              const expanded = isWorker && expandedCoefEmployeeId === id;
+              const c = coefFor(id);
               return (
-                <div key={id} className="cell" style={{ cursor: "default" }}>
-                  <span className="cell-title">{employeeName(id)}</span>
-                  <span className="cell-sub">{fmtHours(totalMs)} год</span>
+                <div key={id}>
+                  {isWorker ? (
+                    <button className="cell" onClick={() => setExpandedCoefEmployeeId(expanded ? null : id)}>
+                      <span className="cell-title">
+                        {expanded ? "▾" : "▸"} {employeeName(id)}
+                      </span>
+                      <span className="cell-sub">
+                        {fmtHours(totalMs)} год · Дисц. {c.disciplineCoef} · Прод. {c.productivityCoef}
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="cell" style={{ cursor: "default" }}>
+                      <span className="cell-title">{employeeName(id)}</span>
+                      <span className="cell-sub">{fmtHours(totalMs)} год</span>
+                    </div>
+                  )}
+                  {expanded && (
+                    <div style={{ padding: "4px 16px 10px" }}>
+                      <div className="hint">Дисципліна</div>
+                      <div className="chip-row">
+                        {COEF_PRESETS.map((v) => (
+                          <div
+                            key={v}
+                            className={`chip ${c.disciplineCoef === v ? "selected" : ""}`}
+                            onClick={() => setCoef(id, "disciplineCoef", v)}
+                          >
+                            {v}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="hint">Продуктивність</div>
+                      <div className="chip-row">
+                        {COEF_PRESETS.map((v) => (
+                          <div
+                            key={v}
+                            className={`chip ${c.productivityCoef === v ? "selected" : ""}`}
+                            onClick={() => setCoef(id, "productivityCoef", v)}
+                          >
+                            {v}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-
-          {employeeIds.filter((id) => roleFor(id) === "робітник").length > 0 && (
-            <>
-              <div className="section-title">Коефіцієнти</div>
-              <div className="hint" style={{ padding: "0 16px 8px" }}>
-                Впливає лише на розподіл частки робітників у фонді обʼєкта. За замовчуванням 1.0 для всіх. Тапни на працівника, щоб змінити.
-              </div>
-              <div className="list">
-                {employeeIds
-                  .filter((id) => roleFor(id) === "робітник")
-                  .map((id) => {
-                    const expanded = expandedCoefEmployeeId === id;
-                    const c = coefFor(id);
-                    return (
-                      <div key={id}>
-                        <button className="cell" onClick={() => setExpandedCoefEmployeeId(expanded ? null : id)}>
-                          <span className="cell-title">
-                            {expanded ? "▾" : "▸"} {employeeName(id)}
-                          </span>
-                          <span className="cell-sub">
-                            Дисц. {c.disciplineCoef} · Прод. {c.productivityCoef}
-                          </span>
-                        </button>
-                        {expanded && (
-                          <div style={{ padding: "4px 16px 10px" }}>
-                            <div className="hint">Дисципліна</div>
-                            <div className="chip-row">
-                              {COEF_PRESETS.map((v) => (
-                                <div
-                                  key={v}
-                                  className={`chip ${c.disciplineCoef === v ? "selected" : ""}`}
-                                  onClick={() => setCoef(id, "disciplineCoef", v)}
-                                >
-                                  {v}
-                                </div>
-                              ))}
-                            </div>
-                            <div className="hint">Продуктивність</div>
-                            <div className="chip-row">
-                              {COEF_PRESETS.map((v) => (
-                                <div
-                                  key={v}
-                                  className={`chip ${c.productivityCoef === v ? "selected" : ""}`}
-                                  onClick={() => setCoef(id, "productivityCoef", v)}
-                                >
-                                  {v}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
-            </>
-          )}
 
           {preview && (
             <>
