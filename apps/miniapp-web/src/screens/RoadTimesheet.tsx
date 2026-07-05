@@ -2341,11 +2341,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             </div>
                           </div>
                         )}
-                        {peopleHere > 0 && (
-                          <div style={{ padding: "0 16px 10px" }}>
-                            <button className="chip selected" onClick={() => returnPickupObject(p.objectId)}>
-                              🔼 Забрати усіх ({peopleHere})
-                            </button>
+                        {(peopleHere > 0 || worksTotal > 0) && (
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "0 16px 10px" }}>
+                            {peopleHere > 0 && (
+                              <button className="chip selected" onClick={() => returnPickupObject(p.objectId)}>
+                                🔼 Забрати усіх ({peopleHere})
+                              </button>
+                            )}
+                            {worksTotal > 0 && (
+                              <button className="chip" onClick={() => openVolumesForObject(p.objectId, "RETURN_PICKUP")}>
+                                📏 Ввести обсяги{worksFilled < worksTotal ? ` (${worksTotal - worksFilled})` : ""}
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
