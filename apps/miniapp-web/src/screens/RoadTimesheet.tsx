@@ -1275,7 +1275,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
       {(carId || employeeIds.length > 0 || plans.length > 0) && (
         <div style={{ padding: "0 16px 8px", textAlign: "right" }}>
-          <button className="back-btn" onClick={resetDay}>🗑 Скинути день</button>
+          <button className="back-btn danger-btn" onClick={resetDay}>🗑 Скинути день</button>
         </div>
       )}
 
@@ -1296,9 +1296,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
       {step === "HUB" && (
         <>
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Поточна поїздка · {date}</span>
-            {!tripStartedAt && <span className="badge">{readinessScore}/4 готово</span>}
+            {!tripStartedAt && (
+              <span className={`badge ${readinessScore === 4 ? "ok" : readinessScore === 0 ? "" : "warn"}`}>{readinessScore}/4 готово</span>
+            )}
           </div>
 
           {restoredBanner && (
@@ -1513,7 +1515,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PICK_PEOPLE" && (
         <>
           <div className="step-badge">👥 ЛЮДИ</div>
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Люди в поїздці — Обрано {employeeIds.length}</span>
             {employeeIds.length > 0 && (
               <button className="chip" onClick={() => setEmployeeIds([])}>
@@ -1633,7 +1635,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PICK_OBJECTS" && (
         <>
           <div className="step-badge">📍 ОБʼЄКТИ</div>
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Обʼєкти маршруту — Обрано {plans.length}</span>
             {plans.length > 0 && (
               <button className="chip" onClick={() => setPlans([])}>
@@ -1722,7 +1724,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "PLAN_WORKS" && planObjectId && (
         <>
           <div className="step-badge">{planFor(planObjectId).objectName.toUpperCase()} · РОБОТИ</div>
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Вибір робіт — Обрано {planFor(planObjectId).works.length}</span>
             {planFor(planObjectId).works.length > 0 && (
               <button className="chip" onClick={() => clearWorks(planObjectId)}>
@@ -1806,7 +1808,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             return (
               <>
                 <div className="step-badge">{plan.objectName.toUpperCase()} · ОБСЯГИ</div>
-                <div className="section-title" style={{ display: "flex", justifyContent: "space-between" }}>
+                <div className="section-title row">
                   <span>Обсяги</span>
                   <button className="chip" onClick={() => setBulkVolumeInput(bulkVolumeInput === null ? "" : null)}>
                     Масовий ввід
@@ -1919,13 +1921,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <div className="big-number">{volumeBuffer || "0"}</div>
                 <div className="unit-tabs">
                   {UNITS.map((u) => (
-                    <div key={u} className={`unit-tab ${volumeUnit === u ? "selected" : ""}`} onClick={() => setVolumeUnit(u)}>
+                    <button key={u} className={`unit-tab ${volumeUnit === u ? "selected" : ""}`} onClick={() => setVolumeUnit(u)}>
                       {u}
-                    </div>
+                    </button>
                   ))}
                 </div>
-                <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center", cursor: "pointer" }} onClick={() => saveVolumeDetail(true)}>
-                  ❓ Обсяг ще невідомий — заповнити пізніше
+                <div style={{ textAlign: "center", padding: "0 16px 8px" }}>
+                  <button className="back-btn" onClick={() => saveVolumeDetail(true)}>
+                    ❓ Обсяг ще невідомий — заповнити пізніше
+                  </button>
                 </div>
                 <NumericKeypad value={volumeBuffer} onChange={setVolumeBuffer} />
                 <MainButton text="Зберегти обсяг" onClick={() => saveVolumeDetail(false)} disabled={!volumeBuffer} />
@@ -2030,6 +2034,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div style={{ padding: "8px 16px", textAlign: "right" }}>
             <button className="back-btn" onClick={() => setStep("HUB")}>✏️ Редагувати поїздку</button>
           </div>
+          <div style={{ textAlign: "center" }}>
+            <div className="step-badge">🚗 ПОЇЗДКА</div>
+          </div>
           <div className="pulse-icon">🚗</div>
           <div className="section-title" style={{ textAlign: "center" }}>{nextUnvisited ? "В ДОРОЗІ" : "ПОВЕРТАЄМОСЬ"}</div>
           <div className="timer-big">{tripStartedAt ? fmtHMS(now - new Date(tripStartedAt).getTime()) : "00:00:00"}</div>
@@ -2044,7 +2051,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             )}
           </div>
 
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Маршрут</span>
             <button className="chip" onClick={() => setShowRoadsideActions((v) => !v)}>
               🚏 {showRoadsideActions ? "Сховати" : "Висадити/забрати по дорозі"}
@@ -2061,9 +2068,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   <div className="section-title">🔼 Забрати по дорозі</div>
                   <div className="chip-row">
                     {availableToPickUp.map((e) => (
-                      <div key={e.id} className="chip" onClick={() => roadsidePickup(e.id)}>
+                      <button key={e.id} className="chip" onClick={() => roadsidePickup(e.id)}>
                         + {e.name}
-                      </div>
+                      </button>
                     ))}
                     {!availableToPickUp.length && <div className="hint">Немає кого забирати</div>}
                   </div>
@@ -2071,9 +2078,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   <div className="section-title">🔽 Висадити по дорозі — в машині {onboard.length}</div>
                   <div className="chip-row">
                     {onboard.map((id) => (
-                      <div key={id} className="chip" onClick={() => roadsideDropoff(id)}>
+                      <button key={id} className="chip" onClick={() => roadsideDropoff(id)}>
                         − {employeeName(id)}
-                      </div>
+                      </button>
                     ))}
                     {!onboard.length && <div className="hint">Нікого немає в машині</div>}
                   </div>
@@ -2195,7 +2202,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             return (
               <>
                 <div className="step-badge">НА ОБʼЄКТІ</div>
-                <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div className="section-title row">
                   <span>📍 {plan.objectName}</span>
                   <span style={{ display: "flex", gap: 6 }}>
                     {peopleTotal > 0 && (
@@ -2335,17 +2342,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   <>
                     <div className="section-title">Кого перенести</div>
                     <div className="chip-row">
-                      <div className="chip" onClick={() => setMoveSelected(plan.here)}>
+                      <button className="chip" onClick={() => setMoveSelected(plan.here)}>
                         Обрати всіх
-                      </div>
+                      </button>
                       {plan.here.map((id) => (
-                        <div
+                        <button
                           key={id}
                           className={`chip ${moveSelected.includes(id) ? "selected" : ""}`}
                           onClick={() => setMoveSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
                         >
                           {employeeName(id)}
-                        </div>
+                        </button>
                       ))}
                     </div>
                     <div className="section-title">На який обʼєкт</div>
@@ -2353,9 +2360,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       {plans
                         .filter((p) => p.objectId !== atObjectId)
                         .map((p) => (
-                          <div key={p.objectId} className={`chip ${moveTargetId === p.objectId ? "selected" : ""}`} onClick={() => setMoveTargetId(p.objectId)}>
+                          <button key={p.objectId} className={`chip ${moveTargetId === p.objectId ? "selected" : ""}`} onClick={() => setMoveTargetId(p.objectId)}>
                             {p.objectName}
-                          </div>
+                          </button>
                         ))}
                     </div>
                     <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
@@ -2593,7 +2600,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           </div>
 
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>🚙 Авто{carId ? `: ${cars.find((c) => c.id === carId)?.name ?? ""}` : ""}</span>
             <button
               className="chip"
@@ -2607,7 +2614,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
           <div className="hint" style={{ padding: "0 16px 8px" }}>{odoStart} км</div>
 
-          <div className="section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title row">
             <span>Люди — {employeeIds.length}</span>
             <button
               className="chip"

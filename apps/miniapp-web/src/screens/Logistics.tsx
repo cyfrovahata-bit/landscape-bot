@@ -221,9 +221,9 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
           </div>
           <div className="chip-row">
             {QTY_QUICK.map((n) => (
-              <div key={n} className={`chip ${draftQty === n ? "selected" : ""}`} onClick={() => setDraftQty(n)}>
+              <button key={n} className={`chip ${draftQty === n ? "selected" : ""}`} onClick={() => setDraftQty(n)}>
                 {n}
-              </div>
+              </button>
             ))}
           </div>
           <MainButton text="Далі → Люди" onClick={confirmQty} />
@@ -237,7 +237,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
             {employees.map((emp) => {
               const lockedByOther = items.some((it, i) => i !== editingIndex && it.employeeIds.includes(emp.id));
               return (
-                <div
+                <button
                   key={emp.id}
                   className={`chip ${draftEmployeeIds.includes(emp.id) ? "selected" : ""}`}
                   style={lockedByOther ? { opacity: 0.4 } : undefined}
@@ -245,7 +245,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                 >
                   {lockedByOther ? "⛔️ " : ""}
                   {emp.name}
-                </div>
+                </button>
               );
             })}
           </div>

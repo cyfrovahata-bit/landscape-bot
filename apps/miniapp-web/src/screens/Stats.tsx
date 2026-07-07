@@ -73,15 +73,15 @@ export function Stats({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="unit-tabs" style={{ margin: "8px 0" }}>
-        <div className={`unit-tab ${tab === "objects" ? "selected" : ""}`} onClick={() => selectTab("objects")}>
+        <button className={`unit-tab ${tab === "objects" ? "selected" : ""}`} onClick={() => selectTab("objects")}>
           📍 Обʼєкти
-        </div>
-        <div className={`unit-tab ${tab === "employees" ? "selected" : ""}`} onClick={() => selectTab("employees")}>
+        </button>
+        <button className={`unit-tab ${tab === "employees" ? "selected" : ""}`} onClick={() => selectTab("employees")}>
           👥 Люди
-        </div>
-        <div className={`unit-tab ${tab === "cars" ? "selected" : ""}`} onClick={() => selectTab("cars")}>
+        </button>
+        <button className={`unit-tab ${tab === "cars" ? "selected" : ""}`} onClick={() => selectTab("cars")}>
           🚙 Машини
-        </div>
+        </button>
       </div>
 
       {loading && <div className="empty-state">Завантаження…</div>}

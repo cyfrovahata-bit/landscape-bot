@@ -67,9 +67,9 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
       <div className="section-title">Тип операції</div>
       <div className="chip-row">
         {MOVE_TYPES.map((mt) => (
-          <div key={mt.value} className={`chip ${moveType === mt.value ? "selected" : ""}`} onClick={() => setMoveType(mt.value)}>
+          <button key={mt.value} className={`chip ${moveType === mt.value ? "selected" : ""}`} onClick={() => setMoveType(mt.value)}>
             {mt.label}
-          </div>
+          </button>
         ))}
       </div>
 
