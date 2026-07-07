@@ -35,6 +35,7 @@ interface TelegramWebApp {
     notificationOccurred(type: NotificationType): void;
     selectionChanged(): void;
   };
+  showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
 }
 
 declare global {
@@ -59,6 +60,17 @@ export function getInitData(): string {
 
 export function getInitDataUser(): WebAppUser | null {
   return getWebApp()?.initDataUnsafe?.user ?? null;
+}
+
+// Native Telegram confirm dialog when available; some Telegram WebViews
+// silently block window.confirm (the tap just does nothing), so prefer the
+// SDK's own dialog and fall back to window.confirm for plain-browser dev.
+export function confirmDialog(message: string): Promise<boolean> {
+  const webApp = getWebApp();
+  if (webApp?.showConfirm) {
+    return new Promise((resolve) => webApp.showConfirm!(message, resolve));
+  }
+  return Promise.resolve(window.confirm(message));
 }
 
 // Small tactile feedback on toggles/confirmations -- no-ops outside Telegram

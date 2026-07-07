@@ -212,7 +212,10 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
  * (soft-cancel) objects/works that were part of a previous submission but are
  * missing from the current one, so editing-and-resubmitting never leaves stale
  * "ghost" rows behind in reports/timesheet/dayStatus. */
-async function fetchPreviousSubmission(date: string, foremanTgId: number): Promise<{ objects: ObjectInput[] } | null> {
+async function fetchPreviousSubmission(
+  date: string,
+  foremanTgId: number,
+): Promise<{ objects: ObjectInput[]; carId: string | null } | null> {
   const rows = await db
     .select()
     .from(schema.events)
@@ -223,7 +226,7 @@ async function fetchPreviousSubmission(date: string, foremanTgId: number): Promi
   if (!latest) return null;
   try {
     const payload = JSON.parse(latest.payload ?? "{}") as { objects?: ObjectInput[] };
-    return { objects: payload.objects ?? [] };
+    return { objects: payload.objects ?? [], carId: latest.carId ?? null };
   } catch {
     return null;
   }
@@ -294,6 +297,17 @@ roadTimesheetRouter.post("/", async (req, res) => {
         { date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto },
         tx,
       );
+
+      // Resubmitting with a different car must release the old one: blank
+      // its Sheets row (values gone but the row stays visible as corrected)
+      // and drop the DB row entirely -- car-status treats any odometer row
+      // for the date as "taken", and stats would double-count the km.
+      if (previous?.carId && previous.carId !== carId) {
+        await writeOdometerDay({ date, carId: previous.carId, foremanTgId }, tx);
+        await tx
+          .delete(schema.odometerDays)
+          .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, previous.carId)));
+      }
 
       const currentObjectIds = new Set(objects.map((o) => o.objectId));
 
