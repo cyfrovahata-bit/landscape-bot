@@ -1164,7 +1164,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         </div>
         <div className="list">
           <div className="cell">
-            <span className="cell-title">🚙 Поїздка</span>
+            <span className="cell-title">🚙 {cars.find((c) => c.id === carId)?.name ?? "Поїздка"}</span>
             <span className="cell-sub">
               {result.km} км · клас {result.tripClass}
             </span>
@@ -1186,16 +1186,30 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 </span>
                 <span className="badge ok">{pack.objectTotal} грн</span>
               </button>
-              {expanded && (
-                <div style={{ padding: "0 16px 12px" }} className="hint">
-                  {pack.rows.map((r) => (
-                    <div key={r.employeeId}>
-                      {r.employeeName}: {r.pay} грн
+              {expanded &&
+                (() => {
+                  const works = plans.find((p) => p.objectId === pack.objectId)?.works ?? [];
+                  return (
+                    <div style={{ padding: "0 16px 12px" }} className="hint">
+                      <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                      {works.length
+                        ? works.map((w) => (
+                            <div key={w.workId}>
+                              {w.workName}
+                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
+                            </div>
+                          ))
+                        : "— без робіт —"}
+                      <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
+                      {pack.rows.map((r) => (
+                        <div key={r.employeeId}>
+                          {r.employeeName}: {r.pay} грн
+                        </div>
+                      ))}
+                      {!pack.rows.length && "— без нарахувань —"}
                     </div>
-                  ))}
-                  {!pack.rows.length && "— без нарахувань —"}
-                </div>
-              )}
+                  );
+                })()}
             </div>
           );
         })}
