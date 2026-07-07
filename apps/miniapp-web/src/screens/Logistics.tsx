@@ -267,7 +267,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                   style={{ display: "block", cursor: "pointer" }}
                   onClick={() => setEditActionIndex(editActionIndex === idx ? null : idx)}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", rowGap: 4, justifyContent: "space-between" }}>
                     <span className="cell-title">
                       {dir?.name ?? it.logisticId} × {it.qty}
                     </span>

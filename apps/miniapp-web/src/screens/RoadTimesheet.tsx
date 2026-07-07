@@ -2104,8 +2104,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             return (
               <>
                 <div className="step-badge">ОБСЯГ РОБОТИ</div>
-                <div className="section-title">Обсяг для роботи</div>
-                <div className="hint" style={{ padding: "0 16px" }}>{work.workName}</div>
+                <div className="section-title">🛠 {work.workName}</div>
                 <div className="big-number">{volumeBuffer || "0"}</div>
                 <div className="unit-tabs">
                   {UNITS.map((u) => (
@@ -2658,7 +2657,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "RETURN" && (
         <>
           <div className="step-badge">ПОВЕРНЕННЯ</div>
-          <div className="section-title">Повернення</div>
+          <div className="section-title">Обʼєкти</div>
           <div className="hint" style={{ padding: "0 16px 8px" }}>Завершіть роботу і заберіть людей з обʼєктів</div>
           <div className="list">
             {plans
@@ -2763,7 +2762,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               .map((o) => (
                 <button key={o.id} className="cell" onClick={() => replaceObjectInPlan(retroReplaceObjectId, o)}>
                   <span className="cell-title">📍 {o.name}</span>
-                  <span className="hint">{o.address ?? ""}</span>
+                  <span className="cell-sub">{o.address ?? ""}</span>
                 </button>
               ))}
           </div>
@@ -2778,7 +2777,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "REVIEW" && !retroReplaceObjectId && (
         <>
           <div className="step-badge">ПІДСУМОК ДНЯ</div>
-          <div className="section-title">Підсумок дня</div>
+          <div className="section-title">Поїздка</div>
           <div className="list">
             <div className="cell">
               <span className="cell-title">Проїхано</span>

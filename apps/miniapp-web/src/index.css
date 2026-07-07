@@ -375,6 +375,8 @@ body {
   border-radius: 6px;
   background: rgba(0, 122, 255, 0.12);
   color: var(--tg-link);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .timer-big {
