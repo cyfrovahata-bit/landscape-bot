@@ -131,6 +131,10 @@ type DraftShape = {
   tripStartedAt: string | null;
   atObjectId: string | null;
   coefs: Record<string, CoefPair>;
+  // Which already-submitted trip this draft is mid-edit of, if any -- lost
+  // without this, an interrupted edit (app killed before resubmitting) would
+  // resume as if it were a brand-new trip and create a duplicate on save.
+  editingTripSeq: number | null;
 };
 
 // Autosaved drafts can predate a schema change (e.g. the old singular
@@ -321,6 +325,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [submittedTrips, setSubmittedTrips] = useState<SubmittedTrip[]>([]);
   const [dayCombined, setDayCombined] = useState<DayCombined | null>(null);
   const [editingTripSeq, setEditingTripSeq] = useState<number | null>(null);
+  const [inProgressResumeStep, setInProgressResumeStep] = useState<Step | null>(null);
   const [expandedTripSeq, setExpandedTripSeq] = useState<number | null>(null);
 
   useEffect(() => {
@@ -358,7 +363,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // against the corrected date once it changes.
   useEffect(() => {
     const draft = loadDraft<DraftShape>();
-    if (draft && draft.step !== "DONE") {
+    // A draft only counts as "in-progress work to resume" if something was
+    // actually entered -- "Розпочати нову поїздку" itself autosaves a blank
+    // HUB draft the moment it's tapped, and that blank leftover must not
+    // masquerade as real work and block the submitted-trips list below.
+    const hasContent = !!draft && (!!draft.carId || draft.employeeIds.length > 0 || draft.plans.length > 0 || !!draft.tripStartedAt);
+    if (draft && hasContent && draft.step !== "DONE") {
       if (draft.date !== date) setDate(draft.date);
       setCarId(draft.carId);
       setOdoStart(draft.odoStart);
@@ -371,29 +381,32 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setTripStartedAt(draft.tripStartedAt);
       setAtObjectId(draft.atObjectId);
       setCoefs(draft.coefs ?? {});
+      setEditingTripSeq(draft.editingTripSeq ?? null);
+      setInProgressResumeStep(draft.step);
       setStep(draft.step);
       setRestoredBanner(true);
       draftRestoredRef.current = true;
+    } else if (draft) {
+      clearDraft();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Not-yet-approved submissions aren't locked -- the foreman can keep
-  // viewing/editing them. If there's no more-recent local draft already in
-  // play, pull the last submission straight from the server so a re-opened
-  // (or freshly-installed) app still shows exactly what was sent.
+  // viewing/editing them. Always shows every trip submitted today as
+  // collapsed cards (never just dumps into an editable screen), regardless
+  // of whether a local in-progress draft was also restored above -- that
+  // draft's own working state (carId/plans/etc) is untouched by this effect,
+  // so the two don't conflict; the in-progress trip just shows as its own
+  // card in the list (see the DONE screen render) instead of taking over.
   useEffect(() => {
     api
       .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
       .then(async (status) => {
         setDayStatus(status);
-        if (draftRestoredRef.current || !status.hasSubmission || status.approved) return;
+        if (!status.hasSubmission || status.approved) return;
         const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
         if (!res.found) return;
-        // Show what's already been sent today as collapsed trip cards instead
-        // of dumping straight into an editable screen -- the working state
-        // (carId/plans/etc) only gets populated once the foreman taps
-        // "Редагувати" on a specific trip or "Розпочати нову поїздку".
         setSubmittedTrips(res.trips);
         setDayCombined(res.combined);
         setStep("DONE");
@@ -418,8 +431,24 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       tripStartedAt,
       atObjectId,
       coefs,
+      editingTripSeq,
     });
-  }, [date, step, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, plans, onboard, tripStartedAt, atObjectId, coefs]);
+  }, [
+    date,
+    step,
+    carId,
+    odoStart,
+    odoStartPhoto,
+    odoEnd,
+    odoEndPhoto,
+    employeeIds,
+    plans,
+    onboard,
+    tripStartedAt,
+    atObjectId,
+    coefs,
+    editingTripSeq,
+  ]);
 
   function employeeName(id: string) {
     return employees.find((e) => e.id === id)?.name ?? id;
@@ -494,6 +523,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setRestoredBanner(false);
     setSubmittedEditBanner(false);
     setPreview(null);
+    setEditingTripSeq(null);
+    setInProgressResumeStep(null);
     haptic("success");
     setStep("HUB");
   }
@@ -596,6 +627,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setChangeLog([]);
     setSubmittedEditBanner(false);
     setPreview(null);
+    setInProgressResumeStep(null);
     haptic("selection");
     setStep("HUB");
   }
@@ -1265,8 +1297,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <span className="cell-title">
                   {expanded ? "▾" : "▸"} 🚙 {cars.find((c) => c.id === trip.carId)?.name ?? "Поїздка"}
                 </span>
-                <span className="cell-sub">
-                  {trip.km ?? "—"} км · клас {trip.tripClass ?? "—"}
+                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span className="badge ok">здано</span>
+                  <span className="cell-sub">
+                    {trip.km ?? "—"} км · клас {trip.tripClass ?? "—"}
+                  </span>
                 </span>
               </button>
               {expanded && (
@@ -1295,6 +1330,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
           );
         })}
+
+        {editingTripSeq === null && (!!carId || employeeIds.length > 0 || plans.length > 0) && (
+          <div className="list" style={{ marginTop: 8 }}>
+            <button className="cell" onClick={() => setStep(inProgressResumeStep ?? "HUB")}>
+              <span className="cell-title">🚧 {cars.find((c) => c.id === carId)?.name ?? "Нова поїздка"}</span>
+              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="badge warn">в процесі</span>
+                <span className="cell-sub">▶️ Продовжити</span>
+              </span>
+            </button>
+          </div>
+        )}
 
         <div style={{ padding: "8px 16px" }}>
           <button className="bulk-select-btn" onClick={startNewTrip}>
