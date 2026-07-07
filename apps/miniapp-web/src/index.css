@@ -58,11 +58,24 @@ body {
   letter-spacing: 0.3px;
 }
 
-/* A section-title that also carries a trailing action (badge, chip, button). */
+/* A section-title that also carries a trailing action (badge, chip, button).
+   Wraps instead of squeezing the trailing element into a cramped, ugly
+   multi-line mess when the leading text is long (a car/object name etc). */
 .section-title.row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  row-gap: 4px;
+}
+
+.section-title.row > *:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.section-title.row > *:last-child {
+  flex-shrink: 0;
 }
 
 .list {
@@ -76,6 +89,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 8px;
   padding: 14px 16px;
   border-bottom: 1px solid var(--tg-border);
@@ -104,25 +119,33 @@ body {
 
 .cell-title {
   font-size: 16px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .cell-sub {
   font-size: 13px;
   color: var(--tg-hint);
+  flex-shrink: 0;
 }
 
 .cell-icon {
   font-size: 20px;
   width: 28px;
   text-align: center;
+  flex-shrink: 0;
 }
 
+/* Badges are short status pills -- they must never wrap internally
+   (a squeezed "✅ обсяги є" splitting into "обсяги" / "є" reads as broken). */
 .badge {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 10px;
   background: rgba(0, 0, 0, 0.06);
   color: var(--tg-hint);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .badge.ok {
@@ -455,6 +478,7 @@ body {
 
 .cell-row .cell {
   flex: 1;
+  min-width: 0;
   border-bottom: none;
 }
 
@@ -465,6 +489,7 @@ body {
   font-size: 18px;
   padding: 0 16px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .suggestion-card {
