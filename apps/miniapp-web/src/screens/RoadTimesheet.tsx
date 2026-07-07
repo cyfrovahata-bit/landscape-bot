@@ -70,28 +70,37 @@ type PayrollPreview = {
   brigadierEmployeeId: string;
   seniorEmployeeIds: string[];
 };
+// The day-combined totals -- what actually gets paid out -- once more than
+// one trip has been submitted for the same day (see SubmittedTrip below).
+type DayCombined = { km: number; tripClass: string; roadAllowance: { total: number; perPerson: number }; salaryPacks: SalaryPack[] };
+type SaveResponse = PayrollPreview & { eventId: string; tripSeq: number; combined: DayCombined };
 
 type DayStatus = { hasSubmission: boolean; approved: boolean; eventId: string | null; editRequested: boolean };
-type SubmittedTodayResponse =
-  | { found: false }
-  | {
-      found: true;
-      eventId: string;
-      carId: string | null;
-      employeeIds: string[];
-      odoStart: number | null;
-      odoStartPhoto: string | null;
-      odoEnd: number | null;
-      odoEndPhoto: string | null;
-      objects: {
-        objectId: string;
-        objectName: string;
-        works: { workId: string; workName: string; volume?: string | number }[];
-        sessions: { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string }[];
-        notes?: string;
-        photoUrls?: string[];
-      }[];
-    };
+type SubmittedObject = {
+  objectId: string;
+  objectName: string;
+  works: { workId: string; workName: string; volume?: string | number }[];
+  sessions: { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string }[];
+  notes?: string;
+  photoUrls?: string[];
+};
+// One leg ("trip") already submitted today: most days have exactly one, but
+// a foreman who returns to base and heads out again with a different
+// car/crew/objects ends up with several, each independently editable.
+type SubmittedTrip = {
+  tripSeq: number;
+  eventId: string;
+  carId: string | null;
+  employeeIds: string[];
+  odoStart: number | null;
+  odoStartPhoto: string | null;
+  odoEnd: number | null;
+  odoEndPhoto: string | null;
+  objects: SubmittedObject[];
+  km?: number;
+  tripClass?: string;
+};
+type SubmittedTodayResponse = { found: false; trips: []; combined: null } | { found: true; trips: SubmittedTrip[]; combined: DayCombined };
 type LastTripResponse =
   | { found: false }
   | {
@@ -308,8 +317,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<(PayrollPreview & { eventId: string }) | null>(null);
   const [preview, setPreview] = useState<PayrollPreview | null>(null);
+  const [submittedTrips, setSubmittedTrips] = useState<SubmittedTrip[]>([]);
+  const [dayCombined, setDayCombined] = useState<DayCombined | null>(null);
+  const [editingTripSeq, setEditingTripSeq] = useState<number | null>(null);
+  const [expandedTripSeq, setExpandedTripSeq] = useState<number | null>(null);
 
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
@@ -378,51 +390,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         if (draftRestoredRef.current || !status.hasSubmission || status.approved) return;
         const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
         if (!res.found) return;
-        setCarId(res.carId ?? "");
-        setOdoStart(res.odoStart !== null ? String(res.odoStart) : "");
-        setOdoStartPhoto(res.odoStartPhoto);
-        setOdoEnd(res.odoEnd !== null ? String(res.odoEnd) : "");
-        setOdoEndPhoto(res.odoEndPhoto);
-        setEmployeeIds(res.employeeIds);
-        setOnboard(res.employeeIds);
-        const restoredPlans: ObjPlan[] = res.objects.map((o) => ({
-          objectId: o.objectId,
-          objectName: o.objectName,
-          works: o.works.map((w) => ({
-            workId: w.workId,
-            workName: w.workName,
-            unit: works.find((x) => x.id === w.workId)?.unit || "шт",
-            volume: w.volume !== undefined && w.volume !== null ? String(w.volume) : "",
-          })),
-          assignedEmployeeIds: [],
-          here: [],
-          sessions: o.sessions.map((s) => ({ employeeId: s.employeeId, startedAt: s.droppedAt, endedAt: s.pickedUpAt })),
-          visited: true,
-          notes: o.notes ?? "",
-          photoUrls: o.photoUrls ?? [],
-        }));
-        setPlans(restoredPlans);
-        setStep("REVIEW");
-        setSubmittedEditBanner(true);
-        api
-          .post<PayrollPreview>("/api/road-timesheet/preview", {
-            odoStart: res.odoStart ?? 0,
-            odoEnd: res.odoEnd ?? 0,
-            employeeIds: res.employeeIds,
-            objects: restoredPlans.map((p) => ({
-              objectId: p.objectId,
-              objectName: p.objectName,
-              works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.sessions.map((s) => s.employeeId) })),
-              sessions: p.sessions.map((s) => ({
-                employeeId: s.employeeId,
-                employeeName: employeeName(s.employeeId),
-                droppedAt: s.startedAt,
-                pickedUpAt: s.endedAt,
-              })),
-            })),
-          })
-          .then(setPreview)
-          .catch(() => {});
+        // Show what's already been sent today as collapsed trip cards instead
+        // of dumping straight into an editable screen -- the working state
+        // (carId/plans/etc) only gets populated once the foreman taps
+        // "Редагувати" on a specific trip or "Розпочати нову поїздку".
+        setSubmittedTrips(res.trips);
+        setDayCombined(res.combined);
+        setStep("DONE");
       })
       .catch(() => setDayStatus({ hasSubmission: false, approved: false, eventId: null, editRequested: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -519,9 +493,110 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setChangeLog([]);
     setRestoredBanner(false);
     setSubmittedEditBanner(false);
-    setResult(null);
     setPreview(null);
     haptic("success");
+    setStep("HUB");
+  }
+
+  function objectsToPlans(objects: SubmittedObject[]): ObjPlan[] {
+    return objects.map((o) => ({
+      objectId: o.objectId,
+      objectName: o.objectName,
+      works: o.works.map((w) => ({
+        workId: w.workId,
+        workName: w.workName,
+        unit: works.find((x) => x.id === w.workId)?.unit || "шт",
+        volume: w.volume !== undefined && w.volume !== null ? String(w.volume) : "",
+      })),
+      assignedEmployeeIds: [],
+      here: [],
+      sessions: o.sessions.map((s) => ({ employeeId: s.employeeId, startedAt: s.droppedAt, endedAt: s.pickedUpAt })),
+      visited: true,
+      notes: o.notes ?? "",
+      photoUrls: o.photoUrls ?? [],
+    }));
+  }
+
+  // Works actually done at one object, summed across every submitted trip
+  // that touched it -- mirrors the server's own merge, just for display on
+  // the day-combined "Фонд по обʼєктах" section.
+  function combinedWorksForObject(objectId: string) {
+    const byWorkId = new Map<string, { workId: string; workName: string; volume?: string | number; unit: string }>();
+    for (const trip of submittedTrips) {
+      const obj = trip.objects.find((o) => o.objectId === objectId);
+      for (const w of obj?.works ?? []) {
+        const unit = works.find((x) => x.id === w.workId)?.unit || "шт";
+        const existing = byWorkId.get(w.workId);
+        if (!existing) {
+          byWorkId.set(w.workId, { workId: w.workId, workName: w.workName, volume: w.volume, unit });
+          continue;
+        }
+        const a = Number(existing.volume);
+        const b = Number(w.volume);
+        existing.volume = Number.isFinite(a) && Number.isFinite(b) ? a + b : Number.isFinite(b) ? b : existing.volume;
+      }
+    }
+    return [...byWorkId.values()];
+  }
+
+  // Loads one already-submitted leg's own data into the shared working state
+  // (carId/plans/etc) so the existing REVIEW screen -- built for editing a
+  // single trip -- can edit it, without touching any other leg of the day.
+  function editTrip(trip: SubmittedTrip) {
+    setEditingTripSeq(trip.tripSeq);
+    setCarId(trip.carId ?? "");
+    setOdoStart(trip.odoStart !== null ? String(trip.odoStart) : "");
+    setOdoStartPhoto(trip.odoStartPhoto);
+    setOdoEnd(trip.odoEnd !== null ? String(trip.odoEnd) : "");
+    setOdoEndPhoto(trip.odoEndPhoto);
+    setEmployeeIds(trip.employeeIds);
+    setOnboard(trip.employeeIds);
+    const restoredPlans = objectsToPlans(trip.objects);
+    setPlans(restoredPlans);
+    setSubmittedEditBanner(true);
+    setReviewReturnStep("DONE");
+    setStep("REVIEW");
+    api
+      .post<PayrollPreview>("/api/road-timesheet/preview", {
+        odoStart: trip.odoStart ?? 0,
+        odoEnd: trip.odoEnd ?? 0,
+        employeeIds: trip.employeeIds,
+        objects: restoredPlans.map((p) => ({
+          objectId: p.objectId,
+          objectName: p.objectName,
+          works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: p.sessions.map((s) => s.employeeId) })),
+          sessions: p.sessions.map((s) => ({
+            employeeId: s.employeeId,
+            employeeName: employeeName(s.employeeId),
+            droppedAt: s.startedAt,
+            pickedUpAt: s.endedAt,
+          })),
+        })),
+      })
+      .then(setPreview)
+      .catch(() => {});
+  }
+
+  // Blanks the working state for a brand-new leg while leaving today's
+  // already-submitted trips exactly as they are -- e.g. came back to base at
+  // lunch, swapped crew, and is heading out to a different object.
+  function startNewTrip() {
+    setEditingTripSeq(null);
+    setCarId("");
+    setOdoStart("");
+    setOdoStartPhoto(null);
+    setOdoEnd("");
+    setOdoEndPhoto(null);
+    setEmployeeIds([]);
+    setPlans([]);
+    setCoefs({});
+    setOnboard([]);
+    setTripStartedAt(null);
+    setAtObjectId(null);
+    setChangeLog([]);
+    setSubmittedEditBanner(false);
+    setPreview(null);
+    haptic("selection");
     setStep("HUB");
   }
 
@@ -820,15 +895,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // Where "↩️ Повернутися до поїздки" on HUB should actually land. Follows
   // the LIVE trip's state first (objects still to visit -> people to pick up
-  // -> final odometer): an earlier submission for this date must not hijack
-  // resume into REVIEW while a new/edited trip is actively underway (e.g.
-  // after "Скинути день" + a fresh departure the same day). Only a finished
-  // trip resumes at the report.
+  // -> final odometer): an earlier trip submitted for this date must not
+  // hijack resume into REVIEW while a new/edited trip is actively underway
+  // (e.g. after "Скинути день", or after "Розпочати нову поїздку" for a
+  // second leg the same day). Only THIS trip having its own odoEnd already
+  // set (either entered live, or restored by editTrip()) resumes at REVIEW;
+  // otherwise it's still mid-route and belongs at RETURN.
   const tripResumeStep: Step = nextUnvisited
     ? "DRIVE"
     : plans.some((p) => p.here.length > 0)
       ? "RETURN_PICKUP"
-      : odoEnd || dayStatus?.hasSubmission
+      : odoEnd
         ? "REVIEW"
         : "RETURN";
 
@@ -1047,7 +1124,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       // second, phantom one. A later tap (a genuinely new edit/resubmit)
       // gets a fresh key from a fresh call to save().
       const idempotencyKey = crypto.randomUUID();
-      const res = await api.post<PayrollPreview & { eventId: string }>("/api/road-timesheet", {
+      const res = await api.post<SaveResponse>("/api/road-timesheet", {
         date,
         carId,
         odoStart: Number(odoStart),
@@ -1057,8 +1134,24 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         employeeIds,
         objects: buildObjectsPayload(),
         idempotencyKey,
+        tripSeq: editingTripSeq ?? undefined,
       });
-      setResult(res);
+      setDayCombined(res.combined);
+      setEditingTripSeq(res.tripSeq);
+      const savedTrip: SubmittedTrip = {
+        tripSeq: res.tripSeq,
+        eventId: res.eventId,
+        carId,
+        employeeIds,
+        odoStart: Number(odoStart),
+        odoStartPhoto,
+        odoEnd: Number(odoEnd),
+        odoEndPhoto,
+        objects: buildObjectsPayload(),
+        km: res.km,
+        tripClass: res.tripClass,
+      };
+      setSubmittedTrips((prev) => [...prev.filter((t) => t.tripSeq !== res.tripSeq), savedTrip].sort((a, b) => a.tripSeq - b.tripSeq));
       setStep("DONE");
       clearDraft();
       setDayStatus((prev) => (prev ? { ...prev, hasSubmission: true, eventId: res.eventId } : prev));
@@ -1154,77 +1247,111 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   };
   useTelegramBackButton(goBack);
 
-  if (step === "DONE" && result) {
+  if (step === "DONE" && submittedTrips.length) {
+    const isMulti = submittedTrips.length > 1;
     return (
       <div>
         <BackRow onBack={goBack} />
         <div className="header">
-          <h1>✅ Відправлено на підтвердження</h1>
+          <h1>{isMulti ? `✅ Поїздки за ${date}` : "✅ Відправлено на підтвердження"}</h1>
           <div className="hint">Можна й далі редагувати та надсилати повторно, поки адміністратор не затвердить день.</div>
         </div>
-        <div className="list">
-          <div className="cell">
-            <span className="cell-title">🚙 {cars.find((c) => c.id === carId)?.name ?? "Поїздка"}</span>
-            <span className="cell-sub">
-              {result.km} км · клас {result.tripClass}
-            </span>
-          </div>
-          <div className="cell">
-            <span className="cell-title">💸 Доплата за виїзд</span>
-            <span className="cell-sub">{result.roadAllowance.perPerson} грн/особу</span>
-          </div>
-        </div>
 
-        <div className="section-title">Фонд по обʼєктах</div>
-        {result.salaryPacks.map((pack) => {
-          const expanded = expandedDoneObjectId === pack.objectId;
+        {submittedTrips.map((trip) => {
+          const expanded = expandedTripSeq === trip.tripSeq;
           return (
-            <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
-              <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
+            <div key={trip.tripSeq} className="list" style={{ marginTop: 8 }}>
+              <button className="cell" onClick={() => setExpandedTripSeq(expanded ? null : trip.tripSeq)}>
                 <span className="cell-title">
-                  {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+                  {expanded ? "▾" : "▸"} 🚙 {cars.find((c) => c.id === trip.carId)?.name ?? "Поїздка"}
                 </span>
-                <span className="badge ok">{pack.objectTotal} грн</span>
+                <span className="cell-sub">
+                  {trip.km ?? "—"} км · клас {trip.tripClass ?? "—"}
+                </span>
               </button>
-              {expanded &&
-                (() => {
-                  const works = plans.find((p) => p.objectId === pack.objectId)?.works ?? [];
-                  return (
-                    <div style={{ padding: "0 16px 12px" }} className="hint">
-                      <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
-                      {works.length
-                        ? works.map((w) => (
+              {expanded && (
+                <div style={{ padding: "0 16px 12px" }} className="hint">
+                  <div>👥 {trip.employeeIds.map(employeeName).join(", ") || "—"}</div>
+                  {trip.objects.map((o) => (
+                    <div key={o.objectId} style={{ marginTop: 6 }}>
+                      <div style={{ fontWeight: 600 }}>📍 {o.objectName}</div>
+                      {o.works.length
+                        ? o.works.map((w) => (
                             <div key={w.workId}>
                               {w.workName}
-                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
+                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${works.find((x) => x.id === w.workId)?.unit ?? ""}` : ""}
                             </div>
                           ))
-                        : "— без робіт —"}
-                      <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
-                      {pack.rows.map((r) => (
-                        <div key={r.employeeId}>
-                          {r.employeeName}: {r.pay} грн
-                        </div>
-                      ))}
-                      {!pack.rows.length && "— без нарахувань —"}
+                        : "без робіт"}
                     </div>
-                  );
-                })()}
+                  ))}
+                </div>
+              )}
+              <div style={{ padding: "8px 16px 12px" }}>
+                <button className="chip" onClick={() => editTrip(trip)}>
+                  ✏️ Редагувати цей виїзд
+                </button>
+              </div>
             </div>
           );
         })}
 
-        <div style={{ padding: "16px 16px 8px", textAlign: "center" }}>
-          <button
-            className="back-btn"
-            onClick={() => {
-              setReviewReturnStep("DONE");
-              setStep("REVIEW");
-            }}
-          >
-            ✏️ Виправити дані
+        <div style={{ padding: "8px 16px" }}>
+          <button className="bulk-select-btn" onClick={startNewTrip}>
+            ➕ Розпочати нову поїздку
           </button>
         </div>
+
+        {dayCombined && (
+          <>
+            <div className="list" style={{ marginTop: 8 }}>
+              <div className="cell" style={{ cursor: "default" }}>
+                <span className="cell-title">💸 Доплата за виїзд{isMulti ? " (загальна)" : ""}</span>
+                <span className="cell-sub">{dayCombined.roadAllowance.perPerson} грн/особу</span>
+              </div>
+            </div>
+
+            <div className="section-title">Фонд по обʼєктах</div>
+            {dayCombined.salaryPacks.map((pack) => {
+              const expanded = expandedDoneObjectId === pack.objectId;
+              return (
+                <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
+                  <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
+                    <span className="cell-title">
+                      {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+                    </span>
+                    <span className="badge ok">{pack.objectTotal} грн</span>
+                  </button>
+                  {expanded &&
+                    (() => {
+                      const objectWorks = combinedWorksForObject(pack.objectId);
+                      return (
+                        <div style={{ padding: "0 16px 12px" }} className="hint">
+                          <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                          {objectWorks.length
+                            ? objectWorks.map((w) => (
+                                <div key={w.workId}>
+                                  {w.workName}
+                                  {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
+                                </div>
+                              ))
+                            : "— без робіт —"}
+                          <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
+                          {pack.rows.map((r) => (
+                            <div key={r.employeeId}>
+                              {r.employeeName}: {r.pay} грн
+                            </div>
+                          ))}
+                          {!pack.rows.length && "— без нарахувань —"}
+                        </div>
+                      );
+                    })()}
+                </div>
+              );
+            })}
+          </>
+        )}
+
         <MainButton text="До меню" onClick={onSaved} />
       </div>
     );
@@ -2791,7 +2918,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           )}
 
           <MainButton
-            text={saving ? "Відправлення…" : dayStatus.hasSubmission ? "📤 Оновити звіт" : "📤 Відправити на підтвердження"}
+            text={saving ? "Відправлення…" : editingTripSeq !== null ? "📤 Оновити звіт" : "📤 Відправити на підтвердження"}
             onClick={save}
             disabled={saving}
           />

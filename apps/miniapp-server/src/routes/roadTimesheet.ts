@@ -208,28 +208,108 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
   return employeeIds.filter((id) => takenIds.has(id));
 }
 
-/** This foreman's most recent submission for `date`, if any -- used to reconcile
- * (soft-cancel) objects/works that were part of a previous submission but are
- * missing from the current one, so editing-and-resubmitting never leaves stale
- * "ghost" rows behind in reports/timesheet/dayStatus. */
-async function fetchPreviousSubmission(
-  date: string,
-  foremanTgId: number,
-): Promise<{ objects: ObjectInput[]; carId: string | null } | null> {
+// A "leg" of the day: one car+crew+route submission. Most days have exactly
+// one (tripSeq 0), but a foreman can return to base and head out again with
+// a different car/crew/objects (e.g. before-lunch vs after-lunch) -- each of
+// those is its own tripSeq, shown and edited as its own collapsed report.
+type StoredTrip = {
+  tripSeq: number;
+  eventId: string;
+  carId: string | null;
+  employeeIds: string[];
+  objects: ObjectInput[];
+  odoStart?: number;
+  odoEnd?: number;
+  km?: number;
+  tripClass?: string;
+};
+
+/** Every leg submitted so far today for this foreman, one entry per tripSeq
+ * (latest event wins within a tripSeq -- same edit-and-resubmit rule that
+ * used to apply to the whole day). Submissions saved before multi-trip
+ * support existed have no tripSeq in their payload and are treated as leg 0. */
+async function fetchAllTrips(date: string, foremanTgId: number): Promise<StoredTrip[]> {
   const rows = await db
     .select()
     .from(schema.events)
     .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")))
-    .orderBy(desc(schema.events.ts))
-    .limit(1);
-  const latest = rows[0];
-  if (!latest) return null;
-  try {
-    const payload = JSON.parse(latest.payload ?? "{}") as { objects?: ObjectInput[] };
-    return { objects: payload.objects ?? [], carId: latest.carId ?? null };
-  } catch {
-    return null;
+    .orderBy(desc(schema.events.ts));
+
+  const byTripSeq = new Map<number, StoredTrip>();
+  for (const row of rows) {
+    let payload: { tripSeq?: number; objects?: ObjectInput[]; odoStart?: number; odoEnd?: number; km?: number; tripClass?: string } = {};
+    try {
+      payload = JSON.parse(row.payload ?? "{}");
+    } catch {
+      payload = {};
+    }
+    const tripSeq = payload.tripSeq ?? 0;
+    if (byTripSeq.has(tripSeq)) continue; // rows are ts-desc, so the first hit per tripSeq is the latest
+    let employeeIds: string[] = [];
+    try {
+      employeeIds = JSON.parse(row.employeeIds ?? "[]");
+    } catch {
+      employeeIds = [];
+    }
+    byTripSeq.set(tripSeq, {
+      tripSeq,
+      eventId: row.eventId,
+      carId: row.carId,
+      employeeIds,
+      objects: payload.objects ?? [],
+      odoStart: payload.odoStart,
+      odoEnd: payload.odoEnd,
+      km: payload.km,
+      tripClass: payload.tripClass,
+    });
   }
+  return [...byTripSeq.values()].sort((a, b) => a.tripSeq - b.tripSeq);
+}
+
+/** Merges every leg's own object list into one day-total view: the same
+ * object appearing in more than one leg gets its works' volumes summed and
+ * its work sessions concatenated, so hours/volumes reported across two
+ * separate trips to the same place add up instead of one trip's numbers
+ * clobbering the other's -- reports/timesheet/day-status are keyed by
+ * date+object(+work/employee) with no notion of "trip" at all, so whatever
+ * this merge produces is exactly what ends up written there. */
+function mergeObjects(objectsByLeg: ObjectInput[][]): ObjectInput[] {
+  const byObjectId = new Map<string, ObjectInput>();
+  for (const objects of objectsByLeg) {
+    for (const obj of objects) {
+      const existing = byObjectId.get(obj.objectId);
+      if (!existing) {
+        byObjectId.set(obj.objectId, {
+          objectId: obj.objectId,
+          objectName: obj.objectName,
+          works: (obj.works ?? []).map((w) => ({ ...w })),
+          sessions: [...(obj.sessions ?? [])],
+          coefs: [...(obj.coefs ?? [])],
+          notes: obj.notes,
+          photoUrls: obj.photoUrls ? [...obj.photoUrls] : [],
+        });
+        continue;
+      }
+      for (const w of obj.works ?? []) {
+        const existingWork = existing.works.find((ew) => ew.workId === w.workId);
+        if (!existingWork) {
+          existing.works.push({ ...w });
+          continue;
+        }
+        const a = Number(existingWork.volume);
+        const b = Number(w.volume);
+        if (Number.isFinite(a) && Number.isFinite(b)) existingWork.volume = a + b;
+        else if (Number.isFinite(b)) existingWork.volume = b;
+      }
+      existing.sessions = [...existing.sessions, ...(obj.sessions ?? [])];
+      if (obj.coefs?.length) {
+        const coefByEmployee = new Map((existing.coefs ?? []).map((c) => [c.employeeId, c]));
+        for (const c of obj.coefs) coefByEmployee.set(c.employeeId, c);
+        existing.coefs = [...coefByEmployee.values()];
+      }
+    }
+  }
+  return [...byObjectId.values()];
 }
 
 /**
@@ -242,7 +322,7 @@ async function fetchPreviousSubmission(
  * last submission.
  */
 roadTimesheetRouter.post("/", async (req, res) => {
-  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects, idempotencyKey } = req.body as {
+  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects, idempotencyKey, tripSeq } = req.body as {
     date: string;
     carId: string;
     odoStart: number;
@@ -252,6 +332,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
     employeeIds: string[];
     objects: ObjectInput[];
     idempotencyKey?: string;
+    tripSeq?: number;
   };
 
   if (!date || !carId || !Array.isArray(objects) || !objects.length) {
@@ -264,9 +345,31 @@ roadTimesheetRouter.post("/", async (req, res) => {
   // Read-only work (dictionary lookups, payroll math, diffing against the
   // previous submission) happens before the lock so we hold it -- and block
   // other foremen's reservation calls -- for as little time as possible.
-  const { salaryPacks, roadAllowance, brigadierEmployeeId, seniorEmployeeIds, employeeById, perObjectHours, km, tripClass } =
-    await computePayroll({ odoStart, odoEnd, employeeIds, objects });
-  const previous = await fetchPreviousSubmission(date, foremanTgId);
+  // This leg's own estimate (its own km/tripClass/fund), shown on its own
+  // card -- separate from the day-combined totals computed below.
+  const legResult = await computePayroll({ odoStart, odoEnd, employeeIds, objects });
+
+  const allTripsBefore = await fetchAllTrips(date, foremanTgId);
+  // No tripSeq from the client = a brand-new leg (the "Розпочати нову
+  // поїздку" button never sends one); an explicit tripSeq means "resubmit/
+  // edit that specific leg", scoped so it never touches other legs' data.
+  const effectiveTripSeq = tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
+  const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
+
+  const oldMergedObjects = mergeObjects(allTripsBefore.map((t) => t.objects));
+  const tripsAfter = [
+    ...allTripsBefore.filter((t) => t.tripSeq !== effectiveTripSeq),
+    { tripSeq: effectiveTripSeq, eventId: "", carId, employeeIds: employeeIds ?? [], objects, odoStart, odoEnd },
+  ];
+  const newMergedObjects = mergeObjects(tripsAfter.map((t) => t.objects));
+  const unionEmployeeIds = [...new Set(tripsAfter.flatMap((t) => t.employeeIds))];
+  const totalKm = tripsAfter.reduce((acc, t) => {
+    const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
+    return acc + (Number.isFinite(legKm) ? legKm : 0);
+  }, 0);
+  // Day-combined totals: what actually gets written to reports/timesheet/
+  // allowances below, since those tables have no per-trip dimension.
+  const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: newMergedObjects });
 
   // The idempotency key (generated once per "Відправити" tap on the client,
   // reused across its own network retries) makes the eventId stable across
@@ -298,20 +401,19 @@ roadTimesheetRouter.post("/", async (req, res) => {
         tx,
       );
 
-      // Resubmitting with a different car must release the old one: blank
-      // its Sheets row (values gone but the row stays visible as corrected)
-      // and drop the DB row entirely -- car-status treats any odometer row
-      // for the date as "taken", and stats would double-count the km.
-      if (previous?.carId && previous.carId !== carId) {
-        await writeOdometerDay({ date, carId: previous.carId, foremanTgId }, tx);
+      // Releasing THIS leg's old car only -- a different leg (different
+      // tripSeq) keeps its own car's odometer row untouched even if it
+      // differs from this one.
+      if (legPrevious?.carId && legPrevious.carId !== carId) {
+        await writeOdometerDay({ date, carId: legPrevious.carId, foremanTgId }, tx);
         await tx
           .delete(schema.odometerDays)
-          .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, previous.carId)));
+          .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, legPrevious.carId)));
       }
 
-      const currentObjectIds = new Set(objects.map((o) => o.objectId));
+      const currentObjectIds = new Set(newMergedObjects.map((o) => o.objectId));
 
-      for (const obj of objects) {
+      for (const obj of newMergedObjects) {
         if (obj.works?.length) {
           await writeReports(
             obj.works.map((w) => ({
@@ -328,7 +430,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
           );
         }
 
-        const hoursByEmployee = perObjectHours.find((h) => h.objectId === obj.objectId)!.hoursByEmployee;
+        const hoursByEmployee = combined.perObjectHours.find((h) => h.objectId === obj.objectId)?.hoursByEmployee ?? new Map();
         if (hoursByEmployee.size) {
           await writeTimesheetRows(
             [...hoursByEmployee.entries()].map(([employeeId, v]) => ({
@@ -354,75 +456,73 @@ roadTimesheetRouter.post("/", async (req, res) => {
             hasReportsVolumeOk: allVolumesFilled,
             hasTimesheet: hoursByEmployee.size > 0,
             hasRoad: true,
-            hasOdoStart: odoStart !== undefined,
-            hasOdoEnd: odoEnd !== undefined,
+            hasOdoStart: true,
+            hasOdoEnd: true,
           },
           tx,
         );
       }
 
-      // Reconcile against the previous submission: anything reported before
-      // but missing now gets soft-cancelled (status set to СКАСОВАНО / hours
-      // zeroed), never physically deleted, so admin-side views can still see
-      // what happened but stop counting it -- editing-and-resubmitting must
-      // not leave stale "ghost" data that silently inflates totals.
-      if (previous) {
-        for (const prevObj of previous.objects) {
-          const currentObj = objects.find((o) => o.objectId === prevObj.objectId);
-          const currentWorkIds = new Set((currentObj?.works ?? []).map((w) => w.workId));
-          const removedWorks = (prevObj.works ?? []).filter((w) => !currentWorkIds.has(w.workId));
+      // Reconcile at the day level: anything reported by ANY leg before this
+      // write but missing from the new day-total gets soft-cancelled (status
+      // set to СКАСОВАНО / hours zeroed), never physically deleted, so
+      // admin-side views can still see what happened but stop counting it --
+      // editing-and-resubmitting must not leave stale "ghost" data behind.
+      for (const prevObj of oldMergedObjects) {
+        const currentObj = newMergedObjects.find((o) => o.objectId === prevObj.objectId);
+        const currentWorkIds = new Set((currentObj?.works ?? []).map((w) => w.workId));
+        const removedWorks = (prevObj.works ?? []).filter((w) => !currentWorkIds.has(w.workId));
 
-          if (removedWorks.length) {
-            await writeReports(
-              removedWorks.map((w) => ({
+        if (removedWorks.length) {
+          await writeReports(
+            removedWorks.map((w) => ({
+              date,
+              objectId: prevObj.objectId,
+              foremanTgId,
+              workId: w.workId,
+              workName: w.workName,
+              volume: w.volume,
+              volumeStatus: "НЕ_ЗАПОВНЕНО",
+              dayStatus: "СКАСОВАНО",
+            })),
+            tx,
+          );
+        }
+
+        if (!currentObjectIds.has(prevObj.objectId)) {
+          const prevEmployeeIds = [...new Set((prevObj.sessions ?? []).map((s) => s.employeeId))];
+          if (prevEmployeeIds.length) {
+            await writeTimesheetRows(
+              prevEmployeeIds.map((employeeId) => ({
                 date,
                 objectId: prevObj.objectId,
-                foremanTgId,
-                workId: w.workId,
-                workName: w.workName,
-                volume: w.volume,
-                volumeStatus: "НЕ_ЗАПОВНЕНО",
-                dayStatus: "СКАСОВАНО",
+                employeeId,
+                employeeName: combined.employeeById.get(employeeId)?.name ?? employeeId,
+                hours: 0,
+                source: "ROAD_СКАСОВАНО",
               })),
               tx,
             );
           }
-
-          if (!currentObjectIds.has(prevObj.objectId)) {
-            const prevEmployeeIds = [...new Set((prevObj.sessions ?? []).map((s) => s.employeeId))];
-            if (prevEmployeeIds.length) {
-              await writeTimesheetRows(
-                prevEmployeeIds.map((employeeId) => ({
-                  date,
-                  objectId: prevObj.objectId,
-                  employeeId,
-                  employeeName: employeeById.get(employeeId)?.name ?? employeeId,
-                  hours: 0,
-                  source: "ROAD_СКАСОВАНО",
-                })),
-                tx,
-              );
-            }
-            await writeDayStatus({ date, objectId: prevObj.objectId, foremanTgId, status: "СКАСОВАНО" }, tx);
-          }
+          await writeDayStatus({ date, objectId: prevObj.objectId, foremanTgId, status: "СКАСОВАНО" }, tx);
         }
       }
 
-      // Road allowance: a fixed per-trip amount by trip class, split evenly
-      // among everyone who rode along (not just those who worked), written
-      // as its own ROAD_TRIP allowance row per rider -- matches the bot.
-      const riders = employeeIds ?? [];
-      if (riders.length) {
+      // Road allowance: ONE combined amount for the whole day (not per leg),
+      // based on the day's total km across every car used, split evenly
+      // among everyone who rode along in ANY leg today (not just those who
+      // worked) -- matches the bot's single-allowance-per-day model.
+      if (unionEmployeeIds.length) {
         await writeAllowanceRows(
-          riders.map((employeeId) => ({
+          unionEmployeeIds.map((employeeId) => ({
             date,
             foremanTgId,
             type: "ROAD_TRIP",
             employeeId,
-            employeeName: employeeById.get(employeeId)?.name ?? employeeId,
+            employeeName: combined.employeeById.get(employeeId)?.name ?? employeeId,
             objectId: "ROAD",
-            amount: roadAllowance.perPerson,
-            meta: JSON.stringify({ km, tripClass, carId }),
+            amount: combined.roadAllowance.perPerson,
+            meta: JSON.stringify({ km: totalKm, tripClass: combined.tripClass }),
             dayStatus: "ЧЕРНЕТКА",
           })),
           tx,
@@ -438,7 +538,16 @@ roadTimesheetRouter.post("/", async (req, res) => {
           type: "RTS_SAVE",
           carId,
           employeeIds: JSON.stringify(employeeIds ?? []),
-          payload: JSON.stringify({ odoStart, odoEnd, km, tripClass, objects, salaryPacks, roadAllowance }),
+          payload: JSON.stringify({
+            tripSeq: effectiveTripSeq,
+            odoStart,
+            odoEnd,
+            km: legResult.km,
+            tripClass: legResult.tripClass,
+            objects,
+            salaryPacks: legResult.salaryPacks,
+            roadAllowance: legResult.roadAllowance,
+          }),
         },
         tx,
       );
@@ -451,7 +560,17 @@ roadTimesheetRouter.post("/", async (req, res) => {
     throw e;
   }
 
-  res.json({ eventId, km, tripClass, salaryPacks, roadAllowance, brigadierEmployeeId, seniorEmployeeIds });
+  res.json({
+    eventId,
+    tripSeq: effectiveTripSeq,
+    km: legResult.km,
+    tripClass: legResult.tripClass,
+    salaryPacks: legResult.salaryPacks,
+    roadAllowance: legResult.roadAllowance,
+    brigadierEmployeeId: legResult.brigadierEmployeeId,
+    seniorEmployeeIds: legResult.seniorEmployeeIds,
+    combined: { km: totalKm, tripClass: combined.tripClass, roadAllowance: combined.roadAllowance, salaryPacks: combined.salaryPacks },
+  });
 });
 
 /**
@@ -642,10 +761,12 @@ roadTimesheetRouter.get("/day-status", async (req, res) => {
 });
 
 /**
- * GET /api/road-timesheet/submitted-today?date=YYYY-MM-DD — the foreman's
- * latest submission for today, in a shape that can be loaded straight back
+ * GET /api/road-timesheet/submitted-today?date=YYYY-MM-DD — every leg (trip)
+ * submitted so far today, each in a shape that can be loaded straight back
  * into the editable client state (so a re-opened, not-yet-approved day shows
- * exactly what was sent and can be corrected/resubmitted).
+ * exactly what was sent per trip and each trip can be corrected/resubmitted
+ * on its own), plus the day-combined totals (km/allowance/fund) that
+ * actually get paid out.
  */
 roadTimesheetRouter.get("/submitted-today", async (req, res) => {
   const date = String(req.query.date || "");
@@ -653,52 +774,49 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
     res.status(400).json({ error: "date query param is required" });
     return;
   }
-  const foremanTgId = BigInt(req.user!.tgId);
+  const foremanTgId = req.user!.tgId;
 
-  const [saveRows, odometerRows] = await Promise.all([
-    db
-      .select()
-      .from(schema.events)
-      .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, foremanTgId), eq(schema.events.type, "RTS_SAVE")))
-      .orderBy(desc(schema.events.ts))
-      .limit(1),
-    db
-      .select()
-      .from(schema.odometerDays)
-      .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.foremanTgId, foremanTgId)))
-      .limit(1),
-  ]);
-
-  const latest = saveRows[0];
-  if (!latest) {
-    res.json({ found: false });
+  const trips = await fetchAllTrips(date, foremanTgId);
+  if (!trips.length) {
+    res.json({ found: false, trips: [], combined: null });
     return;
   }
 
-  let payload: { odoStart?: number; odoEnd?: number; objects?: ObjectInput[] } = {};
-  try {
-    payload = JSON.parse(latest.payload ?? "{}");
-  } catch {
-    payload = {};
-  }
-  let employeeIds: string[] = [];
-  try {
-    employeeIds = JSON.parse(latest.employeeIds ?? "[]");
-  } catch {
-    employeeIds = [];
-  }
-  const odo = odometerRows[0];
+  // Odometer photos live only in the odometerDays table (not the event
+  // payload), keyed by car -- fetch them so each trip card can show its own.
+  const carIds = [...new Set(trips.map((t) => t.carId).filter((id): id is string => !!id))];
+  const odometerRows = carIds.length
+    ? await db.select().from(schema.odometerDays).where(and(eq(schema.odometerDays.date, date), inArray(schema.odometerDays.carId, carIds)))
+    : [];
+  const odoByCarId = new Map(odometerRows.map((r) => [r.carId, r]));
+
+  const mergedObjects = mergeObjects(trips.map((t) => t.objects));
+  const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+  const totalKm = trips.reduce((acc, t) => {
+    const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
+    return acc + (Number.isFinite(legKm) ? legKm : 0);
+  }, 0);
+  const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
 
   res.json({
     found: true,
-    eventId: latest.eventId,
-    carId: latest.carId,
-    employeeIds,
-    odoStart: payload.odoStart ?? odo?.startValue ?? null,
-    odoStartPhoto: odo?.startPhoto ?? null,
-    odoEnd: payload.odoEnd ?? odo?.endValue ?? null,
-    odoEndPhoto: odo?.endPhoto ?? null,
-    objects: payload.objects ?? [],
+    trips: trips.map((t) => {
+      const odo = t.carId ? odoByCarId.get(t.carId) : undefined;
+      return {
+        tripSeq: t.tripSeq,
+        eventId: t.eventId,
+        carId: t.carId,
+        employeeIds: t.employeeIds,
+        odoStart: t.odoStart ?? odo?.startValue ?? null,
+        odoStartPhoto: odo?.startPhoto ?? null,
+        odoEnd: t.odoEnd ?? odo?.endValue ?? null,
+        odoEndPhoto: odo?.endPhoto ?? null,
+        objects: t.objects,
+        km: t.km,
+        tripClass: t.tripClass,
+      };
+    }),
+    combined: { km: totalKm, tripClass: combined.tripClass, roadAllowance: combined.roadAllowance, salaryPacks: combined.salaryPacks },
   });
 });
 
