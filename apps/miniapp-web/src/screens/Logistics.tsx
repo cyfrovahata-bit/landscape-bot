@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Employee, type LogisticDirection } from "../lib/api";
 import { todayISO } from "../lib/date";
 import { haptic } from "../lib/telegram";
+import { employeeRole, initials, roleAccent } from "../lib/employee";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
 
@@ -181,13 +182,17 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
 
       {stage === "dest" && (
         <>
-          <div className="section-title">Напрямок</div>
+          <div className="step-badge">🚚 НАПРЯМОК</div>
+          <div className="section-title">Куди відправляємо</div>
           <div className="list">
             {directions
               .filter((d) => !items.some((it, i) => it.logisticId === d.id && i !== editingIndex))
               .map((d) => (
                 <button key={d.id} className="cell" onClick={() => pickDirection(d)}>
-                  <span className="cell-title">{d.name}</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span className="setup-icon accent-blue">🚚</span>
+                    <span className="cell-title">{d.name}</span>
+                  </span>
                   <span className="cell-sub">{d.tariff} грн</span>
                 </button>
               ))}
@@ -206,6 +211,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
 
       {stage === "qty" && (
         <>
+          <div className="step-badge">🔢 КІЛЬКІСТЬ</div>
           <div className="section-title">{directionById.get(draftDirectionId)?.name}</div>
           <div className="hint" style={{ padding: "0 16px 8px" }}>
             {directionById.get(draftDirectionId)?.tariff} грн за одиницю
@@ -232,19 +238,26 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
 
       {stage === "people" && (
         <>
+          <div className="step-badge">👥 ЛЮДИ</div>
           <div className="section-title">Працівники — {directionById.get(draftDirectionId)?.name}</div>
-          <div className="chip-row">
+          <div className="list">
             {employees.map((emp) => {
               const lockedByOther = items.some((it, i) => i !== editingIndex && it.employeeIds.includes(emp.id));
+              const checked = draftEmployeeIds.includes(emp.id);
               return (
                 <button
                   key={emp.id}
-                  className={`chip ${draftEmployeeIds.includes(emp.id) ? "selected" : ""}`}
+                  className={`cell ${checked ? "selected" : ""}`}
+                  disabled={lockedByOther}
                   style={lockedByOther ? { opacity: 0.4 } : undefined}
                   onClick={() => toggleDraftEmployee(emp.id)}
                 >
-                  {lockedByOther ? "⛔️ " : ""}
-                  {emp.name}
+                  <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                    <span className={`avatar-circle ${roleAccent(employeeRole(emp))}`}>{initials(emp.name)}</span>
+                    {emp.name}
+                  </span>
+                  {lockedByOther && <span className="badge warn">🔒 зайнятий</span>}
                 </button>
               );
             })}
@@ -255,6 +268,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
 
       {stage === "review" && (
         <>
+          <div className="step-badge">✅ ПЕРЕВІРКА</div>
           <div className="section-title">Записи ({items.length})</div>
           <div className="list">
             {items.map((it, idx) => {
@@ -268,12 +282,32 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                   onClick={() => setEditActionIndex(editActionIndex === idx ? null : idx)}
                 >
                   <div style={{ display: "flex", flexWrap: "wrap", rowGap: 4, justifyContent: "space-between" }}>
-                    <span className="cell-title">
-                      {dir?.name ?? it.logisticId} × {it.qty}
+                    <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span className="setup-icon accent-blue" style={{ width: 32, height: 32, fontSize: 15 }}>
+                        🚚
+                      </span>
+                      <span className="cell-title">
+                        {dir?.name ?? it.logisticId} × {it.qty}
+                      </span>
                     </span>
                     <span className="cell-sub" style={{ marginLeft: "auto" }}>{total} грн</span>
                   </div>
-                  <div className="hint">{it.employeeIds.map((id) => employeeById.get(id)?.name ?? id).join(", ")}</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                    {it.employeeIds.map((id) => {
+                      const emp = employeeById.get(id);
+                      return (
+                        <span key={id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span
+                            className={`avatar-circle ${roleAccent(emp ? employeeRole(emp) : "робітник")}`}
+                            style={{ width: 22, height: 22, fontSize: 9 }}
+                          >
+                            {initials(emp?.name ?? id)}
+                          </span>
+                          <span className="hint">{emp?.name ?? id}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
                   {editActionIndex === idx && (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
                       <button

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject } from "../lib/api";
 import { todayISO } from "../lib/date";
 import { confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
+import { employeeRole, initials, roleAccent } from "../lib/employee";
 import { saveDraft, loadDraft, clearDraft } from "../lib/draft";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
@@ -164,30 +165,6 @@ function normalizeDraftPlan(raw: unknown): ObjPlan {
 
 const UNITS = ["м²", "м", "пог.м", "шт"];
 const COEF_PRESETS = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
-
-function employeeRole(emp: Employee): "бригадир" | "старший" | "робітник" {
-  const pos = (emp.position ?? "").toLowerCase();
-  if (pos.includes("бригадир")) return "бригадир";
-  if (pos.includes("старш")) return "старший";
-  return "робітник";
-}
-
-// First letters of the first two words (e.g. "Агромаков Денис" -> "АД") for
-// a quick-glance contact-list-style avatar instead of a generic person icon.
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? "")
-    .join("");
-}
-
-function roleAccent(role: "бригадир" | "старший" | "робітник"): string {
-  if (role === "бригадир") return "accent-orange";
-  if (role === "старший") return "accent-purple";
-  return "accent-blue";
-}
 
 function groupByBrigade(employees: Employee[]) {
   const NO_BRIGADE = "__NO_BRIGADE__";
