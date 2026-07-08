@@ -117,6 +117,7 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                   <span className="setup-icon accent-orange">{mt.icon}</span>
                   <span className="cell-title">{mt.label}</span>
                 </span>
+                <span className="cell-sub">›</span>
               </button>
             ))}
           </div>
@@ -134,6 +135,7 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                   <span className="setup-icon accent-orange">🏗</span>
                   <span className="cell-title">{o.name}</span>
                 </span>
+                <span className="cell-sub">{o.address ?? "›"}</span>
               </button>
             ))}
           </div>
