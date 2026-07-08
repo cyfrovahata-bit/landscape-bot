@@ -2388,6 +2388,75 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               );
             })()}
 
+          <div className="section-title">Маршрут</div>
+          <div className="list">
+            {plans.map((p) => {
+              const expanded = expandedDriveObjectId === p.objectId;
+              const peopleEverHere = new Set(p.sessions.map((s) => s.employeeId)).size;
+              const peopleTotal = peopleEverHere || p.here.length;
+              const peopleHere = p.here.length;
+              const peopleBadge = peopleTotal === 0 ? "" : peopleHere === 0 ? "danger" : peopleHere === peopleTotal ? "ok" : "warn";
+              const worksTotal = p.works.length;
+              const worksFilled = p.works.filter((w) => w.volume && w.volume !== "?").length;
+              const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
+              const openSessions = p.sessions.filter((s) => !s.endedAt);
+              const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
+              return (
+                <div key={p.objectId}>
+                  <div className="cell-row">
+                    <button className="cell" onClick={() => setExpandedDriveObjectId(expanded ? null : p.objectId)}>
+                      <span className="cell-title">
+                        {expanded ? "▾" : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
+                      </span>
+                      <span style={{ display: "flex", gap: 6 }}>
+                        {peopleTotal > 0 && (
+                          <span className={`badge ${peopleBadge}`}>
+                            👤 {peopleHere}/{peopleTotal}
+                          </span>
+                        )}
+                        {worksTotal > 0 && (
+                          <span className={`badge ${worksBadge}`}>
+                            🛠 {worksFilled}/{worksTotal}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                    {wasHere && (
+                      <button
+                        className="cell-action"
+                        onClick={() => {
+                          setAtObjectId(p.objectId);
+                          setAtObjectReturnStep("DRIVE");
+                          setStep("AT_OBJECT");
+                        }}
+                        title="Редагувати"
+                      >
+                        ✏️
+                      </button>
+                    )}
+                  </div>
+                  {expanded && (
+                    <div style={{ padding: "4px 16px 12px" }}>
+                      <div className="hint" style={{ fontWeight: 600 }}>👥 Зараз тут</div>
+                      <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
+                      {openSessions.length > 0 && (
+                        <div className="hint" style={{ marginBottom: 8 }}>
+                          ⏱ Роботи тривають: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
+                        </div>
+                      )}
+                      <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                      <div className="hint">
+                        {p.works.length
+                          ? p.works.map((w) => `${w.workName}${w.volume && w.volume !== "?" ? ` (${w.volume} ${w.unit})` : ""}`).join(", ")
+                          : "не заплановано"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
           {nextUnvisited ? (
             <MainButton text="📍 Прибув на обʼєкт" onClick={() => setStep("ARRIVE_PICK")} />
           ) : (
