@@ -220,14 +220,35 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
   return employeeIds.filter((id) => takenIds.has(id));
 }
 
-// A car is actually in use exactly while it has a start odometer but no end
-// odometer yet -- the moment the foreman records the return reading (car
-// back at base), it's free again for someone else, regardless of whether
-// they've gone on to submit the full day's report yet. The odometerDays row
-// itself is never deleted (it's the day's permanent km record), so "row
-// exists" alone isn't the right "still taken" signal -- endValue is.
-function carIsActivelyOut(row: { startValue: number | null; endValue: number | null }): boolean {
-  return row.startValue !== null && row.endValue === null;
+// A car frees up once it's returned (RTS_CAR_RETURN, written the moment the
+// foreman records the return odometer -- see POST /car-return) or once the
+// day gets fully submitted (RTS_SAVE) -- whichever comes first. Anything
+// else (just RTS_RESERVE_CAR) means it's still actively out.
+const CAR_RELEASE_TYPES = ["RTS_CAR_RETURN", "RTS_SAVE"];
+
+/** Same "latest event wins, RTS_CAR_RETURN/RTS_SAVE frees it" rule as
+ * findEmployeeConflicts, but for a single car. Runs inside the caller's
+ * locked transaction so the check and the write that follows are atomic
+ * together. */
+async function findCarConflict(tx: LockedTx, date: string, carId: string, myForemanTgId: number): Promise<boolean> {
+  const events = await tx
+    .select()
+    .from(schema.events)
+    .where(
+      and(
+        eq(schema.events.date, date),
+        eq(schema.events.carId, carId),
+        inArray(schema.events.type, ["RTS_RESERVE_CAR", ...CAR_RELEASE_TYPES]),
+      ),
+    );
+
+  let latest: { type: string; ts: Date } | null = null;
+  for (const e of events) {
+    if (Number(e.foremanTgId) === myForemanTgId) continue;
+    if (!latest || e.ts > latest.ts) latest = { type: e.type, ts: e.ts };
+  }
+  if (!latest) return false;
+  return !CAR_RELEASE_TYPES.includes(latest.type);
 }
 
 // A "leg" of the day: one car+crew+route submission. Most days have exactly
@@ -408,12 +429,9 @@ roadTimesheetRouter.post("/", async (req, res) => {
       // Enforce the car reservation server-side too, not just as a UI hint --
       // and do the check-then-write atomically under the lock, so two
       // concurrent requests can't both pass the check before either commits.
-      const existingForCar = await tx
-        .select()
-        .from(schema.odometerDays)
-        .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-      const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId && carIsActivelyOut(r));
-      if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+      if (await findCarConflict(tx, date, carId, foremanTgId)) {
+        throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+      }
 
       const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
       if (employeeConflicts.length) {
@@ -630,15 +648,23 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
   try {
     await withLock(`reserve:${date}`, async (tx) => {
       if (carId) {
-        const existingForCar = await tx
-          .select()
-          .from(schema.odometerDays)
-          .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-        const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId && carIsActivelyOut(r));
-        if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+        if (await findCarConflict(tx, date, carId, foremanTgId)) {
+          throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
+        }
         // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
         // date+carId, so the real ODO_START value submitted later just updates it.
         await writeOdometerDay({ date, carId, foremanTgId }, tx);
+        await writeEvent(
+          {
+            eventId: makeEventId("RTSRSV"),
+            status: "АКТИВНА",
+            date,
+            foremanTgId,
+            type: "RTS_RESERVE_CAR",
+            carId,
+          },
+          tx,
+        );
       }
 
       if (employeeIds?.length) {
@@ -688,12 +714,12 @@ roadTimesheetRouter.get("/cars-last-odometer", async (_req, res) => {
 
 /**
  * GET /api/road-timesheet/car-status?date=YYYY-MM-DD — which cars are
- * currently out with another foreman today (start odometer recorded, no end
- * odometer yet), with the reserving foreman's name, so PICK_CAR can stop two
- * foremen picking the same car -- same intent as the bot's
- * "🔒 [авто] — [бригадир]" busy label. Frees up the moment that foreman
- * records the return odometer (see carIsActivelyOut / POST /car-return) --
- * not only once they submit the full day's report.
+ * currently reserved by another foreman today, with the reserving foreman's
+ * name, so PICK_CAR can stop two foremen picking the same car -- same intent
+ * as the bot's "🔒 [авто] — [бригадир]" busy label. Same "latest event wins"
+ * rule as GET /people-status: a car locks the moment it's picked+odometer
+ * entered (RTS_RESERVE_CAR) and frees up the moment it's returned to base
+ * (RTS_CAR_RETURN) or the day is submitted (RTS_SAVE).
  */
 roadTimesheetRouter.get("/car-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -702,15 +728,26 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
     return;
   }
 
-  const [rows, users] = await Promise.all([
-    db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date)),
+  const [events, users] = await Promise.all([
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_CAR", ...CAR_RELEASE_TYPES]))),
     db.select().from(schema.users),
   ]);
   const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
   const myTgId = req.user!.tgId;
-  const taken = rows
-    .filter((r) => Number(r.foremanTgId) !== myTgId && carIsActivelyOut(r))
-    .map((r) => ({ carId: r.carId, foremanName: nameByTgId.get(String(r.foremanTgId)) ?? `Бригадир ${r.foremanTgId}` }));
+
+  const latestByCarId = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
+  for (const e of events) {
+    if (Number(e.foremanTgId) === myTgId || !e.carId) continue;
+    const cur = latestByCarId.get(e.carId);
+    if (!cur || e.ts > cur.ts) latestByCarId.set(e.carId, { type: e.type, ts: e.ts, foremanTgId: String(e.foremanTgId) });
+  }
+
+  const taken = [...latestByCarId.entries()]
+    .filter(([, v]) => !CAR_RELEASE_TYPES.includes(v.type))
+    .map(([carId, v]) => ({ carId, foremanName: nameByTgId.get(v.foremanTgId) ?? `Бригадир ${v.foremanTgId}` }));
 
   res.json({ taken });
 });
@@ -739,6 +776,14 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
   const foremanTgId = req.user!.tgId;
 
   await writeOdometerDay({ date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto });
+  await writeEvent({
+    eventId: makeEventId("RTSRSV"),
+    status: "АКТИВНА",
+    date,
+    foremanTgId,
+    type: "RTS_CAR_RETURN",
+    carId,
+  });
 
   res.json({ ok: true });
 });
