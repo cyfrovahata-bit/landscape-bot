@@ -305,6 +305,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [coefs, setCoefs] = useState<Record<string, CoefPair>>({});
   const [expandedCoefEmployeeId, setExpandedCoefEmployeeId] = useState<string | null>(null);
   const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
+  const [reviewPeopleExpanded, setReviewPeopleExpanded] = useState(false);
   const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
   const [reviewReturnStep, setReviewReturnStep] = useState<Step>("RETURN");
 
@@ -2903,7 +2904,27 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               ✏️ Редагувати
             </button>
           </div>
-          <div className="hint" style={{ padding: "0 16px 8px" }}>{employeeIds.map(employeeName).join(", ") || "—"}</div>
+          <div style={{ padding: "0 16px 8px" }}>
+            <button className="back-btn" onClick={() => setReviewPeopleExpanded((v) => !v)}>
+              {reviewPeopleExpanded ? "▾ Сховати список" : "▸ Показати список"}
+            </button>
+          </div>
+          {reviewPeopleExpanded && (
+            <div className="list" style={{ marginBottom: 8 }}>
+              {employeeIds.length ? (
+                employeeIds.map((id) => (
+                  <div key={id} className="cell" style={{ cursor: "default" }}>
+                    <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                      {employeeName(id)}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="empty-state">Нікого не обрано</div>
+              )}
+            </div>
+          )}
 
           <div className="section-title">Обʼєкти · роботи · обсяги</div>
           <div className="list">
