@@ -271,7 +271,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                     <span className="cell-title">
                       {dir?.name ?? it.logisticId} × {it.qty}
                     </span>
-                    <span className="cell-sub">{total} грн</span>
+                    <span className="cell-sub" style={{ marginLeft: "auto" }}>{total} грн</span>
                   </div>
                   <div className="hint">{it.employeeIds.map((id) => employeeById.get(id)?.name ?? id).join(", ")}</div>
                   {editActionIndex === idx && (

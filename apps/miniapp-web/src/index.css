@@ -76,6 +76,7 @@ body {
 
 .section-title.row > *:last-child {
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .list {
@@ -107,6 +108,16 @@ body {
 
 .cell:last-child {
   border-bottom: none;
+}
+
+/* When the leading content is too long to share a line with the trailing
+   badge/subtitle, .cell wraps them onto their own line (see above) -- but
+   without this, a lone wrapped item lands at the row's LEFT edge (flexbox's
+   default for a single item on its own wrapped line), which looks stray and
+   inconsistent next to every row that still fits on one line and is right-
+   aligned. The auto margin pins it to the right on its own line too. */
+.cell > *:last-child {
+  margin-left: auto;
 }
 
 .cell:active {
