@@ -308,6 +308,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [expandedTripSeq, setExpandedTripSeq] = useState<number | null>(null);
   const [doneTripPeopleExpanded, setDoneTripPeopleExpanded] = useState(false);
 
+  function fetchCarStatus() {
+    api
+      .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${date}`)
+      .then((res) => setTakenCars(new Map(res.taken.map((t) => [t.carId, t.foremanName]))))
+      .catch(() => {});
+  }
+
+  function fetchPeopleStatus() {
+    api
+      .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${date}`)
+      .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
+      .catch(() => {});
+  }
+
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
     api.get<Employee[]>("/api/dictionaries/employees").then(setEmployees).catch((e) => setError(e.message));
@@ -317,21 +331,29 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       .get<{ lastOdometer: Record<string, number> }>("/api/road-timesheet/cars-last-odometer")
       .then((res) => setLastOdometer(res.lastOdometer))
       .catch(() => {});
-    api
-      .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${date}`)
-      .then((res) => setTakenCars(new Map(res.taken.map((t) => [t.carId, t.foremanName]))))
-      .catch(() => {});
-    api
-      .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${date}`)
-      .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
-      .catch(() => {});
+    fetchCarStatus();
+    fetchPeopleStatus();
     api
       .get<LastTripResponse>(`/api/road-timesheet/last-trip?before=${date}`)
       .then((res) => {
         if (res.found) setLastTrip({ date: res.date, carId: res.carId ?? "", employeeIds: res.employeeIds, objects: res.objects });
       })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
+
+  // The fetch above only reflects the moment this screen first mounted --
+  // another foreman reserving or returning a car/person while this session
+  // stays open wouldn't show up otherwise. Re-sync every time the foreman
+  // actually lands on a picker, so switching back to PICK_CAR/PICK_PEOPLE
+  // (even without leaving the app) always reflects the current server state.
+  useEffect(() => {
+    if (step === "PICK_CAR" || step === "PICK_PEOPLE") {
+      fetchCarStatus();
+      fetchPeopleStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   // Restore an autosaved draft once on mount (survives the mini-app being
   // killed/reopened on the same device). Deliberately does NOT require
