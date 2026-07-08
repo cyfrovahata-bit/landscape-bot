@@ -161,7 +161,11 @@ async function updateUser(tgId: number, role: string, active: string) {
   const users = await fetchUsers();
 
   const index = users.findIndex((u: any) => Number(u.tgId) === Number(tgId));
-  if (index === -1) return;
+  // Throwing here (instead of silently returning) matters: this used to just
+  // no-op if the applicant's row couldn't be found, which looked exactly
+  // like "admin taps the button and nothing happens" -- no error, no
+  // confirmation, the message just never changed.
+  if (index === -1) throw new Error(`Користувача з TG_ID=${tgId} не знайдено в КОРИСТУВАЧІ`);
 
   const old = users[index] as any;
   const rowNumber = index + 2;
@@ -186,8 +190,15 @@ const chatId = q.message?.chat.id;
 
   try {
     await hydrateAuth(bot, chatId, actorTgId);
-  } catch {
-    return;
+  } catch (e: any) {
+    // hydrateAuth already messaged the user for these two expected cases --
+    // anything else (e.g. a Google Sheets API hiccup) must NOT be swallowed
+    // here, or the admin's tap on a registration button just silently does
+    // nothing: no error, no confirmation, the callback query never even gets
+    // answered. Rethrowing lets the outer handler (index.ts) show a proper
+    // error/quota message and clear the button's loading state.
+    if (e?.message === "ACCESS_DENIED" || e?.message === "BAD_ROLE") return;
+    throw e;
   }
 
   const data = q.data || "";
@@ -321,20 +332,30 @@ async function handleRegisterCallback(
   const [, action, tgIdRaw] = data.split(":");
   const tgId = Number(tgIdRaw);
 
-  if (action === "admin") {
-    await updateUser(tgId, "Адміністратор", "Так");
-  }
+  try {
+    if (action === "admin") {
+      await updateUser(tgId, "Адміністратор", "Так");
+    }
 
-  if (action === "foreman") {
-    await updateUser(tgId, "Бригадир", "Так");
-  }
+    if (action === "foreman") {
+      await updateUser(tgId, "Бригадир", "Так");
+    }
 
-  if (action === "reject") {
-    await updateUser(tgId, "Відхилено", "Ні");
-  }
+    if (action === "reject") {
+      await updateUser(tgId, "Відхилено", "Ні");
+    }
 
-  await bot.editMessageText("✅ Оброблено", {
-    chat_id: chatId,
-    message_id: q.message?.message_id,
-  });
+    await bot.answerCallbackQuery(q.id, { text: "✅ Оброблено" }).catch(() => {});
+    await bot.editMessageText("✅ Оброблено", {
+      chat_id: chatId,
+      message_id: q.message?.message_id,
+    });
+  } catch (e: any) {
+    // Never fail silently here -- a tap that visibly does nothing (no error,
+    // no confirmation) is worse than an explicit failure the admin can act on
+    // (retry, or check the КОРИСТУВАЧІ sheet for what went wrong).
+    const reason = e?.message ?? String(e);
+    await bot.answerCallbackQuery(q.id, { text: "❌ Помилка обробки", show_alert: true }).catch(() => {});
+    await bot.sendMessage(chatId, `⚠️ Не вдалось обробити заявку (TG_ID=${tgId}).\nПричина: ${reason}`.slice(0, 3500)).catch(() => {});
+  }
 }
