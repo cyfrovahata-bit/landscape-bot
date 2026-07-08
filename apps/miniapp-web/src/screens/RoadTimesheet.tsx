@@ -171,6 +171,23 @@ function employeeRole(emp: Employee): "бригадир" | "старший" | "�
   return "робітник";
 }
 
+// First letters of the first two words (e.g. "Агромаков Денис" -> "АД") for
+// a quick-glance contact-list-style avatar instead of a generic person icon.
+function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+function roleAccent(role: "бригадир" | "старший" | "робітник"): string {
+  if (role === "бригадир") return "accent-orange";
+  if (role === "старший") return "accent-purple";
+  return "accent-blue";
+}
+
 function groupByBrigade(employees: Employee[]) {
   const NO_BRIGADE = "__NO_BRIGADE__";
   const map = new Map<string, Employee[]>();
@@ -1660,8 +1677,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   disabled={!!takenBy}
                   style={takenBy ? { opacity: 0.4 } : undefined}
                 >
-                  <span className="cell-title">
-                    {c.name} {c.plate ? <span className="hint">{c.plate}</span> : null}
+                  <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span className="setup-icon accent-blue">🚙</span>
+                    <span className="cell-title">
+                      {c.name} {c.plate ? <span className="hint">{c.plate}</span> : null}
+                    </span>
                   </span>
                   {takenBy ? <span className="badge warn">🔒 {takenBy}</span> : <span className="cell-sub">{last ? `${last} км` : ""}</span>}
                 </button>
@@ -1812,8 +1832,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                                 disabled={!!busyBy}
                                 style={busyBy ? { opacity: 0.4 } : undefined}
                               >
-                                <span className="cell-title" style={{ display: "flex", alignItems: "center" }}>
+                                <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
                                   <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                                  <span className={`avatar-circle ${roleAccent(employeeRole(emp))}`}>{initials(emp.name)}</span>
                                   {emp.name}
                                 </span>
                                 {busyBy ? <span className="badge warn">🔒 {busyBy}</span> : <span className="role-tag">{employeeRole(emp)}</span>}
@@ -1876,9 +1897,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         const checked = plans.some((p) => p.objectId === obj.id);
                         return (
                           <button key={obj.id} className={`cell ${checked ? "selected" : ""}`} onClick={() => toggleRouteObject(obj)}>
-                            <span className="cell-title" style={{ display: "flex", alignItems: "center" }}>
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                               <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
-                              📍 {obj.name}
+                              <span className="setup-icon accent-orange" style={{ width: 28, height: 28, fontSize: 13, borderRadius: 9 }}>
+                                📍
+                              </span>
+                              {obj.name}
                             </span>
                             <span className="cell-sub">{obj.address}</span>
                           </button>
@@ -1914,7 +1938,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       setStep("PLAN_WORKS");
                     }}
                   >
-                    <span className="cell-title">📍 {plan.objectName}</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span className="setup-icon accent-teal">📍</span>
+                      <span className="cell-title">{plan.objectName}</span>
+                    </span>
                     <span className={`badge ${ready ? "ok" : "warn"}`}>{plan.works.length ? `${plan.works.length} робіт` : "не обрано"}</span>
                   </button>
                   <button className="cell-action" onClick={() => removeObjectFromRoute(plan.objectId)} title="Прибрати з маршруту">
@@ -2153,7 +2180,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="list">
             <div className="cell-row">
               <div className="cell" style={{ cursor: "default" }}>
-                <span className="cell-title">🚙 Авто</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span className="setup-icon accent-blue">🚙</span>
+                  <span className="cell-title">Авто</span>
+                </span>
                 <span className="cell-sub">
                   {cars.find((c) => c.id === carId)?.name} · {odoStart} км
                 </span>
@@ -2164,8 +2194,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </div>
             <div className="cell-row">
               <button className="cell" onClick={() => setReadyPeopleExpanded((v) => !v)}>
-                <span className="cell-title">
-                  {readyPeopleExpanded ? "▾" : "▸"} 👥 Люди
+                <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span className="setup-icon accent-purple">👥</span>
+                  <span className="cell-title">{readyPeopleExpanded ? "▾" : "▸"} Люди</span>
                 </span>
                 <span className="badge">{employeeIds.length}</span>
               </button>
@@ -2195,8 +2226,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <div key={p.objectId}>
                   <div className="cell-row">
                     <button className="cell" onClick={() => setReadyExpandedObjectId(expanded ? null : p.objectId)}>
-                      <span className="cell-title">
-                        {expanded ? "▾" : "▸"} 📍 {p.objectName}
+                      <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span className="setup-icon accent-orange">📍</span>
+                        <span className="cell-title">{expanded ? "▾" : "▸"} {p.objectName}</span>
                       </span>
                       <span className="badge">{p.works.length ? `${p.works.length} робіт` : "не обрано"}</span>
                     </button>
