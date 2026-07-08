@@ -386,12 +386,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
       .then(async (status) => {
         setDayStatus(status);
-        if (!status.hasSubmission || status.approved) return;
+        if (!status.hasSubmission) return;
         const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
         if (!res.found) return;
         setSubmittedTrips(res.trips);
         setDayCombined(res.combined);
-        setStep("DONE");
+        // Fetched for both approved and not-yet-approved days -- the
+        // "approved" screen below shows the real fund breakdown once
+        // it's out of the brigadier's hands, but not-yet-approved DONE
+        // stays on the editable step (masked amounts, see renderFundBreakdown).
+        if (!status.approved) setStep("DONE");
       })
       .catch(() => setDayStatus({ hasSubmission: false, approved: false, eventId: null, editRequested: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -550,6 +554,72 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       }
     }
     return [...byWorkId.values()];
+  }
+
+  // Brigadiers shouldn't see who-earned-what until an admin approves the
+  // day -- masked=true swaps every money figure for "•••" (shape/roles/names
+  // still visible so they can double-check the report itself). Shared by the
+  // not-yet-approved DONE screen (always masked) and the approved screen
+  // (always unmasked, once it's out of their hands to change anything).
+  function renderFundBreakdown(masked: boolean) {
+    if (!dayCombined) return null;
+    const isMultiTrip = submittedTrips.length > 1;
+    return (
+      <>
+        <div className="list" style={{ marginTop: 8 }}>
+          <div className="cell" style={{ cursor: "default" }}>
+            <span className="cell-title">💸 Доплата за виїзд{isMultiTrip ? " (загальна)" : ""}</span>
+            <span className="cell-sub">{masked ? "🔒 •••" : `${dayCombined.roadAllowance.perPerson} грн/особу`}</span>
+          </div>
+        </div>
+
+        <div className="section-title">Фонд по обʼєктах</div>
+        {dayCombined.salaryPacks.map((pack) => {
+          const expanded = expandedDoneObjectId === pack.objectId;
+          return (
+            <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
+              <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
+                <span className="cell-title">
+                  {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+                </span>
+                <span className="badge ok">{masked ? "🔒 •••" : `${pack.objectTotal} грн`}</span>
+              </button>
+              {expanded &&
+                (() => {
+                  const objectWorks = combinedWorksForObject(pack.objectId);
+                  return (
+                    <div style={{ padding: "0 16px 12px" }} className="hint">
+                      <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                      {objectWorks.length
+                        ? objectWorks.map((w) => (
+                            <div key={w.workId}>
+                              {w.workName}
+                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
+                            </div>
+                          ))
+                        : "— без робіт —"}
+                      <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
+                      {masked ? (
+                        <div>🔒 Буде видно після затвердження адміністратором</div>
+                      ) : (
+                        <>
+                          {pack.rows.map((r) => (
+                            <div key={r.employeeId}>
+                              {r.employeeName}: {r.pay} грн
+                            </div>
+                          ))}
+                          {!pack.rows.length && "— без нарахувань —"}
+                          {pack.companyPay > 0 && <div style={{ marginTop: 4 }}>🏢 Фірма: {pack.companyPay} грн</div>}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+            </div>
+          );
+        })}
+      </>
+    );
   }
 
   // Loads one already-submitted leg's own data into the shared working state
@@ -1355,56 +1425,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </button>
         </div>
 
-        {dayCombined && (
-          <>
-            <div className="list" style={{ marginTop: 8 }}>
-              <div className="cell" style={{ cursor: "default" }}>
-                <span className="cell-title">💸 Доплата за виїзд{isMulti ? " (загальна)" : ""}</span>
-                <span className="cell-sub">{dayCombined.roadAllowance.perPerson} грн/особу</span>
-              </div>
-            </div>
-
-            <div className="section-title">Фонд по обʼєктах</div>
-            {dayCombined.salaryPacks.map((pack) => {
-              const expanded = expandedDoneObjectId === pack.objectId;
-              return (
-                <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
-                  <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
-                    <span className="cell-title">
-                      {expanded ? "▾" : "▸"} 📍 {pack.objectName}
-                    </span>
-                    <span className="badge ok">{pack.objectTotal} грн</span>
-                  </button>
-                  {expanded &&
-                    (() => {
-                      const objectWorks = combinedWorksForObject(pack.objectId);
-                      return (
-                        <div style={{ padding: "0 16px 12px" }} className="hint">
-                          <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
-                          {objectWorks.length
-                            ? objectWorks.map((w) => (
-                                <div key={w.workId}>
-                                  {w.workName}
-                                  {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
-                                </div>
-                              ))
-                            : "— без робіт —"}
-                          <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
-                          {pack.rows.map((r) => (
-                            <div key={r.employeeId}>
-                              {r.employeeName}: {r.pay} грн
-                            </div>
-                          ))}
-                          {!pack.rows.length && "— без нарахувань —"}
-                          {pack.companyPay > 0 && <div style={{ marginTop: 4 }}>🏢 Фірма: {pack.companyPay} грн</div>}
-                        </div>
-                      );
-                    })()}
-                </div>
-              );
-            })}
-          </>
-        )}
+        {renderFundBreakdown(true)}
+        <div className="hint" style={{ padding: "0 16px 8px" }}>
+          🔒 Нарахування стануть видимі після затвердження адміністратором.
+        </div>
 
         <MainButton text="До меню" onClick={onSaved} />
       </div>
@@ -1436,6 +1460,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <span className="cell-sub">{date}</span>
           </div>
         </div>
+        {renderFundBreakdown(false)}
         <div className="hint" style={{ padding: "0 16px 8px" }}>
           Якщо потрібно щось виправити — надішліть запит адміністратору на редагування.
         </div>
@@ -3120,75 +3145,27 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
           )}
 
-          {preview &&
-            (() => {
-              const payByEmployee = new Map<string, number>();
-              preview.salaryPacks.forEach((pack) =>
-                pack.rows.forEach((r) => payByEmployee.set(r.employeeId, (payByEmployee.get(r.employeeId) ?? 0) + r.pay)),
-              );
-              const workersTotal = preview.salaryPacks.reduce(
-                (a, pack) =>
-                  a +
-                  pack.rows
-                    .filter((r) => r.employeeId !== preview.brigadierEmployeeId && !preview.seniorEmployeeIds.includes(r.employeeId))
-                    .reduce((sum, r) => sum + r.pay, 0),
-                0,
-              );
-              const brigadierTotal = payByEmployee.get(preview.brigadierEmployeeId) ?? 0;
-              const seniorsTotal = preview.seniorEmployeeIds.reduce((a, id) => a + (payByEmployee.get(id) ?? 0), 0);
-              const companyTotal = preview.salaryPacks.reduce((a, pack) => a + pack.companyPay, 0);
-              return (
-                <>
-                  <div className="section-title">Хто скільки заробив</div>
-                  <div className="hint" style={{ padding: "0 16px 8px" }}>
-                    Фонд за роботи на обʼєктах + доплата за виїзд {preview.roadAllowance.perPerson} ₴/особу.
+          {preview && (
+            <>
+              <div className="section-title">Хто скільки заробив</div>
+              <div className="hint" style={{ padding: "0 16px 8px" }}>
+                🔒 Суми стануть видимі після затвердження звіту адміністратором.
+              </div>
+              <div className="list">
+                {employeeIds.map((id) => (
+                  <div key={id} className="cell" style={{ cursor: "default" }}>
+                    <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                      {employeeName(id)}
+                      {id === preview.brigadierEmployeeId && <span className="badge">бригадир</span>}
+                      {preview.seniorEmployeeIds.includes(id) && <span className="badge">старший</span>}
+                    </span>
+                    <span className="cell-sub">🔒 •••</span>
                   </div>
-                  <div className="list">
-                    {employeeIds.map((id) => {
-                      const earned = payByEmployee.get(id) ?? 0;
-                      const total = Math.round((earned + preview.roadAllowance.perPerson) * 100) / 100;
-                      return (
-                        <div key={id} className="cell" style={{ cursor: "default" }}>
-                          <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
-                            {employeeName(id)}
-                            {id === preview.brigadierEmployeeId && <span className="badge">бригадир</span>}
-                            {preview.seniorEmployeeIds.includes(id) && <span className="badge">старший</span>}
-                          </span>
-                          <span className="cell-sub">
-                            {total} ₴ ({earned} + {preview.roadAllowance.perPerson})
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="section-title">Розподіл по ролях</div>
-                  <div className="list">
-                    <div className="cell" style={{ cursor: "default" }}>
-                      <span className="cell-title">👷 Працівники</span>
-                      <span className="cell-sub">{Math.round(workersTotal * 100) / 100} ₴</span>
-                    </div>
-                    {brigadierTotal > 0 && (
-                      <div className="cell" style={{ cursor: "default" }}>
-                        <span className="cell-title">👨‍🔧 Бригадир</span>
-                        <span className="cell-sub">{Math.round(brigadierTotal * 100) / 100} ₴</span>
-                      </div>
-                    )}
-                    {seniorsTotal > 0 && (
-                      <div className="cell" style={{ cursor: "default" }}>
-                        <span className="cell-title">🌿 Старші садівники</span>
-                        <span className="cell-sub">{Math.round(seniorsTotal * 100) / 100} ₴</span>
-                      </div>
-                    )}
-                    <div className="cell" style={{ cursor: "default" }}>
-                      <span className="cell-title">🏢 Фірма</span>
-                      <span className="cell-sub">{Math.round(companyTotal * 100) / 100} ₴</span>
-                    </div>
-                  </div>
-                </>
-              );
-            })()}
+                ))}
+              </div>
+            </>
+          )}
 
           {(() => {
             const unfilled = plans.flatMap((p) =>
