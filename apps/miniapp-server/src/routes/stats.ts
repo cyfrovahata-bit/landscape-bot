@@ -71,6 +71,18 @@ statsRouter.get("/range", async (req, res) => {
     const cur = latestEventByDate.get(e.date);
     if (!cur || e.ts > cur.ts) latestEventByDate.set(e.date, e);
   }
+
+  // Same rule as /road-timesheet/day-status: a day only counts as approved
+  // once the admin flow sets the event's status to "ЗАТВЕРДЖЕНО". If any date
+  // in range is still pending, mask all money in the response -- showing a
+  // mix of approved and pending amounts in one aggregated total would let a
+  // brigadier back out the pending day's numbers by diffing totals.
+  const pendingDates = [...latestEventByDate.entries()]
+    .filter(([, e]) => e.status !== "ЗАТВЕРДЖЕНО")
+    .map(([d]) => d)
+    .sort();
+  const moneyApproved = pendingDates.length === 0;
+
   const parsedEvents = [...latestEventByDate.values()].map((e) => {
     let payload: RtsSavePayload = {};
     try {
@@ -215,6 +227,8 @@ statsRouter.get("/range", async (req, res) => {
   res.json({
     from,
     to,
+    moneyApproved,
+    pendingDates,
     byObject: [...objAggs.values()]
       .map((o) => ({
         objectId: o.objectId,

@@ -17,7 +17,15 @@ type EmployeeStat = {
 };
 type CarDayStat = { date: string; km: number; tripClass: string; riderNames: string[]; objectNames: string[] };
 type CarStat = { carId: string; carName: string; totalKm: number; days: CarDayStat[] };
-type StatsRangeResponse = { from: string; to: string; byObject: ObjectStat[]; byEmployee: EmployeeStat[]; byCar: CarStat[] };
+type StatsRangeResponse = {
+  from: string;
+  to: string;
+  moneyApproved: boolean;
+  pendingDates: string[];
+  byObject: ObjectStat[];
+  byEmployee: EmployeeStat[];
+  byCar: CarStat[];
+};
 
 type Tab = "objects" | "employees" | "cars";
 
@@ -87,6 +95,13 @@ export function Stats({ onBack }: { onBack: () => void }) {
       {loading && <div className="empty-state">Завантаження…</div>}
       {error && <div className="empty-state">⚠️ {error}</div>}
 
+      {data && !data.moneyApproved && (
+        <div className="hint" style={{ padding: "0 16px 8px" }}>
+          🔒 {data.pendingDates.length > 1 ? `Дні ${data.pendingDates.join(", ")} ще` : `День ${data.pendingDates[0]} ще`} не затверджено
+          адміністратором — суми приховано.
+        </div>
+      )}
+
       {data && !loading && (
         <>
           {tab === "objects" && (
@@ -101,7 +116,7 @@ export function Stats({ onBack }: { onBack: () => void }) {
                         <span className="cell-title">
                           {expanded ? "▾" : "▸"} 📍 {o.objectName}
                         </span>
-                        <span className="badge ok">{o.totalFund} ₴</span>
+                        <span className="badge ok">{data.moneyApproved ? `${o.totalFund} ₴` : "🔒 •••"}</span>
                       </button>
                       {expanded && (
                         <div style={{ padding: "4px 16px 12px" }}>
@@ -121,7 +136,9 @@ export function Stats({ onBack }: { onBack: () => void }) {
                           <div className="hint" style={{ fontWeight: 600, marginTop: 8 }}>
                             👥 Люди та нарахування
                           </div>
-                          {o.employees.length ? (
+                          {!data.moneyApproved ? (
+                            <div className="hint">🔒 Буде видно після затвердження адміністратором</div>
+                          ) : o.employees.length ? (
                             o.employees.map((e, i) => (
                               <div key={i} className="hint" style={{ marginBottom: 4 }}>
                                 {e.employeeName}: {e.hours} год · {e.pay} ₴
@@ -152,14 +169,14 @@ export function Stats({ onBack }: { onBack: () => void }) {
                           {expanded ? "▾" : "▸"} {e.employeeName}
                         </span>
                         <span className="cell-sub">
-                          {e.totalHours} год · {e.totalPay} ₴
+                          {e.totalHours} год · {data.moneyApproved ? `${e.totalPay} ₴` : "🔒 •••"}
                         </span>
                       </button>
                       {expanded && (
                         <div style={{ padding: "4px 16px 12px" }}>
                           {e.roadAllowance > 0 && (
                             <div className="hint" style={{ marginBottom: 6 }}>
-                              💸 Доплата за виїзд: {e.roadAllowance} ₴
+                              💸 Доплата за виїзд: {data.moneyApproved ? `${e.roadAllowance} ₴` : "🔒 •••"}
                             </div>
                           )}
                           <div className="hint" style={{ fontWeight: 600 }}>
@@ -168,7 +185,7 @@ export function Stats({ onBack }: { onBack: () => void }) {
                           {e.objects.length ? (
                             e.objects.map((o) => (
                               <div key={o.objectId} className="hint" style={{ marginBottom: 4 }}>
-                                {o.objectName}: {o.hours} год · {o.pay} ₴
+                                {o.objectName}: {o.hours} год · {data.moneyApproved ? `${o.pay} ₴` : "🔒 •••"}
                               </div>
                             ))
                           ) : (
