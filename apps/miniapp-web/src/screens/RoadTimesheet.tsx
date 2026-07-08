@@ -30,6 +30,7 @@ type Step =
   | "PLAN_VOLUMES"
   | "READY"
   | "DRIVE"
+  | "ARRIVE_PICK"
   | "AT_OBJECT"
   | "RETURN_PICKUP"
   | "RETURN"
@@ -312,7 +313,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [tripStartedAt, setTripStartedAt] = useState<string | null>(null);
   const [showRoadsideActions, setShowRoadsideActions] = useState(false);
   const [expandedDriveObjectId, setExpandedDriveObjectId] = useState<string | null>(null);
-  const [showArrivePicker, setShowArrivePicker] = useState(false);
 
   // --- at object ---
   const [atObjectId, setAtObjectId] = useState<string | null>(null);
@@ -967,7 +967,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
     setAtObjectId(objectId);
     setAtObjectReturnStep("DRIVE");
-    setShowArrivePicker(false);
     setStep("AT_OBJECT");
     haptic("medium");
     logChange(`Прибули: ${target.objectName}`);
@@ -1224,6 +1223,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     PICK_OBJECTS: "HUB",
     PLAN: "HUB",
     READY: "HUB",
+    ARRIVE_PICK: "DRIVE",
     RETURN_PICKUP: "DRIVE",
     RETURN: "RETURN_PICKUP",
     // DONE has no entry here on purpose: it's now the day's landing screen
@@ -1286,10 +1286,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     if (step === "DRIVE") {
       // Same idea as AT_OBJECT above: a picker open on top of DRIVE should
       // just close, not exit the whole road timesheet.
-      if (showArrivePicker) {
-        setShowArrivePicker(false);
-        return;
-      }
       if (showRoadsideActions) {
         setShowRoadsideActions(false);
         return;
@@ -2330,7 +2326,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
 
           <div className="section-title row">
-            <span>Маршрут</span>
+            <span>По дорозі</span>
             <button className="chip" onClick={() => setShowRoadsideActions((v) => !v)}>
               🚏 {showRoadsideActions ? "Сховати" : "Висадити/забрати по дорозі"}
             </button>
@@ -2366,6 +2362,26 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               );
             })()}
 
+          {nextUnvisited ? (
+            <MainButton text="📍 Прибув на обʼєкт" onClick={() => setStep("ARRIVE_PICK")} />
+          ) : (
+            <MainButton
+              text="🏁 Повернутись на базу"
+              onClick={() => setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN")}
+            />
+          )}
+        </>
+      )}
+
+      {step === "ARRIVE_PICK" && (
+        <>
+          <div style={{ textAlign: "center" }}>
+            <div className="step-badge">📍 ПРИБУТТЯ</div>
+          </div>
+          <div className="section-title">На який обʼєкт ви прибули?</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>
+            Вже відвідані обʼєкти можна розгорнути — видно, хто там і які роботи тривають.
+          </div>
           <div className="list">
             {plans.map((p) => {
               const expanded = expandedDriveObjectId === p.objectId;
@@ -2381,9 +2397,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               return (
                 <div key={p.objectId}>
                   <div className="cell-row">
-                    <button className="cell" onClick={() => setExpandedDriveObjectId(expanded ? null : p.objectId)}>
+                    <button
+                      className="cell"
+                      onClick={() => (wasHere ? setExpandedDriveObjectId(expanded ? null : p.objectId) : arriveAt(p.objectId))}
+                    >
                       <span className="cell-title">
-                        {expanded ? "▾" : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
+                        {wasHere ? (expanded ? "▾" : "▸") : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
                       </span>
                       <span style={{ display: "flex", gap: 6 }}>
                         {peopleTotal > 0 && (
@@ -2398,19 +2417,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         )}
                       </span>
                     </button>
-                    <button
-                      className="cell-action"
-                      onClick={() => {
-                        setAtObjectId(p.objectId);
-                        setAtObjectReturnStep("DRIVE");
-                        setStep("AT_OBJECT");
-                      }}
-                      title="Редагувати"
-                    >
-                      ✏️
-                    </button>
+                    {wasHere && (
+                      <button
+                        className="cell-action"
+                        onClick={() => {
+                          setAtObjectId(p.objectId);
+                          setAtObjectReturnStep("DRIVE");
+                          setStep("AT_OBJECT");
+                        }}
+                        title="Редагувати"
+                      >
+                        ✏️
+                      </button>
+                    )}
                   </div>
-                  {expanded && (
+                  {wasHere && expanded && (
                     <div style={{ padding: "4px 16px 12px" }}>
                       <div className="hint" style={{ fontWeight: 600 }}>👥 Зараз тут</div>
                       <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
@@ -2431,34 +2452,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               );
             })}
           </div>
-
-          {showArrivePicker && (
-            <>
-              <div className="section-title">На який обʼєкт ви прибули?</div>
-              <div className="list" style={{ marginBottom: 8 }}>
-                {plans.map((p) => (
-                  <button key={p.objectId} className="cell" onClick={() => arriveAt(p.objectId)}>
-                    <span className="cell-title">📍 {p.objectName}</span>
-                    {p.visited && <span className="badge ok">вже були</span>}
-                  </button>
-                ))}
-              </div>
-              <div style={{ padding: "0 16px 8px" }}>
-                <button className="chip" onClick={() => setShowArrivePicker(false)}>
-                  Скасувати
-                </button>
-              </div>
-            </>
-          )}
-
-          {nextUnvisited ? (
-            <MainButton text="📍 Прибув на обʼєкт" onClick={() => setShowArrivePicker(true)} />
-          ) : (
-            <MainButton
-              text="🏁 Повернутись на базу"
-              onClick={() => setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN")}
-            />
-          )}
+          <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
+            <button className="back-btn" onClick={() => setStep("DRIVE")}>← Скасувати</button>
+          </div>
         </>
       )}
 
@@ -3061,10 +3057,22 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             </>
           )}
 
+          {(() => {
+            const unfilled = plans.flatMap((p) =>
+              p.works.filter((w) => !w.volume || w.volume === "?").map((w) => `${p.objectName}: ${w.workName}`),
+            );
+            if (!unfilled.length) return null;
+            return (
+              <div className="hint" style={{ padding: "0 16px 8px", color: "#d70015" }}>
+                ⚠️ Не введено обсяг: {unfilled.join(", ")}. Заповніть перед відправкою.
+              </div>
+            );
+          })()}
+
           <MainButton
             text={saving ? "Відправлення…" : editingTripSeq !== null ? "📤 Оновити звіт" : "📤 Відправити на підтвердження"}
             onClick={save}
-            disabled={saving}
+            disabled={saving || plans.some((p) => p.works.some((w) => !w.volume || w.volume === "?"))}
           />
         </>
       )}
