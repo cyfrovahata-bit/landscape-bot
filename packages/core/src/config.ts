@@ -21,6 +21,11 @@ export const config = {
   },
   botToken: process.env.BOT_TOKEN!, // used to validate Telegram WebApp initData
   syncIntervalMs: Number(process.env.SYNC_INTERVAL_MS || 45_000),
+  // The mini-app's own public HTTPS URL (miniapp-server serves the built
+  // frontend itself, so this is that service's address) -- used to build the
+  // "open this report" button on admin approval notifications. Notifications
+  // still send without a button if this isn't set.
+  publicUrl: (process.env.PUBLIC_APP_URL || "").replace(/\/+$/, ""),
 };
 
 ["sheetId"].forEach((k) => {

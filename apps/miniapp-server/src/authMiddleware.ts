@@ -17,7 +17,7 @@ declare global {
   }
 }
 
-function normRole(v: string): "ADMIN" | "BRIGADIER" | null {
+export function normRole(v: string): "ADMIN" | "BRIGADIER" | null {
   const raw = v.trim().toUpperCase();
   if (["ADMIN", "АДМІН", "АДМИН", "АДМІНІСТРАТОР", "АДМИНИСТРАТОР"].includes(raw)) return "ADMIN";
   if (["BRIGADIER", "БРИГАДИР"].includes(raw)) return "BRIGADIER";

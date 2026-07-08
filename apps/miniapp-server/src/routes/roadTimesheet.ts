@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import multer from "multer";
 import {
   db,
@@ -16,9 +16,21 @@ import {
   buildSalaryPacksWithRoles,
   DEFAULT_ROAD_ALLOWANCE_BY_CLASS,
   withLock,
+  sendTelegramMessage,
+  config,
   type LockedTx,
 } from "@landscape/core";
-import { and, eq, inArray, desc, lt } from "drizzle-orm";
+import { and, eq, inArray, desc, lt, gte } from "drizzle-orm";
+import { normRole } from "../authMiddleware.js";
+
+/** 403s and returns true if the caller isn't an admin -- lets a route bail with `if (blockNonAdmin(req, res)) return;`. */
+function blockNonAdmin(req: import("express").Request, res: Response): boolean {
+  if (req.user!.role !== "ADMIN") {
+    res.status(403).json({ error: "Admins only" });
+    return true;
+  }
+  return false;
+}
 
 /** Thrown to signal a 409 (reservation conflict) from inside a withLock() callback. */
 class ReservationConflictError extends Error {}
@@ -560,6 +572,19 @@ roadTimesheetRouter.post("/", async (req, res) => {
     throw e;
   }
 
+  const combinedFund = combined.salaryPacks.reduce((a, p) => a + p.objectTotal, 0);
+  notifyAdmins(
+    [
+      `🆕 *Новий звіт на підтвердження*`,
+      `👤 Бригадир: ${req.user!.pib}`,
+      `📅 Дата: ${date}`,
+      `🚗 ${totalKm} км · клас ${combined.tripClass}`,
+      `📍 Обʼєкти: ${newMergedObjects.map((o) => o.objectName).join(", ") || "—"}`,
+      `💰 Фонд: ${Math.round(combinedFund * 100) / 100} грн`,
+    ].join("\n"),
+    { date, foremanTgId },
+  ).catch((e) => console.log(`[notifyAdmins] failed: ${(e as Error).message}`));
+
   res.json({
     eventId,
     tripSeq: effectiveTripSeq,
@@ -821,6 +846,26 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
 });
 
 /**
+ * Sends every active admin (КОРИСТУВАЧІ role "адмін"/"admin") a Telegram
+ * message, with a button that opens the Mini App straight to the
+ * "Затвердження" screen focused on this foreman+date -- deep-linked into the
+ * SAME app (not a standalone page), so after acting on it an admin can still
+ * navigate to any other section from the menu. The button is omitted if
+ * PUBLIC_APP_URL isn't configured; the text notification still goes out.
+ */
+async function notifyAdmins(text: string, focus?: { date: string; foremanTgId: number }) {
+  const users = await db.select().from(schema.users).where(eq(schema.users.active, true));
+  const adminChatIds = users.filter((u) => normRole(u.role) === "ADMIN").map((u) => Number(u.tgId));
+
+  const buttons =
+    focus && config.publicUrl
+      ? [[{ text: "📄 Відкрити звіт", webAppUrl: `${config.publicUrl}/?approveDate=${focus.date}&approveForeman=${focus.foremanTgId}` }]]
+      : undefined;
+
+  await Promise.all(adminChatIds.map((chatId) => sendTelegramMessage(chatId, text, { buttons })));
+}
+
+/**
  * POST /api/road-timesheet/request-edit — after a day is approved and
  * locked, the foreman can ask an admin to unlock it instead of the mini-app
  * silently allowing (or silently refusing) further edits. Just logs an event
@@ -844,6 +889,154 @@ roadTimesheetRouter.post("/request-edit", async (req, res) => {
     payload: JSON.stringify({ reason: reason ?? "" }),
   });
 
+  await notifyAdmins(
+    `🔓 *Запит на редагування*\n👤 Бригадир: ${req.user!.pib}\n📅 Дата: ${date}${reason ? `\n📝 ${reason}` : ""}`,
+  );
+
+  res.json({ ok: true });
+});
+
+const RETURN_REASONS: Record<string, string> = {
+  NO_PHOTO: "Нема фото",
+  WRONG_ODO: "ODO некоректний",
+  WRONG_PEOPLE: "Не ті люди",
+  WRONG_OBJECTS: "Не ті обʼєкти",
+  WRONG_QTY: "Невірні обсяги",
+  OTHER: "Інше",
+};
+
+/**
+ * GET /api/road-timesheet/pending — admin-only. Every foreman+date whose
+ * latest RTS_SAVE is still awaiting a decision (status "АКТИВНА" -- not yet
+ * "ЗАТВЕРДЖЕНО" or "ПОВЕРНУТО"), with the same day-combined summary the
+ * foreman's own DONE screen shows, but for the admin these amounts are real
+ * (never masked -- see renderFundBreakdown on the client, which only masks
+ * for the submitting brigadier).
+ */
+roadTimesheetRouter.get("/pending", async (req, res) => {
+  if (blockNonAdmin(req, res)) return;
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 60);
+  const cutoffIso = cutoff.toISOString().slice(0, 10);
+
+  const [rows, users] = await Promise.all([
+    db
+      .select()
+      .from(schema.events)
+      .where(and(eq(schema.events.type, "RTS_SAVE"), gte(schema.events.date, cutoffIso)))
+      .orderBy(desc(schema.events.ts)),
+    db.select().from(schema.users),
+  ]);
+  const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
+
+  const latestByGroup = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    const key = `${r.date}|${r.foremanTgId}`;
+    if (!latestByGroup.has(key)) latestByGroup.set(key, r); // rows are ts-desc already
+  }
+  const pendingGroups = [...latestByGroup.values()].filter((r) => r.status === "АКТИВНА");
+
+  const items = await Promise.all(
+    pendingGroups.map(async (r) => {
+      const foremanTgId = Number(r.foremanTgId);
+      const trips = await fetchAllTrips(r.date, foremanTgId);
+      const mergedObjects = mergeObjects(trips.map((t) => t.objects));
+      const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+      const totalKm = trips.reduce((acc, t) => {
+        const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
+        return acc + (Number.isFinite(legKm) ? legKm : 0);
+      }, 0);
+      const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
+      return {
+        date: r.date,
+        foremanTgId,
+        foremanName: nameByTgId.get(String(foremanTgId)) ?? String(foremanTgId),
+        submittedAt: r.ts.toISOString(),
+        km: totalKm,
+        tripClass: combined.tripClass,
+        roadAllowance: combined.roadAllowance,
+        salaryPacks: combined.salaryPacks,
+        objects: mergedObjects.map((o) => ({
+          objectId: o.objectId,
+          objectName: o.objectName,
+          works: (o.works ?? []).map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume })),
+        })),
+        employeeIds: unionEmployeeIds,
+      };
+    }),
+  );
+
+  items.sort((a, b) => (a.date === b.date ? a.submittedAt.localeCompare(b.submittedAt) : b.date.localeCompare(a.date)));
+  res.json({ items, reasons: RETURN_REASONS });
+});
+
+async function setDayStatus(date: string, foremanTgId: number, status: string) {
+  const rows = await db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")));
+  await Promise.all(
+    rows.map((r) =>
+      writeEvent({
+        eventId: r.eventId,
+        status,
+        refEventId: r.refEventId ?? undefined,
+        chatId: r.chatId ? Number(r.chatId) : undefined,
+        ts: r.ts.toISOString(),
+        date: r.date,
+        foremanTgId: Number(r.foremanTgId),
+        type: r.type,
+        objectId: r.objectId ?? undefined,
+        carId: r.carId ?? undefined,
+        employeeIds: r.employeeIds ?? undefined,
+        payload: r.payload ?? undefined,
+        msgId: r.msgId ?? undefined,
+      }),
+    ),
+  );
+  return rows.length;
+}
+
+/** POST /api/road-timesheet/pending/approve — admin-only. { date, foremanTgId } */
+roadTimesheetRouter.post("/pending/approve", async (req, res) => {
+  if (blockNonAdmin(req, res)) return;
+  const { date, foremanTgId } = req.body as { date: string; foremanTgId: number };
+  if (!date || !foremanTgId) {
+    res.status(400).json({ error: "date and foremanTgId are required" });
+    return;
+  }
+
+  const count = await setDayStatus(date, foremanTgId, "ЗАТВЕРДЖЕНО");
+  if (!count) {
+    res.status(404).json({ error: "No submission found for that date/foreman" });
+    return;
+  }
+
+  await sendTelegramMessage(foremanTgId, `✅ *День затверджено адміністратором*\n📅 Дата: ${date}`);
+  res.json({ ok: true });
+});
+
+/** POST /api/road-timesheet/pending/return — admin-only. { date, foremanTgId, reasonCode, note? } */
+roadTimesheetRouter.post("/pending/return", async (req, res) => {
+  if (blockNonAdmin(req, res)) return;
+  const { date, foremanTgId, reasonCode, note } = req.body as { date: string; foremanTgId: number; reasonCode: string; note?: string };
+  if (!date || !foremanTgId || !reasonCode) {
+    res.status(400).json({ error: "date, foremanTgId and reasonCode are required" });
+    return;
+  }
+
+  const count = await setDayStatus(date, foremanTgId, "ПОВЕРНУТО");
+  if (!count) {
+    res.status(404).json({ error: "No submission found for that date/foreman" });
+    return;
+  }
+
+  const reasonText = RETURN_REASONS[reasonCode] ?? RETURN_REASONS.OTHER;
+  await sendTelegramMessage(
+    foremanTgId,
+    `🔴 *День повернено адміністратором*\n📅 Дата: ${date}\n📝 Причина: ${reasonText}${note ? ` — ${note}` : ""}\n\nРедагування знову доступне. Відкрий "Дорожній табель", виправ дані і надішли повторно.`,
+  );
   res.json({ ok: true });
 });
 

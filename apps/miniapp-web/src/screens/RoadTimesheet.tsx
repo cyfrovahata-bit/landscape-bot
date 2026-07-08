@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Car, type Employee, type Work, type WorkObject } from "../lib/api";
+import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack } from "../lib/api";
 import { todayISO } from "../lib/date";
 import { confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade } from "../lib/employee";
@@ -62,8 +62,6 @@ type Location = { kind: "onboard" } | { kind: "object"; objectId: string } | { k
 
 type CoefPair = { disciplineCoef: number; productivityCoef: number };
 
-type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
-type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; companyPay: number; rows: SalaryRow[] };
 type PayrollPreview = {
   km?: number;
   tripClass: string;

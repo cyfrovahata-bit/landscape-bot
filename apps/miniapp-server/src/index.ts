@@ -27,6 +27,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const apiRouter = express.Router();
 apiRouter.use(requireTelegramAuth);
+apiRouter.get("/me", (req, res) => res.json(req.user));
 apiRouter.use("/dictionaries", dictionariesRouter);
 apiRouter.use("/logistics", logisticsRouter);
 apiRouter.use("/materials", materialsRouter);

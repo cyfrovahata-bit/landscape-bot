@@ -9,5 +9,7 @@ export { uploadPhotoFromBuffer } from "./google/drive.js";
 export { config } from "./config.js";
 export { validateInitData } from "./telegramAuth.js";
 export type { TelegramWebAppUser, ValidatedInitData } from "./telegramAuth.js";
+export { sendTelegramMessage } from "./telegramNotify.js";
+export type { InlineButton } from "./telegramNotify.js";
 export * from "./writers.js";
 export * from "./payroll.js";

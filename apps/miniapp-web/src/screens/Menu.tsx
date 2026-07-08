@@ -21,8 +21,22 @@ function greeting(): { emoji: string; text: string } {
   return { emoji: "🌆", text: "Доброго вечора" };
 }
 
-export function Menu({ userName, onNavigate }: { userName?: string; onNavigate: (s: Screen) => void }) {
+export function Menu({
+  userName,
+  isAdmin,
+  onNavigate,
+}: {
+  userName?: string;
+  isAdmin?: boolean;
+  onNavigate: (s: Screen) => void;
+}) {
   const { emoji, text } = greeting();
+  // "Затвердження" is admin-only real functionality -- hidden for brigadiers
+  // entirely (a "Скоро" tile that never turns real for them would just be
+  // noise), shown as ready for admins instead of the static placeholder.
+  const items = ITEMS.filter((item) => item.screen !== "approval" || isAdmin).map((item) =>
+    item.screen === "approval" ? { ...item, ready: true } : item,
+  );
   return (
     <div>
       <div className="menu-header">
@@ -35,7 +49,7 @@ export function Menu({ userName, onNavigate }: { userName?: string; onNavigate: 
       </div>
 
       <div className="menu-grid">
-        {ITEMS.map((item) => (
+        {items.map((item) => (
           <button key={item.screen} className="menu-card" onClick={() => onNavigate(item.screen)}>
             {!item.ready && <span className="badge menu-card-badge">Скоро</span>}
             <span className={`menu-card-icon accent-${item.accent}`}>{item.icon}</span>

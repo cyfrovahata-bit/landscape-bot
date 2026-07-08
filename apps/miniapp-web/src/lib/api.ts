@@ -115,3 +115,6 @@ export type Work = { id: string; name: string; category: string | null; unit: st
 export type Car = { id: string; name: string; plate: string | null; active: boolean };
 export type Material = { id: string; name: string; unit: string; active: boolean; category: string | null };
 export type LogisticDirection = { id: string; name: string; tariff: number; discountsByQty: Record<string, number> };
+export type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
+export type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; companyPay: number; rows: SalaryRow[] };
+export type Me = { tgId: number; pib: string; role: "ADMIN" | "BRIGADIER" };
