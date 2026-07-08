@@ -3160,25 +3160,39 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
           )}
 
-          {preview && (
-            <>
-              <div className="section-title">Розподіл фонду</div>
-              <div className="list">
-                {preview.brigadierEmployeeId && (
-                  <div className="cell" style={{ cursor: "default" }}>
-                    <span className="cell-title">Бригадир</span>
-                    <span className="cell-sub">
-                      {preview.salaryPacks.reduce((a, pack) => a + (pack.rows.find((r) => r.employeeId === preview.brigadierEmployeeId)?.pay ?? 0), 0)} ₴
-                    </span>
+          {preview &&
+            (() => {
+              const payByEmployee = new Map<string, number>();
+              preview.salaryPacks.forEach((pack) =>
+                pack.rows.forEach((r) => payByEmployee.set(r.employeeId, (payByEmployee.get(r.employeeId) ?? 0) + r.pay)),
+              );
+              return (
+                <>
+                  <div className="section-title">Хто скільки заробив</div>
+                  <div className="hint" style={{ padding: "0 16px 8px" }}>
+                    Фонд за роботи на обʼєктах + доплата за виїзд {preview.roadAllowance.perPerson} ₴/особу.
                   </div>
-                )}
-                <div className="cell" style={{ cursor: "default" }}>
-                  <span className="cell-title">Доплата за виїзд</span>
-                  <span className="cell-sub">{preview.roadAllowance.perPerson} ₴/особу</span>
-                </div>
-              </div>
-            </>
-          )}
+                  <div className="list">
+                    {employeeIds.map((id) => {
+                      const earned = payByEmployee.get(id) ?? 0;
+                      const total = Math.round((earned + preview.roadAllowance.perPerson) * 100) / 100;
+                      return (
+                        <div key={id} className="cell" style={{ cursor: "default" }}>
+                          <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                            {employeeName(id)}
+                            {id === preview.brigadierEmployeeId && <span className="badge">бригадир</span>}
+                          </span>
+                          <span className="cell-sub">
+                            {total} ₴ ({earned} + {preview.roadAllowance.perPerson})
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
 
           {(() => {
             const unfilled = plans.flatMap((p) =>
