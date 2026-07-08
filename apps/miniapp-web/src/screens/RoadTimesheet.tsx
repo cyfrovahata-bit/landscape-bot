@@ -130,6 +130,8 @@ type DraftShape = {
   plans: ObjPlan[];
   onboard: string[];
   tripStartedAt: string | null;
+  drivingAccumulatedMs: number;
+  drivingSegmentStartedAt: string | null;
   atObjectId: string | null;
   coefs: Record<string, CoefPair>;
   // Which already-submitted trip this draft is mid-edit of, if any -- lost
@@ -270,6 +272,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // --- drive ---
   const [onboard, setOnboard] = useState<string[]>([]);
   const [tripStartedAt, setTripStartedAt] = useState<string | null>(null);
+  // Net time actually spent driving (not counting time stopped at an
+  // object) -- drivingAccumulatedMs is every FINISHED driving segment
+  // summed up, drivingSegmentStartedAt is when the CURRENT segment began
+  // (null while stopped at an object). The "🚗 ПОЇЗДКА" timer shows
+  // accumulated + time-since-drivingSegmentStartedAt, so it pauses the
+  // moment the foreman arrives somewhere and resumes the moment they head
+  // out again, instead of just counting up from the whole trip's start.
+  const [drivingAccumulatedMs, setDrivingAccumulatedMs] = useState(0);
+  const [drivingSegmentStartedAt, setDrivingSegmentStartedAt] = useState<string | null>(null);
   const [showRoadsideActions, setShowRoadsideActions] = useState(false);
   const [expandedDriveObjectId, setExpandedDriveObjectId] = useState<string | null>(null);
 
@@ -381,6 +392,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setPlans((draft.plans ?? []).map(normalizeDraftPlan));
       setOnboard(draft.onboard);
       setTripStartedAt(draft.tripStartedAt);
+      setDrivingAccumulatedMs(draft.drivingAccumulatedMs ?? 0);
+      setDrivingSegmentStartedAt(draft.drivingSegmentStartedAt ?? null);
       setAtObjectId(draft.atObjectId);
       setCoefs(draft.coefs ?? {});
       setEditingTripSeq(draft.editingTripSeq ?? null);
@@ -444,6 +457,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       plans,
       onboard,
       tripStartedAt,
+      drivingAccumulatedMs,
+      drivingSegmentStartedAt,
       atObjectId,
       coefs,
       editingTripSeq,
@@ -460,6 +475,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     plans,
     onboard,
     tripStartedAt,
+    drivingAccumulatedMs,
+    drivingSegmentStartedAt,
     atObjectId,
     coefs,
     editingTripSeq,
@@ -575,6 +592,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setCoefs({});
     setOnboard([]);
     setTripStartedAt(null);
+    setDrivingAccumulatedMs(0);
+    setDrivingSegmentStartedAt(null);
     setAtObjectId(null);
     setChangeLog([]);
     setRestoredBanner(false);
@@ -782,6 +801,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setCoefs({});
     setOnboard([]);
     setTripStartedAt(null);
+    setDrivingAccumulatedMs(0);
+    setDrivingSegmentStartedAt(null);
     setAtObjectId(null);
     setChangeLog([]);
     setSubmittedEditBanner(false);
@@ -1146,9 +1167,27 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function startDrive() {
     setOnboard(employeeIds);
     setTripStartedAt(new Date().toISOString());
+    setDrivingAccumulatedMs(0);
+    setDrivingSegmentStartedAt(new Date().toISOString());
     setStep("DRIVE");
     haptic("success");
     logChange("Виїхали");
+  }
+
+  // Folds the currently-running driving segment into the accumulated total
+  // and stops the clock -- called the moment the foreman arrives anywhere
+  // (an object, or back at base) so the segment about to start next (if any)
+  // begins from zero, not from wherever the "in transit" clock left off.
+  function pauseDrivingSegment() {
+    setDrivingSegmentStartedAt((segStart) => {
+      if (!segStart) return segStart;
+      setDrivingAccumulatedMs((ms) => ms + (Date.now() - new Date(segStart).getTime()));
+      return null;
+    });
+  }
+
+  function resumeDrivingSegment() {
+    setDrivingSegmentStartedAt((segStart) => segStart ?? new Date().toISOString());
   }
 
   const nextUnvisited = plans.find((p) => !p.visited) ?? null;
@@ -1176,6 +1215,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setAtObjectId(objectId);
     setAtObjectReturnStep("DRIVE");
     setStep("AT_OBJECT");
+    pauseDrivingSegment();
     haptic("medium");
     logChange(`Прибули: ${target.objectName}`);
   }
@@ -2467,7 +2507,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
           <div className="pulse-icon">🚗</div>
           <div className="section-title" style={{ textAlign: "center" }}>{nextUnvisited ? "В ДОРОЗІ" : "ПОВЕРТАЄМОСЬ"}</div>
-          <div className="timer-big">{tripStartedAt ? fmtHMS(now - new Date(tripStartedAt).getTime()) : "00:00:00"}</div>
+          <div className="timer-big">
+            {fmtHMS(drivingAccumulatedMs + (drivingSegmentStartedAt ? now - new Date(drivingSegmentStartedAt).getTime() : 0))}
+          </div>
+          <div className="hint" style={{ textAlign: "center" }}>лише час у дорозі — на об'єктах не рахується</div>
           <div className="hint" style={{ textAlign: "center" }}>
             {nextUnvisited ? (
               <>
@@ -2528,6 +2571,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               const worksFilled = p.works.filter((w) => w.volume && w.volume !== "?").length;
               const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
               const openSessions = p.sessions.filter((s) => !s.endedAt);
+              const earliestOpenStart = openSessions.length ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime())) : null;
               const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
               return (
                 <div key={p.objectId}>
@@ -2569,7 +2613,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
                       {openSessions.length > 0 && (
                         <div className="hint" style={{ marginBottom: 8 }}>
-                          ⏱ Роботи тривають: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
+                          ⏱ Роботи тривають {earliestOpenStart ? fmtHMS(now - earliestOpenStart) : ""}: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
                         </div>
                       )}
                       <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
@@ -2616,6 +2660,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               const worksFilled = p.works.filter((w) => w.volume && w.volume !== "?").length;
               const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
               const openSessions = p.sessions.filter((s) => !s.endedAt);
+              const earliestOpenStart = openSessions.length ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime())) : null;
               const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
               return (
                 <div key={p.objectId}>
@@ -2660,7 +2705,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
                       {openSessions.length > 0 && (
                         <div className="hint" style={{ marginBottom: 8 }}>
-                          ⏱ Роботи тривають: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
+                          ⏱ Роботи тривають {earliestOpenStart ? fmtHMS(now - earliestOpenStart) : ""}: {openSessions.map((s) => employeeName(s.employeeId)).join(", ")}
                         </div>
                       )}
                       <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
@@ -2928,7 +2973,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         ? "➡️ Продовжити маршрут"
                         : "🏁 Повертатись на базу"
                   }
-                  onClick={() => setStep(atObjectReturnStep)}
+                  onClick={() => {
+                    if (atObjectReturnStep === "DRIVE") resumeDrivingSegment();
+                    setStep(atObjectReturnStep);
+                  }}
                 />
               </>
             );
@@ -3001,7 +3049,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     );
                   })}
                 </div>
-                <MainButton text="🏁 Приїхали на базу" onClick={() => setStep("RETURN")} disabled={anyPending} />
+                <MainButton
+                  text="🏁 Приїхали на базу"
+                  onClick={() => {
+                    pauseDrivingSegment();
+                    setStep("RETURN");
+                  }}
+                  disabled={anyPending}
+                />
               </>
             );
           })()}
