@@ -170,24 +170,33 @@ async function updateUser(tgId: number, role: string, active: string) {
   // returned -1, no matter how correctly everything else was set up.
   const users = await fetchAllUserRows();
 
-  const index = users.findIndex((u: any) => Number(u.tgId) === Number(tgId));
+  const matches = users
+    .map((u: any, index: number) => ({ u, index }))
+    .filter(({ u }) => Number(u.tgId) === Number(tgId));
   // Throwing here (instead of silently returning) matters: this used to just
   // no-op if the applicant's row couldn't be found, which looked exactly
   // like "admin taps the button and nothing happens" -- no error, no
   // confirmation, the message just never changed.
-  if (index === -1) throw new Error(`Користувача з TG_ID=${tgId} не знайдено в КОРИСТУВАЧІ`);
+  if (!matches.length) throw new Error(`Користувача з TG_ID=${tgId} не знайдено в КОРИСТУВАЧІ`);
 
-  const old = users[index] as any;
-  const rowNumber = index + 2;
-
-  await updateUserRow(rowNumber, [
-    old.tgId,
-    old.username ?? "",
-    old.pib ?? old.name ?? "",
-    role,
-    active,
-    role === "Відхилено" ? "Відхилено адміністратором" : "Підтверджено адміністратором",
-  ]);
+  // Duplicate rows for the same tgId can exist (e.g. leftover from repeat
+  // /start taps while pending, before onStart's own duplicate check was
+  // fixed). The Sheets -> Postgres sync dedupes by tgId keeping whichever
+  // row comes LAST in the sheet -- so updating only the first match would
+  // leave a stale "Очікує/Ні" duplicate below it silently overriding this
+  // approval once synced. Update every matching row so they all agree.
+  for (const { u, index } of matches) {
+    const old = u as any;
+    const rowNumber = index + 2;
+    await updateUserRow(rowNumber, [
+      old.tgId,
+      old.username ?? "",
+      old.pib ?? old.name ?? "",
+      role,
+      active,
+      role === "Відхилено" ? "Відхилено адміністратором" : "Підтверджено адміністратором",
+    ]);
+  }
 
   await triggerMiniAppSync();
 }
