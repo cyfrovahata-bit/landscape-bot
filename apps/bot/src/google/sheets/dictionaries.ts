@@ -139,6 +139,46 @@ export async function fetchUsers(): Promise<UserRow[]> {
     .filter((u) => Number.isFinite(u.tgId) && u.tgId > 0 && u.pib && u.role && u.active);
 }
 
+/**
+ * Same as fetchUsers, but WITHOUT the `&& u.active` filter -- includes
+ * pending/rejected rows too. A brand-new registration is written with
+ * АКТИВ="Ні" (they're not active yet, that's the whole point), so anything
+ * that needs to find/update THAT specific row -- checking "did this person
+ * already apply" on repeat /start taps, or the admin's approve/reject
+ * callback -- must use this instead of fetchUsers(), or the row is
+ * invisible to it (fetchUsers() silently excludes it, `findIndex` returns
+ * -1, and the update looks like it does nothing).
+ */
+export async function fetchAllUserRows(): Promise<UserRow[]> {
+  const sh = await loadSheet(SHEET_NAMES.users);
+
+  requireHeaders(
+    sh.map,
+    [USERS_HEADERS.tgId, USERS_HEADERS.pib, USERS_HEADERS.role, USERS_HEADERS.active],
+    SHEET_NAMES.users
+  );
+
+  return sh.data
+    .map((r) => {
+      const tgId = parseNumber(getCell(r, sh.map, USERS_HEADERS.tgId));
+      const role = getCell(r, sh.map, USERS_HEADERS.role) as Role;
+      const active = toBool(getCell(r, sh.map, USERS_HEADERS.active));
+      const username = getCell(r, sh.map, USERS_HEADERS.username);
+      const pib = getCell(r, sh.map, USERS_HEADERS.pib);
+      const comment = getCell(r, sh.map, USERS_HEADERS.comment);
+
+      return {
+        tgId: Number(tgId),
+        pib,
+        role,
+        active,
+        ...(username ? { username } : {}),
+        ...(comment ? { comment } : {}),
+      } satisfies UserRow;
+    })
+    .filter((u) => Number.isFinite(u.tgId) && u.tgId > 0);
+}
+
 export async function fetchEmployees(): Promise<EmployeeRow[]> {
   const sh = await loadSheet(SHEET_NAMES.employees);
 

@@ -2,7 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { sendAppWelcome } from "./ui.js";
 import { TEXTS } from "./texts.js";
 import { hydrateAuth } from "./core/auth.js";
-import { fetchUsers, addUserToSheet, updateUserRow } from "../google/sheets/dictionaries.js";
+import { fetchUsers, fetchAllUserRows, addUserToSheet, updateUserRow } from "../google/sheets/dictionaries.js";
 
 import { CB } from "./core/cb.js";
 import { ensureSession } from "./core/session.js";
@@ -112,7 +112,11 @@ export async function onStart(bot: TelegramBot, msg: TelegramBot.Message) {
   delete s.flow;
   s.updatedAt = Date.now();
 
-  const users = await fetchUsers();
+  // fetchAllUserRows, not fetchUsers -- a pending applicant has АКТИВ="Ні"
+  // and fetchUsers() filters those out entirely, so `me` would never be
+  // found and every repeat /start tap while waiting re-added a duplicate
+  // row and re-notified the admins from scratch.
+  const users = await fetchAllUserRows();
 
   const me = users.find((u: any) => Number(u.tgId) === Number(user.id));
 
@@ -158,7 +162,12 @@ await addUserToSheet([
 }
 
 async function updateUser(tgId: number, role: string, active: string) {
-  const users = await fetchUsers();
+  // fetchAllUserRows, not fetchUsers -- the applicant being approved/
+  // rejected here has АКТИВ="Ні" by definition (that's the whole point of
+  // "pending"), and fetchUsers() filters out every inactive row. Using it
+  // here meant this row could never be found at all: findIndex always
+  // returned -1, no matter how correctly everything else was set up.
+  const users = await fetchAllUserRows();
 
   const index = users.findIndex((u: any) => Number(u.tgId) === Number(tgId));
   // Throwing here (instead of silently returning) matters: this used to just
