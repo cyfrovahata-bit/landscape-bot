@@ -62,7 +62,7 @@ type Location = { kind: "onboard" } | { kind: "object"; objectId: string } | { k
 type CoefPair = { disciplineCoef: number; productivityCoef: number };
 
 type SalaryRow = { employeeId: string; employeeName: string; hours: number; coefTotal: number; points: number; pay: number };
-type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; rows: SalaryRow[] };
+type SalaryPack = { objectId: string; objectName: string; objectTotal: number; sumPoints: number; companyPay: number; rows: SalaryRow[] };
 type PayrollPreview = {
   km?: number;
   tripClass: string;
@@ -1437,6 +1437,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             </div>
                           ))}
                           {!pack.rows.length && "— без нарахувань —"}
+                          {pack.companyPay > 0 && <div style={{ marginTop: 4 }}>🏢 Фірма: {pack.companyPay} грн</div>}
                         </div>
                       );
                     })()}
@@ -3166,6 +3167,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               preview.salaryPacks.forEach((pack) =>
                 pack.rows.forEach((r) => payByEmployee.set(r.employeeId, (payByEmployee.get(r.employeeId) ?? 0) + r.pay)),
               );
+              const workersTotal = preview.salaryPacks.reduce(
+                (a, pack) =>
+                  a +
+                  pack.rows
+                    .filter((r) => r.employeeId !== preview.brigadierEmployeeId && !preview.seniorEmployeeIds.includes(r.employeeId))
+                    .reduce((sum, r) => sum + r.pay, 0),
+                0,
+              );
+              const brigadierTotal = payByEmployee.get(preview.brigadierEmployeeId) ?? 0;
+              const seniorsTotal = preview.seniorEmployeeIds.reduce((a, id) => a + (payByEmployee.get(id) ?? 0), 0);
+              const companyTotal = preview.salaryPacks.reduce((a, pack) => a + pack.companyPay, 0);
               return (
                 <>
                   <div className="section-title">Хто скільки заробив</div>
@@ -3182,6 +3194,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
                             {employeeName(id)}
                             {id === preview.brigadierEmployeeId && <span className="badge">бригадир</span>}
+                            {preview.seniorEmployeeIds.includes(id) && <span className="badge">старший</span>}
                           </span>
                           <span className="cell-sub">
                             {total} ₴ ({earned} + {preview.roadAllowance.perPerson})
@@ -3189,6 +3202,30 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         </div>
                       );
                     })}
+                  </div>
+
+                  <div className="section-title">Розподіл по ролях</div>
+                  <div className="list">
+                    <div className="cell" style={{ cursor: "default" }}>
+                      <span className="cell-title">👷 Працівники</span>
+                      <span className="cell-sub">{Math.round(workersTotal * 100) / 100} ₴</span>
+                    </div>
+                    {brigadierTotal > 0 && (
+                      <div className="cell" style={{ cursor: "default" }}>
+                        <span className="cell-title">👨‍🔧 Бригадир</span>
+                        <span className="cell-sub">{Math.round(brigadierTotal * 100) / 100} ₴</span>
+                      </div>
+                    )}
+                    {seniorsTotal > 0 && (
+                      <div className="cell" style={{ cursor: "default" }}>
+                        <span className="cell-title">🌿 Старші садівники</span>
+                        <span className="cell-sub">{Math.round(seniorsTotal * 100) / 100} ₴</span>
+                      </div>
+                    )}
+                    <div className="cell" style={{ cursor: "default" }}>
+                      <span className="cell-title">🏢 Фірма</span>
+                      <span className="cell-sub">{Math.round(companyTotal * 100) / 100} ₴</span>
+                    </div>
                   </div>
                 </>
               );

@@ -53,6 +53,7 @@ export type ObjectSalaryPack = {
   objectName: string;
   objectTotal: number;
   sumPoints: number;
+  companyPay: number;
   rows: SalaryRow[];
 };
 
@@ -61,7 +62,9 @@ export type ObjectSalaryPack = {
  * workers) gets 20% split among brigadier rows (practically always just
  * one), seniors split 10%, everyone else splits the remainder (70%, or 90%
  * if no brigadier worked at this object) proportionally by points
- * (hours-unit * disciplineCoef * productivityCoef).
+ * (hours-unit * disciplineCoef * productivityCoef). If nobody senior worked
+ * there, that 10% isn't handed to workers instead -- it stays with the
+ * company (companyPay), exactly like the bot's roleTotals.company.
  */
 export function buildSalaryPacksWithRoles(params: {
   objects: Array<{
@@ -93,6 +96,7 @@ export function buildSalaryPacksWithRoles(params: {
     const workerPercent = hasBrigadier ? 0.7 : 0.9;
     const brigadierPercent = hasBrigadier ? 0.2 : 0;
     const seniorPercent = hasSenior ? 0.1 : 0;
+    const companyPercent = hasSenior ? 0 : 0.1;
 
     const workerRows = rowsSrc.filter((r) => {
       if (hasBrigadier && r.employeeId === brigadierEmployeeId) return false;
@@ -125,6 +129,7 @@ export function buildSalaryPacksWithRoles(params: {
       objectName: o.objectName,
       objectTotal: Math.round(o.objectTotal * 100) / 100,
       sumPoints: Math.round(rowsSrc.reduce((a, r) => a + r.points, 0) * 100) / 100,
+      companyPay: Math.round(o.objectTotal * companyPercent * 100) / 100,
       rows: rows.filter((r) => r.hours > 0 || r.pay > 0),
     };
   });
