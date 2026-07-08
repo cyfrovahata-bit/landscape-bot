@@ -220,6 +220,21 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
   return employeeIds.filter((id) => takenIds.has(id));
 }
 
+// A car another foreman merely reserved (or is actively out driving) is
+// taken -- but once they have a submitted RTS_SAVE using that car for the
+// day, they're done with it and it frees up for someone else, same rule as
+// findEmployeeConflicts above. Without this, a car stays "taken" in
+// odometerDays forever (that row is the day's permanent km record, so it's
+// never deleted), even long after the foreman who used it has finished and
+// the car is back at base. Returns "foremanTgId|carId" keys that are free.
+async function releasedCarKeys(date: string, executor: LockedTx | typeof db): Promise<Set<string>> {
+  const rows = await executor
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.date, date), eq(schema.events.type, "RTS_SAVE")));
+  return new Set(rows.filter((e) => e.carId).map((e) => `${e.foremanTgId}|${e.carId}`));
+}
+
 // A "leg" of the day: one car+crew+route submission. Most days have exactly
 // one (tripSeq 0), but a foreman can return to base and head out again with
 // a different car/crew/objects (e.g. before-lunch vs after-lunch) -- each of
@@ -402,7 +417,10 @@ roadTimesheetRouter.post("/", async (req, res) => {
         .select()
         .from(schema.odometerDays)
         .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-      const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+      const released = await releasedCarKeys(date, tx);
+      const takenBySomeoneElse = existingForCar.find(
+        (r) => Number(r.foremanTgId) !== foremanTgId && !released.has(`${r.foremanTgId}|${r.carId}`),
+      );
       if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
 
       const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
@@ -624,7 +642,10 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
           .select()
           .from(schema.odometerDays)
           .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-        const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId);
+        const released = await releasedCarKeys(date, tx);
+        const takenBySomeoneElse = existingForCar.find(
+          (r) => Number(r.foremanTgId) !== foremanTgId && !released.has(`${r.foremanTgId}|${r.carId}`),
+        );
         if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
         // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
         // date+carId, so the real ODO_START value submitted later just updates it.
@@ -681,7 +702,10 @@ roadTimesheetRouter.get("/cars-last-odometer", async (_req, res) => {
  * already taken for the day (someone already recorded/reserved a start
  * odometer for them), with the reserving foreman's name, so PICK_CAR can
  * stop two foremen picking the same car -- same intent as the bot's
- * "🔒 [авто] — [бригадир]" busy label.
+ * "🔒 [авто] — [бригадир]" busy label. A car frees up again once that
+ * foreman has a submitted RTS_SAVE for it (see releasedCarKeys) -- the
+ * odometerDays row itself never goes away (it's the day's km record), so
+ * without this a car stayed "taken" all day even after being returned.
  */
 roadTimesheetRouter.get("/car-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -690,14 +714,15 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
     return;
   }
 
-  const [rows, users] = await Promise.all([
+  const [rows, users, released] = await Promise.all([
     db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date)),
     db.select().from(schema.users),
+    releasedCarKeys(date, db),
   ]);
   const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
   const myTgId = req.user!.tgId;
   const taken = rows
-    .filter((r) => Number(r.foremanTgId) !== myTgId)
+    .filter((r) => Number(r.foremanTgId) !== myTgId && !released.has(`${r.foremanTgId}|${r.carId}`))
     .map((r) => ({ carId: r.carId, foremanName: nameByTgId.get(String(r.foremanTgId)) ?? `Бригадир ${r.foremanTgId}` }));
 
   res.json({ taken });
