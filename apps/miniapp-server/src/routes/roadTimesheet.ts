@@ -227,6 +227,7 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
 type StoredTrip = {
   tripSeq: number;
   eventId: string;
+  status: string;
   carId: string | null;
   employeeIds: string[];
   objects: ObjectInput[];
@@ -266,6 +267,7 @@ async function fetchAllTrips(date: string, foremanTgId: number): Promise<StoredT
     byTripSeq.set(tripSeq, {
       tripSeq,
       eventId: row.eventId,
+      status: row.status,
       carId: row.carId,
       employeeIds,
       objects: payload.objects ?? [],
@@ -830,6 +832,7 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
       return {
         tripSeq: t.tripSeq,
         eventId: t.eventId,
+        status: t.status,
         carId: t.carId,
         employeeIds: t.employeeIds,
         odoStart: t.odoStart ?? odo?.startValue ?? null,

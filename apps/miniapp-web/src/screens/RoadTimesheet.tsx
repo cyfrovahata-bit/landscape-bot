@@ -90,6 +90,7 @@ type SubmittedObject = {
 type SubmittedTrip = {
   tripSeq: number;
   eventId: string;
+  status: string;
   carId: string | null;
   employeeIds: string[];
   odoStart: number | null;
@@ -389,11 +390,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         if (!res.found) return;
         setSubmittedTrips(res.trips);
         setDayCombined(res.combined);
-        // Fetched for both approved and not-yet-approved days -- the
-        // "approved" screen below shows the real fund breakdown once
-        // it's out of the brigadier's hands, but not-yet-approved DONE
-        // stays on the editable step (masked amounts, see renderFundBreakdown).
-        if (!status.approved) setStep("DONE");
+        // Land on DONE regardless of approval -- an approved trip earlier
+        // today must not block starting another one (see the DONE screen's
+        // pending/approved split below).
+        setStep("DONE");
       })
       .catch(() => setDayStatus({ hasSubmission: false, approved: false, eventId: null, editRequested: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -617,6 +617,79 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           );
         })}
       </>
+    );
+  }
+
+  // One trip card on the DONE screen. editable=false for an already-approved
+  // trip -- no edit button (an approved trip is locked; "Запросити
+  // редагування" is the escape hatch for the whole day, not per-trip).
+  function renderTripCard(trip: SubmittedTrip, editable: boolean) {
+    const expanded = expandedTripSeq === trip.tripSeq;
+    return (
+      <div key={trip.tripSeq} className="list" style={{ marginTop: 8 }}>
+        <button
+          className="cell"
+          onClick={() => {
+            setExpandedTripSeq(expanded ? null : trip.tripSeq);
+            setDoneTripPeopleExpanded(false);
+          }}
+        >
+          <span className="cell-title">
+            {expanded ? "▾" : "▸"} 🚙 {cars.find((c) => c.id === trip.carId)?.name ?? "Поїздка"}
+          </span>
+          <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span className={`badge ${editable ? "warn" : "ok"}`}>{editable ? "здано" : "✅ затверджено"}</span>
+            <span className="cell-sub">
+              {trip.km ?? "—"} км · клас {trip.tripClass ?? "—"}
+            </span>
+          </span>
+        </button>
+        {expanded && (
+          <div style={{ padding: "0 16px 12px" }} className="hint">
+            <button className="back-btn" onClick={() => setDoneTripPeopleExpanded((v) => !v)}>
+              {doneTripPeopleExpanded ? "▾ Сховати людей" : `▸ Показати людей (${trip.employeeIds.length})`}
+            </button>
+            {doneTripPeopleExpanded && (
+              <div className="list" style={{ margin: "8px 0" }}>
+                {trip.employeeIds.length ? (
+                  trip.employeeIds.map((id) => (
+                    <div key={id} className="cell" style={{ cursor: "default" }}>
+                      <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                        {employeeName(id)}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty-state">Нікого не обрано</div>
+                )}
+              </div>
+            )}
+            {trip.objects.map((o) => (
+              <div key={o.objectId} style={{ marginTop: 6 }}>
+                <div style={{ fontWeight: 600 }}>📍 {o.objectName}</div>
+                {o.works.length
+                  ? o.works.map((w) => (
+                      <div key={w.workId}>
+                        {w.workName}
+                        {w.volume && w.volume !== "?" ? `: ${w.volume} ${works.find((x) => x.id === w.workId)?.unit ?? ""}` : ""}
+                      </div>
+                    ))
+                  : "без робіт"}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ padding: "8px 16px 12px" }}>
+          {editable ? (
+            <button className="chip" onClick={() => editTrip(trip)}>
+              ✏️ Редагувати цей виїзд
+            </button>
+          ) : (
+            <span className="hint">🔒 Затверджено адміністратором</span>
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -1222,6 +1295,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       const savedTrip: SubmittedTrip = {
         tripSeq: res.tripSeq,
         eventId: res.eventId,
+        status: "АКТИВНА",
         carId,
         employeeIds,
         odoStart: Number(odoStart),
@@ -1330,80 +1404,23 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   useTelegramBackButton(goBack);
 
   if (step === "DONE" && submittedTrips.length) {
+    const pendingTrips = submittedTrips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
+    const approvedTrips = submittedTrips.filter((t) => t.status === "ЗАТВЕРДЖЕНО");
+    const dayFullyApproved = approvedTrips.length > 0 && pendingTrips.length === 0;
     const isMulti = submittedTrips.length > 1;
     return (
       <div>
         <BackRow onBack={goBack} />
         <div className="header">
-          <h1>{isMulti ? `✅ Поїздки за ${date}` : "✅ Відправлено на підтвердження"}</h1>
-          <div className="hint">Можна й далі редагувати та надсилати повторно, поки адміністратор не затвердить день.</div>
+          <h1>{isMulti ? `✅ Поїздки за ${date}` : pendingTrips.length ? "✅ Відправлено на підтвердження" : "✅ День затверджено"}</h1>
+          <div className="hint">
+            {pendingTrips.length
+              ? "Можна й далі редагувати та надсилати повторно, поки адміністратор не затвердить."
+              : "Можна розпочати ще одну поїздку за цей день."}
+          </div>
         </div>
 
-        {submittedTrips.map((trip) => {
-          const expanded = expandedTripSeq === trip.tripSeq;
-          return (
-            <div key={trip.tripSeq} className="list" style={{ marginTop: 8 }}>
-              <button
-                className="cell"
-                onClick={() => {
-                  setExpandedTripSeq(expanded ? null : trip.tripSeq);
-                  setDoneTripPeopleExpanded(false);
-                }}
-              >
-                <span className="cell-title">
-                  {expanded ? "▾" : "▸"} 🚙 {cars.find((c) => c.id === trip.carId)?.name ?? "Поїздка"}
-                </span>
-                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span className="badge ok">здано</span>
-                  <span className="cell-sub">
-                    {trip.km ?? "—"} км · клас {trip.tripClass ?? "—"}
-                  </span>
-                </span>
-              </button>
-              {expanded && (
-                <div style={{ padding: "0 16px 12px" }} className="hint">
-                  <button className="back-btn" onClick={() => setDoneTripPeopleExpanded((v) => !v)}>
-                    {doneTripPeopleExpanded ? "▾ Сховати людей" : `▸ Показати людей (${trip.employeeIds.length})`}
-                  </button>
-                  {doneTripPeopleExpanded && (
-                    <div className="list" style={{ margin: "8px 0" }}>
-                      {trip.employeeIds.length ? (
-                        trip.employeeIds.map((id) => (
-                          <div key={id} className="cell" style={{ cursor: "default" }}>
-                            <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
-                              {employeeName(id)}
-                            </span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="empty-state">Нікого не обрано</div>
-                      )}
-                    </div>
-                  )}
-                  {trip.objects.map((o) => (
-                    <div key={o.objectId} style={{ marginTop: 6 }}>
-                      <div style={{ fontWeight: 600 }}>📍 {o.objectName}</div>
-                      {o.works.length
-                        ? o.works.map((w) => (
-                            <div key={w.workId}>
-                              {w.workName}
-                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${works.find((x) => x.id === w.workId)?.unit ?? ""}` : ""}
-                            </div>
-                          ))
-                        : "без робіт"}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{ padding: "8px 16px 12px" }}>
-                <button className="chip" onClick={() => editTrip(trip)}>
-                  ✏️ Редагувати цей виїзд
-                </button>
-              </div>
-            </div>
-          );
-        })}
+        {pendingTrips.map((trip) => renderTripCard(trip, true))}
 
         {editingTripSeq === null && (!!carId || employeeIds.length > 0 || plans.length > 0) && (
           <div className="list" style={{ marginTop: 8 }}>
@@ -1423,10 +1440,28 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </button>
         </div>
 
-        {renderFundBreakdown(true)}
+        {renderFundBreakdown(!dayFullyApproved)}
         <div className="hint" style={{ padding: "0 16px 8px" }}>
-          🔒 Нарахування стануть видимі після затвердження адміністратором.
+          {dayFullyApproved
+            ? "Якщо потрібно щось виправити — надішліть запит адміністратору на редагування."
+            : "🔒 Нарахування стануть видимі після затвердження адміністратором."}
         </div>
+
+        {approvedTrips.length > 0 && (
+          <>
+            <div className="section-title">Затверджені поїздки</div>
+            {approvedTrips.map((trip) => renderTripCard(trip, false))}
+            {dayStatus?.editRequested ? (
+              <div className="empty-state">🔓 Запит на редагування вже надіслано, очікуйте.</div>
+            ) : (
+              <div style={{ padding: "8px 16px" }}>
+                <button className="chip" onClick={requestEdit}>
+                  🔓 Запросити редагування затверджених
+                </button>
+              </div>
+            )}
+          </>
+        )}
 
         <MainButton text="До меню" onClick={onSaved} />
       </div>
@@ -1441,32 +1476,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <h1>🚗 Дорожній табель</h1>
         </div>
         <div className="empty-state">Завантаження…</div>
-      </div>
-    );
-  }
-
-  if (dayStatus.approved) {
-    return (
-      <div>
-        <BackRow onBack={onBack} />
-        <div className="header">
-          <h1>🚗 Дорожній табель</h1>
-        </div>
-        <div className="list">
-          <div className="cell" style={{ cursor: "default" }}>
-            <span className="cell-title">✅ День затверджено адміністратором</span>
-            <span className="cell-sub">{date}</span>
-          </div>
-        </div>
-        {renderFundBreakdown(false)}
-        <div className="hint" style={{ padding: "0 16px 8px" }}>
-          Якщо потрібно щось виправити — надішліть запит адміністратору на редагування.
-        </div>
-        {dayStatus.editRequested ? (
-          <div className="empty-state">🔓 Запит на редагування вже надіслано, очікуйте.</div>
-        ) : (
-          <MainButton text="🔓 Запросити редагування" onClick={requestEdit} />
-        )}
       </div>
     );
   }
