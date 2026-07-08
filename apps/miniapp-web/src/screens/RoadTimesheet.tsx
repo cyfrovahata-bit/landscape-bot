@@ -475,6 +475,25 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
   }
 
+  // Frees the car for other foremen the moment it's actually back at base --
+  // otherwise it stayed "reserved" until the whole day gets submitted, even
+  // though nobody's driving it anymore right after this point.
+  async function markCarReturned() {
+    if (!carId || !odoEnd) return;
+    try {
+      await api.post("/api/road-timesheet/car-return", {
+        date,
+        carId,
+        odoStart: odoStart ? Number(odoStart) : undefined,
+        odoStartPhoto,
+        odoEnd: Number(odoEnd),
+        odoEndPhoto,
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   async function requestEdit() {
     try {
       await api.post("/api/road-timesheet/request-edit", { date, eventId: dayStatus?.eventId, reason: "" });
@@ -2880,6 +2899,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <MainButton
             text="Далі → Підсумок дня"
             onClick={async () => {
+              await markCarReturned();
               logChange(`Повернення: одометр ${odoEnd} км`);
               setReviewReturnStep("RETURN");
               setStep("REVIEW");

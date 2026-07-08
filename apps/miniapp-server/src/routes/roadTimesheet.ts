@@ -220,19 +220,14 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
   return employeeIds.filter((id) => takenIds.has(id));
 }
 
-// A car another foreman merely reserved (or is actively out driving) is
-// taken -- but once they have a submitted RTS_SAVE using that car for the
-// day, they're done with it and it frees up for someone else, same rule as
-// findEmployeeConflicts above. Without this, a car stays "taken" in
-// odometerDays forever (that row is the day's permanent km record, so it's
-// never deleted), even long after the foreman who used it has finished and
-// the car is back at base. Returns "foremanTgId|carId" keys that are free.
-async function releasedCarKeys(date: string, executor: LockedTx | typeof db): Promise<Set<string>> {
-  const rows = await executor
-    .select()
-    .from(schema.events)
-    .where(and(eq(schema.events.date, date), eq(schema.events.type, "RTS_SAVE")));
-  return new Set(rows.filter((e) => e.carId).map((e) => `${e.foremanTgId}|${e.carId}`));
+// A car is actually in use exactly while it has a start odometer but no end
+// odometer yet -- the moment the foreman records the return reading (car
+// back at base), it's free again for someone else, regardless of whether
+// they've gone on to submit the full day's report yet. The odometerDays row
+// itself is never deleted (it's the day's permanent km record), so "row
+// exists" alone isn't the right "still taken" signal -- endValue is.
+function carIsActivelyOut(row: { startValue: number | null; endValue: number | null }): boolean {
+  return row.startValue !== null && row.endValue === null;
 }
 
 // A "leg" of the day: one car+crew+route submission. Most days have exactly
@@ -417,10 +412,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
         .select()
         .from(schema.odometerDays)
         .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-      const released = await releasedCarKeys(date, tx);
-      const takenBySomeoneElse = existingForCar.find(
-        (r) => Number(r.foremanTgId) !== foremanTgId && !released.has(`${r.foremanTgId}|${r.carId}`),
-      );
+      const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId && carIsActivelyOut(r));
       if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
 
       const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
@@ -642,10 +634,7 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
           .select()
           .from(schema.odometerDays)
           .where(and(eq(schema.odometerDays.date, date), eq(schema.odometerDays.carId, carId)));
-        const released = await releasedCarKeys(date, tx);
-        const takenBySomeoneElse = existingForCar.find(
-          (r) => Number(r.foremanTgId) !== foremanTgId && !released.has(`${r.foremanTgId}|${r.carId}`),
-        );
+        const takenBySomeoneElse = existingForCar.find((r) => Number(r.foremanTgId) !== foremanTgId && carIsActivelyOut(r));
         if (takenBySomeoneElse) throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
         // A "draft" row with no odometer values yet -- writeOdometerDay upserts on
         // date+carId, so the real ODO_START value submitted later just updates it.
@@ -699,13 +688,12 @@ roadTimesheetRouter.get("/cars-last-odometer", async (_req, res) => {
 
 /**
  * GET /api/road-timesheet/car-status?date=YYYY-MM-DD — which cars are
- * already taken for the day (someone already recorded/reserved a start
- * odometer for them), with the reserving foreman's name, so PICK_CAR can
- * stop two foremen picking the same car -- same intent as the bot's
- * "🔒 [авто] — [бригадир]" busy label. A car frees up again once that
- * foreman has a submitted RTS_SAVE for it (see releasedCarKeys) -- the
- * odometerDays row itself never goes away (it's the day's km record), so
- * without this a car stayed "taken" all day even after being returned.
+ * currently out with another foreman today (start odometer recorded, no end
+ * odometer yet), with the reserving foreman's name, so PICK_CAR can stop two
+ * foremen picking the same car -- same intent as the bot's
+ * "🔒 [авто] — [бригадир]" busy label. Frees up the moment that foreman
+ * records the return odometer (see carIsActivelyOut / POST /car-return) --
+ * not only once they submit the full day's report.
  */
 roadTimesheetRouter.get("/car-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -714,18 +702,45 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
     return;
   }
 
-  const [rows, users, released] = await Promise.all([
+  const [rows, users] = await Promise.all([
     db.select().from(schema.odometerDays).where(eq(schema.odometerDays.date, date)),
     db.select().from(schema.users),
-    releasedCarKeys(date, db),
   ]);
   const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
   const myTgId = req.user!.tgId;
   const taken = rows
-    .filter((r) => Number(r.foremanTgId) !== myTgId && !released.has(`${r.foremanTgId}|${r.carId}`))
+    .filter((r) => Number(r.foremanTgId) !== myTgId && carIsActivelyOut(r))
     .map((r) => ({ carId: r.carId, foremanName: nameByTgId.get(String(r.foremanTgId)) ?? `Бригадир ${r.foremanTgId}` }));
 
   res.json({ taken });
+});
+
+/**
+ * POST /api/road-timesheet/car-return — called the moment the foreman
+ * records the return odometer at the RETURN step (before they've reviewed
+ * or submitted the rest of the day), so the car frees up for another
+ * foreman right away instead of staying "taken" until the final submit.
+ * Includes the already-known start reading too -- writeOdometerDay upserts
+ * the whole row, so omitting it here would wipe it back to empty.
+ */
+roadTimesheetRouter.post("/car-return", async (req, res) => {
+  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto } = req.body as {
+    date: string;
+    carId: string;
+    odoStart?: number;
+    odoStartPhoto?: string;
+    odoEnd: number;
+    odoEndPhoto?: string;
+  };
+  if (!date || !carId || !Number.isFinite(odoEnd)) {
+    res.status(400).json({ error: "date, carId and odoEnd are required" });
+    return;
+  }
+  const foremanTgId = req.user!.tgId;
+
+  await writeOdometerDay({ date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto });
+
+  res.json({ ok: true });
 });
 
 /**
