@@ -306,6 +306,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [expandedCoefEmployeeId, setExpandedCoefEmployeeId] = useState<string | null>(null);
   const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
   const [reviewPeopleExpanded, setReviewPeopleExpanded] = useState(false);
+  const [reviewWorkersExpanded, setReviewWorkersExpanded] = useState(false);
   const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
   const [reviewReturnStep, setReviewReturnStep] = useState<Step>("RETURN");
 
@@ -3083,6 +3084,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="hint" style={{ padding: "0 16px 8px" }}>
             Коефіцієнти впливають лише на розподіл частки робітників у фонді обʼєкта, за замовчуванням 1.0. Тапни на робітника, щоб змінити.
           </div>
+          <div style={{ padding: "0 16px 8px" }}>
+            <button className="back-btn" onClick={() => setReviewWorkersExpanded((v) => !v)}>
+              {reviewWorkersExpanded ? "▾ Сховати список" : `▸ Показати список (${employeeIds.length})`}
+            </button>
+          </div>
+          {reviewWorkersExpanded && (
           <div className="list">
             {employeeIds.map((id) => {
               const totalMs = plans.reduce((acc, p) => {
@@ -3151,6 +3158,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               );
             })}
           </div>
+          )}
 
           {preview && (
             <>
