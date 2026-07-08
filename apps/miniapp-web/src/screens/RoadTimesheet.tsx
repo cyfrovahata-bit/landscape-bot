@@ -296,6 +296,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [moveSelected, setMoveSelected] = useState<string[]>([]);
   const [moveTargetId, setMoveTargetId] = useState<string | null>(null);
   const [showMovePicker, setShowMovePicker] = useState(false);
+  // People who show up at an object on their own (their own car, etc.) --
+  // never picked in PICK_PEOPLE, so not in employeeIds/onboard/here at all
+  // until added here.
+  const [addArrivedSelected, setAddArrivedSelected] = useState<string[]>([]);
+  const [showAddArrivedPicker, setShowAddArrivedPicker] = useState(false);
 
   // --- undo / change log / draft / submitted-lock / copy-yesterday ---
   const undoTimeoutRef = useRef<number | null>(null);
@@ -1373,6 +1378,32 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setShowMovePicker(false);
   }
 
+  // Adds someone who showed up at the object under their own steam (their
+  // own car, etc.) -- they were never picked in PICK_PEOPLE, so this is the
+  // only place they enter the day's roster at all. Reserves them server-side
+  // with the merged list directly (not via reserveIfPossible/its employeeIds
+  // closure, which would still see the state from before this add) so
+  // another foreman can't also claim them, same as picking someone up front.
+  async function confirmAddArrived() {
+    if (!atObjectId || !addArrivedSelected.length) return;
+    const ids = addArrivedSelected;
+    const objectName = currentAtPlan()?.objectName ?? "";
+    const mergedEmployeeIds = [...new Set([...employeeIds, ...ids])];
+    try {
+      await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds: mergedEmployeeIds });
+    } catch (e) {
+      setError((e as Error).message);
+      haptic("error");
+      return;
+    }
+    setEmployeeIds(mergedEmployeeIds);
+    moveEmployeesTo(ids, { kind: "object", objectId: atObjectId });
+    haptic("success");
+    logChange(`Приїхали самі на ${objectName}: ${ids.map(employeeName).join(", ")}`);
+    setAddArrivedSelected([]);
+    setShowAddArrivedPicker(false);
+  }
+
   // "Everyone accounted for" = nobody is still standing on an object. Do NOT
   // compare onboard vs employeeIds counts: someone dropped off along the way
   // home (roadsideDropoff) stays in the trip roster for the road allowance
@@ -1530,6 +1561,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setMoveSelected([]);
         setMoveTargetId(null);
         setShowMovePicker(false);
+        return;
+      }
+      if (showAddArrivedPicker) {
+        setAddArrivedSelected([]);
+        setShowAddArrivedPicker(false);
         return;
       }
       setStep(atObjectReturnStep);
@@ -2826,7 +2862,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </>
                 )}
 
-                {!showDropPicker && !showMovePicker && (
+                {!showDropPicker && !showMovePicker && !showAddArrivedPicker && (
                   <div className="list" style={{ marginTop: 8 }}>
                     <button
                       className="cell"
@@ -2838,6 +2874,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     >
                       <span className="cell-title">👥 Висадити людей тут</span>
                       <span className="cell-sub">🚐 {onboard.length} в машині</span>
+                    </button>
+                    <button
+                      className="cell"
+                      onClick={() => {
+                        setAddArrivedSelected([]);
+                        setShowAddArrivedPicker(true);
+                      }}
+                      disabled={!employees.some((e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id))}
+                    >
+                      <span className="cell-title">🚶 Приїхали самі — додати</span>
+                      <span className="cell-sub">свій транспорт</span>
                     </button>
                     {notStarted.length > 0 && (
                       <button className="cell" onClick={startShift} disabled={!plan.works.length}>
@@ -2870,7 +2917,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </div>
                 )}
 
-                {plans.length > 1 && !showDropPicker && !showMovePicker && (
+                {plans.length > 1 && !showDropPicker && !showMovePicker && !showAddArrivedPicker && (
                   <>
                     <div className="section-title">Інші обʼєкти — переключитись</div>
                     <div className="list">
@@ -2911,6 +2958,41 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         Скасувати
                       </button>
                       <button className="chip selected" onClick={confirmDrop} disabled={!dropSelected.length}>
+                        Підтвердити
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {showAddArrivedPicker && (
+                  <>
+                    <div className="section-title">Хто приїхав сам</div>
+                    <div className="chip-row">
+                      {employees
+                        .filter((e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id))
+                        .map((e) => (
+                          <div
+                            key={e.id}
+                            className={`chip ${addArrivedSelected.includes(e.id) ? "selected" : ""}`}
+                            onClick={() =>
+                              setAddArrivedSelected((prev) => (prev.includes(e.id) ? prev.filter((x) => x !== e.id) : [...prev, e.id]))
+                            }
+                          >
+                            {e.name}
+                          </div>
+                        ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                      <button
+                        className="chip"
+                        onClick={() => {
+                          setAddArrivedSelected([]);
+                          setShowAddArrivedPicker(false);
+                        }}
+                      >
+                        Скасувати
+                      </button>
+                      <button className="chip selected" onClick={confirmAddArrived} disabled={!addArrivedSelected.length}>
                         Підтвердити
                       </button>
                     </div>
