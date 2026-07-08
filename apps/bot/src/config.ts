@@ -25,6 +25,11 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean)
     .map(Number),
+  // The Mini App's public HTTPS URL (same one registered as its Mini App in
+  // @BotFather) -- the welcome message's "Відкрити застосунок" button opens
+  // this as a Telegram Web App. Falls back to the old callback-based menu if
+  // unset, so the bot still works before this is configured.
+  miniAppUrl: (process.env.PUBLIC_APP_URL || "").replace(/\/+$/, ""),
 };
 
 ["botToken", "sheetId", "driveFolderId"].forEach((k) => {

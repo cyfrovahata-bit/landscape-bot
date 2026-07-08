@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api";
-import { sendWelcome, showMainMenu } from "./ui.js";
+import { sendAppWelcome } from "./ui.js";
 import { TEXTS } from "./texts.js";
 import { hydrateAuth } from "./core/auth.js";
 import { fetchUsers, addUserToSheet, updateUserRow } from "../google/sheets/dictionaries.js";
@@ -47,7 +47,7 @@ async function openMenu(bot: TelegramBot, chatId: number) {
   s.mode = "MENU";
   delete s.flow;
   s.updatedAt = Date.now();
-  await showMainMenu(bot, chatId);
+  await sendAppWelcome(bot, chatId);
 }
 
 
@@ -126,7 +126,7 @@ export async function onStart(bot: TelegramBot, msg: TelegramBot.Message) {
         tgId: user.id,
         hasFlows: Boolean((s as any).flows && Object.keys((s as any).flows).length),
       });
-      await showMainMenu(bot, chatId);
+      await sendAppWelcome(bot, chatId);
       return;
     }
 
