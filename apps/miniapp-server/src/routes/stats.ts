@@ -124,11 +124,15 @@ statsRouter.get("/range", async (req, res) => {
     return { date: e.date, carId: e.carId, employeeIds, ...payload };
   });
 
-  // (date, objectId) pairs this foreman actually submitted -- timesheetEntries
-  // has no foremanTgId column (an employee can only be one place at a time,
-  // so it's a single shared record), so this is how we scope it to "mine".
-  const myDateObjectKeys = new Set<string>();
-  for (const e of parsedEvents) for (const o of e.objects ?? []) myDateObjectKeys.add(`${e.date}|${o.objectId}`);
+  // (date, employeeId) pairs this foreman actually submitted a trip for --
+  // timesheetEntries has no foremanTgId column (an employee can only be one
+  // place at a time, so it's a single shared record per date+object), so
+  // this is how we scope it to "mine". Keyed by employee, not just
+  // date+objectId: two different foremen can each submit to the SAME object
+  // on the SAME date with different crews, and a date+objectId-only key
+  // would leak the other foreman's employees' hours into this one's totals.
+  const myDateEmployeeKeys = new Set<string>();
+  for (const e of parsedEvents) for (const empId of e.employeeIds) myDateEmployeeKeys.add(`${e.date}|${empId}`);
 
   type ObjAgg = {
     objectId: string;
@@ -177,7 +181,7 @@ statsRouter.get("/range", async (req, res) => {
   }
 
   for (const t of timesheetRows) {
-    if (!myDateObjectKeys.has(`${t.date}|${t.objectId}`)) continue;
+    if (!myDateEmployeeKeys.has(`${t.date}|${t.employeeId}`)) continue;
     const agg = getObjAgg(t.objectId, objectNameById.get(t.objectId) ?? t.objectId);
     const emp = agg.employees.get(t.employeeId) ?? { employeeName: t.employeeName, hours: 0, pay: 0 };
     emp.hours += t.hours ?? 0;

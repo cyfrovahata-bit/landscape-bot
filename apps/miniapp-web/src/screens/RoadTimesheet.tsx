@@ -494,12 +494,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // not only once both are. Requiring both meant picking a car and stopping
   // right there (before choosing people) never actually reserved the car at
   // all -- it just sat in local state, invisible to every other foreman.
-  async function reserveIfPossible() {
-    if (!carId && !employeeIds.length) return;
+  // Returns false on a 409 conflict (car/person taken by another foreman in
+  // the meantime) so callers can stop the wizard from advancing instead of
+  // just showing the error text underneath a screen the user already left.
+  async function reserveIfPossible(): Promise<boolean> {
+    if (!carId && !employeeIds.length) return true;
     try {
       await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds });
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      haptic("error");
+      return false;
     }
   }
 
@@ -1780,7 +1786,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <MainButton
             text={uploadingPhoto ? "Завантаження…" : "Зберегти"}
             onClick={async () => {
-              await reserveIfPossible();
+              if (!(await reserveIfPossible())) return;
               logChange(`Авто: ${cars.find((c) => c.id === carId)?.name ?? carId}, одометр ${odoStart} км`);
               setStep(editReturnStep);
               setEditReturnStep("HUB");
@@ -1908,7 +1914,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <MainButton
                 text="Зберегти"
                 onClick={async () => {
-                  await reserveIfPossible();
+                  if (!(await reserveIfPossible())) return;
                   logChange(`Люди оновлено: ${employeeIds.length}`);
                   setStep(editReturnStep);
                   setEditReturnStep("HUB");
@@ -2569,7 +2575,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "AT_OBJECT" && atObjectId && (
         <>
           {(() => {
-            const plan = currentAtPlan()!;
+            const plan = currentAtPlan();
+            if (!plan) {
+              // The object this screen was open on got removed/moved elsewhere
+              // (e.g. a bulk "move brigade" action) while it was up -- bail to
+              // the route list instead of crashing on a missing plan.
+              return (
+                <>
+                  <div className="empty-state">Обʼєкт більше не в маршруті.</div>
+                  <div style={{ padding: "0 16px 8px", textAlign: "center" }}>
+                    <button className="back-btn" onClick={() => setStep("DRIVE")}>← До маршруту</button>
+                  </div>
+                </>
+              );
+            }
             const openSessions = plan.sessions.filter((s) => !s.endedAt);
             const openSessionIds = new Set(openSessions.map((s) => s.employeeId));
             const everSessionIds = new Set(plan.sessions.map((s) => s.employeeId));

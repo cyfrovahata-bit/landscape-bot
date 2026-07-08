@@ -254,6 +254,65 @@ async function findCarConflict(tx: LockedTx, date: string, carId: string, myFore
   return !CAR_RELEASE_TYPES.includes(latest.type);
 }
 
+/** True if `myForemanTgId` is the one currently holding the reservation on
+ * `carId` (their own RTS_RESERVE_CAR is the latest event, not yet released
+ * by anyone) -- used by POST /reserve/release so a foreman can only cancel a
+ * reservation they actually still hold, never one belonging to someone else
+ * (which would otherwise let a stale/buggy client "free" another foreman's
+ * active car out from under them). Unlike findCarConflict, this does NOT
+ * exclude the caller's own events -- it's asking "is the latest event MINE",
+ * not "does someone ELSE have it". */
+async function callerHoldsCar(tx: LockedTx, date: string, carId: string, myForemanTgId: number): Promise<boolean> {
+  const events = await tx
+    .select()
+    .from(schema.events)
+    .where(
+      and(
+        eq(schema.events.date, date),
+        eq(schema.events.carId, carId),
+        inArray(schema.events.type, ["RTS_RESERVE_CAR", ...CAR_RELEASE_TYPES]),
+      ),
+    );
+
+  let latest: { type: string; ts: Date; foremanTgId: number } | null = null;
+  for (const e of events) {
+    if (!latest || e.ts > latest.ts) latest = { type: e.type, ts: e.ts, foremanTgId: Number(e.foremanTgId) };
+  }
+  return !!latest && latest.foremanTgId === myForemanTgId && !CAR_RELEASE_TYPES.includes(latest.type);
+}
+
+/** Same idea as callerHoldsCar, but for a list of employees -- returns only
+ * the subset `myForemanTgId` is currently the one holding (their own
+ * RTS_RESERVE_PEOPLE is the latest event for that employee, not yet
+ * released). Used by POST /reserve/release so a foreman can't cancel
+ * another foreman's crew reservation. */
+async function employeesHeldByCaller(tx: LockedTx, date: string, employeeIds: string[], myForemanTgId: number): Promise<string[]> {
+  if (!employeeIds.length) return [];
+  const events = await tx
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", ...PEOPLE_RELEASE_TYPES])));
+
+  const latestByEmployee = new Map<string, { type: string; ts: Date; foremanTgId: number }>();
+  for (const e of events) {
+    let ids: string[] = [];
+    try {
+      ids = JSON.parse(e.employeeIds ?? "[]");
+    } catch {
+      ids = [];
+    }
+    for (const id of ids) {
+      const cur = latestByEmployee.get(id);
+      if (!cur || e.ts > cur.ts) latestByEmployee.set(id, { type: e.type, ts: e.ts, foremanTgId: Number(e.foremanTgId) });
+    }
+  }
+
+  return employeeIds.filter((id) => {
+    const v = latestByEmployee.get(id);
+    return !!v && v.foremanTgId === myForemanTgId && !PEOPLE_RELEASE_TYPES.includes(v.type);
+  });
+}
+
 // A "leg" of the day: one car+crew+route submission. Most days have exactly
 // one (tripSeq 0), but a foreman can return to base and head out again with
 // a different car/crew/objects (e.g. before-lunch vs after-lunch) -- each of
@@ -275,8 +334,8 @@ type StoredTrip = {
  * (latest event wins within a tripSeq -- same edit-and-resubmit rule that
  * used to apply to the whole day). Submissions saved before multi-trip
  * support existed have no tripSeq in their payload and are treated as leg 0. */
-async function fetchAllTrips(date: string, foremanTgId: number): Promise<StoredTrip[]> {
-  const rows = await db
+async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof db | LockedTx = db): Promise<StoredTrip[]> {
+  const rows = await executor
     .select()
     .from(schema.events)
     .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")))
@@ -390,34 +449,11 @@ roadTimesheetRouter.post("/", async (req, res) => {
 
   const foremanTgId = req.user!.tgId;
 
-  // Read-only work (dictionary lookups, payroll math, diffing against the
-  // previous submission) happens before the lock so we hold it -- and block
-  // other foremen's reservation calls -- for as little time as possible.
   // This leg's own estimate (its own km/tripClass/fund), shown on its own
-  // card -- separate from the day-combined totals computed below.
+  // card -- separate from the day-combined totals computed below. Read-only
+  // dictionary lookups, doesn't depend on any other foreman's/leg's state,
+  // so it's fine to compute before the lock.
   const legResult = await computePayroll({ odoStart, odoEnd, employeeIds, objects });
-
-  const allTripsBefore = await fetchAllTrips(date, foremanTgId);
-  // No tripSeq from the client = a brand-new leg (the "Розпочати нову
-  // поїздку" button never sends one); an explicit tripSeq means "resubmit/
-  // edit that specific leg", scoped so it never touches other legs' data.
-  const effectiveTripSeq = tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
-  const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
-
-  const oldMergedObjects = mergeObjects(allTripsBefore.map((t) => t.objects));
-  const tripsAfter = [
-    ...allTripsBefore.filter((t) => t.tripSeq !== effectiveTripSeq),
-    { tripSeq: effectiveTripSeq, eventId: "", carId, employeeIds: employeeIds ?? [], objects, odoStart, odoEnd },
-  ];
-  const newMergedObjects = mergeObjects(tripsAfter.map((t) => t.objects));
-  const unionEmployeeIds = [...new Set(tripsAfter.flatMap((t) => t.employeeIds))];
-  const totalKm = tripsAfter.reduce((acc, t) => {
-    const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
-    return acc + (Number.isFinite(legKm) ? legKm : 0);
-  }, 0);
-  // Day-combined totals: what actually gets written to reports/timesheet/
-  // allowances below, since those tables have no per-trip dimension.
-  const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: newMergedObjects });
 
   // The idempotency key (generated once per "Відправити" tap on the client,
   // reused across its own network retries) makes the eventId stable across
@@ -426,6 +462,18 @@ roadTimesheetRouter.post("/", async (req, res) => {
   // to the audit trail. A genuinely new submission later gets a new key.
   const safeKey = idempotencyKey && /^[a-zA-Z0-9_-]{8,80}$/.test(idempotencyKey) ? idempotencyKey : null;
   const eventId = safeKey ? `RTS_${safeKey}` : makeEventId("RTS");
+
+  // Everything below reads and writes this foreman's own set of trips for
+  // the day, so it all has to happen inside the SAME locked transaction --
+  // reading "trips so far" outside the lock let two near-simultaneous
+  // submissions (a double-tap, or a lost response + automatic client retry)
+  // both compute the same "next tripSeq" from the same stale snapshot, with
+  // the second one silently clobbering/reconciling against the first's
+  // just-written data instead of being serialized against it.
+  let effectiveTripSeq = 0;
+  let totalKm = 0;
+  let combined!: Awaited<ReturnType<typeof computePayroll>>;
+  let newMergedObjectsForNotify: ObjectInput[] = [];
 
   try {
     await withLock(`reserve:${date}`, async (tx) => {
@@ -440,6 +488,29 @@ roadTimesheetRouter.post("/", async (req, res) => {
       if (employeeConflicts.length) {
         throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
       }
+
+      const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
+      // No tripSeq from the client = a brand-new leg (the "Розпочати нову
+      // поїздку" button never sends one); an explicit tripSeq means "resubmit/
+      // edit that specific leg", scoped so it never touches other legs' data.
+      effectiveTripSeq = tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
+      const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
+
+      const oldMergedObjects = mergeObjects(allTripsBefore.map((t) => t.objects));
+      const tripsAfter = [
+        ...allTripsBefore.filter((t) => t.tripSeq !== effectiveTripSeq),
+        { tripSeq: effectiveTripSeq, eventId: "", carId, employeeIds: employeeIds ?? [], objects, odoStart, odoEnd },
+      ];
+      const newMergedObjects = mergeObjects(tripsAfter.map((t) => t.objects));
+      const unionEmployeeIds = [...new Set(tripsAfter.flatMap((t) => t.employeeIds))];
+      totalKm = tripsAfter.reduce((acc, t) => {
+        const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
+        return acc + (Number.isFinite(legKm) ? legKm : 0);
+      }, 0);
+      // Day-combined totals: what actually gets written to reports/timesheet/
+      // allowances below, since those tables have no per-trip dimension.
+      combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: newMergedObjects });
+      newMergedObjectsForNotify = newMergedObjects;
 
       await writeOdometerDay(
         { date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto },
@@ -550,6 +621,30 @@ roadTimesheetRouter.post("/", async (req, res) => {
             );
           }
           await writeDayStatus({ date, objectId: prevObj.objectId, foremanTgId, status: "СКАСОВАНО" }, tx);
+        } else {
+          // The object itself is still in the day, but an employee who had
+          // hours there before might have been dropped from it in this
+          // resubmit (their session removed while others at the same object
+          // stayed) -- the main write loop above only writes hours for
+          // employees CURRENTLY at the object, so a removed one's old row
+          // would otherwise never get zeroed and would keep inflating their
+          // pay/hours forever.
+          const currentHoursByEmployee = combined.perObjectHours.find((h) => h.objectId === prevObj.objectId)?.hoursByEmployee ?? new Map();
+          const prevEmployeeIds = new Set((prevObj.sessions ?? []).map((s) => s.employeeId));
+          const droppedEmployeeIds = [...prevEmployeeIds].filter((id) => !currentHoursByEmployee.has(id));
+          if (droppedEmployeeIds.length) {
+            await writeTimesheetRows(
+              droppedEmployeeIds.map((employeeId) => ({
+                date,
+                objectId: prevObj.objectId,
+                employeeId,
+                employeeName: combined.employeeById.get(employeeId)?.name ?? employeeId,
+                hours: 0,
+                source: "ROAD_СКАСОВАНО",
+              })),
+              tx,
+            );
+          }
         }
       }
 
@@ -612,7 +707,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
       `👤 Бригадир: ${req.user!.pib}`,
       `📅 Дата: ${date}`,
       `🚗 ${totalKm} км · клас ${combined.tripClass}`,
-      `📍 Обʼєкти: ${newMergedObjects.map((o) => o.objectName).join(", ") || "—"}`,
+      `📍 Обʼєкти: ${newMergedObjectsForNotify.map((o) => o.objectName).join(", ") || "—"}`,
       `💰 Фонд: ${Math.round(combinedFund * 100) / 100} грн`,
     ].join("\n"),
     { date, foremanTgId },
@@ -706,6 +801,11 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
  * staying locked with nothing to ever release them (a plain client-side
  * reset never touches the server-side RTS_RESERVE_CAR/RTS_RESERVE_PEOPLE
  * events, so without this the reservation would otherwise last forever).
+ * Only cancels a car/employee the CALLER is actually the current holder of
+ * (checked under the same per-date lock used by /reserve and POST / to keep
+ * it atomic with any concurrent reservation) -- a stale client still holding
+ * an old carId/employeeIds after someone else has since taken it over must
+ * not be able to free that other foreman's active reservation.
  */
 roadTimesheetRouter.post("/reserve/release", async (req, res) => {
   const { date, carId, employeeIds } = req.body as { date: string; carId?: string; employeeIds?: string[] };
@@ -715,26 +815,36 @@ roadTimesheetRouter.post("/reserve/release", async (req, res) => {
   }
   const foremanTgId = req.user!.tgId;
 
-  if (carId) {
-    await writeEvent({
-      eventId: makeEventId("RTSRSV"),
-      status: "АКТИВНА",
-      date,
-      foremanTgId,
-      type: "RTS_RESERVE_CANCEL",
-      carId,
-    });
-  }
-  if (employeeIds?.length) {
-    await writeEvent({
-      eventId: makeEventId("RTSRSV"),
-      status: "АКТИВНА",
-      date,
-      foremanTgId,
-      type: "RTS_RESERVE_CANCEL",
-      employeeIds: JSON.stringify(employeeIds),
-    });
-  }
+  await withLock(`reserve:${date}`, async (tx) => {
+    if (carId && (await callerHoldsCar(tx, date, carId, foremanTgId))) {
+      await writeEvent(
+        {
+          eventId: makeEventId("RTSRSV"),
+          status: "АКТИВНА",
+          date,
+          foremanTgId,
+          type: "RTS_RESERVE_CANCEL",
+          carId,
+        },
+        tx,
+      );
+    }
+
+    const mineEmployeeIds = await employeesHeldByCaller(tx, date, employeeIds ?? [], foremanTgId);
+    if (mineEmployeeIds.length) {
+      await writeEvent(
+        {
+          eventId: makeEventId("RTSRSV"),
+          status: "АКТИВНА",
+          date,
+          foremanTgId,
+          type: "RTS_RESERVE_CANCEL",
+          employeeIds: JSON.stringify(mineEmployeeIds),
+        },
+        tx,
+      );
+    }
+  });
 
   res.json({ ok: true });
 });
