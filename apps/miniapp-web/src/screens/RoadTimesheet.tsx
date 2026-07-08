@@ -1223,7 +1223,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     READY: "HUB",
     RETURN_PICKUP: "DRIVE",
     RETURN: "RETURN_PICKUP",
-    DONE: "REVIEW",
+    // DONE has no entry here on purpose: it's now the day's landing screen
+    // (shown on every re-entry once something's submitted, not just right
+    // after a fresh save), so back should exit to the main menu like HUB
+    // does -- not detour through REVIEW, which is only reachable via each
+    // trip card's own "✏️ Редагувати" button.
   };
   // PLAN_VOLUMES can be reached from more than one place (finishing a shift
   // at the object, or catching up on unfilled volumes from RETURN), so its
