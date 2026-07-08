@@ -265,7 +265,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [expandedReviewObjectId, setExpandedReviewObjectId] = useState<string | null>(null);
   const [reviewPeopleExpanded, setReviewPeopleExpanded] = useState(false);
   const [reviewWorkersExpanded, setReviewWorkersExpanded] = useState(false);
-  const [expandedDoneObjectId, setExpandedDoneObjectId] = useState<string | null>(null);
   const [reviewReturnStep, setReviewReturnStep] = useState<Step>("RETURN");
 
   // --- drive ---
@@ -532,28 +531,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }));
   }
 
-  // Works actually done at one object, summed across every submitted trip
-  // that touched it -- mirrors the server's own merge, just for display on
-  // the day-combined "Фонд по обʼєктах" section.
-  function combinedWorksForObject(objectId: string) {
-    const byWorkId = new Map<string, { workId: string; workName: string; volume?: string | number; unit: string }>();
-    for (const trip of submittedTrips) {
-      const obj = trip.objects.find((o) => o.objectId === objectId);
-      for (const w of obj?.works ?? []) {
-        const unit = works.find((x) => x.id === w.workId)?.unit || "шт";
-        const existing = byWorkId.get(w.workId);
-        if (!existing) {
-          byWorkId.set(w.workId, { workId: w.workId, workName: w.workName, volume: w.volume, unit });
-          continue;
-        }
-        const a = Number(existing.volume);
-        const b = Number(w.volume);
-        existing.volume = Number.isFinite(a) && Number.isFinite(b) ? a + b : Number.isFinite(b) ? b : existing.volume;
-      }
-    }
-    return [...byWorkId.values()];
-  }
-
   // Brigadiers shouldn't see who-earned-what until an admin approves the
   // day -- masked=true swaps every money figure for "•••" (shape/roles/names
   // still visible so they can double-check the report itself). Shared by the
@@ -562,6 +539,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function renderFundBreakdown(masked: boolean) {
     if (!dayCombined) return null;
     const isMultiTrip = submittedTrips.length > 1;
+
+    const payByEmployee = new Map<string, number>();
+    dayCombined.salaryPacks.forEach((pack) =>
+      pack.rows.forEach((r) => payByEmployee.set(r.employeeId, (payByEmployee.get(r.employeeId) ?? 0) + r.pay)),
+    );
+    const dayEmployeeIds = [...new Set(submittedTrips.flatMap((t) => t.employeeIds))];
+    const grandTotal = dayCombined.salaryPacks.reduce((a, pack) => a + pack.objectTotal, 0) + dayCombined.roadAllowance.total;
+
     return (
       <>
         <div className="list" style={{ marginTop: 8 }}>
@@ -571,51 +556,28 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           </div>
         </div>
 
-        <div className="section-title">Фонд по обʼєктах</div>
-        {dayCombined.salaryPacks.map((pack) => {
-          const expanded = expandedDoneObjectId === pack.objectId;
-          return (
-            <div key={pack.objectId} className="list" style={{ marginTop: 8 }}>
-              <button className="cell" onClick={() => setExpandedDoneObjectId(expanded ? null : pack.objectId)}>
-                <span className="cell-title">
-                  {expanded ? "▾" : "▸"} 📍 {pack.objectName}
+        <div className="section-title">Виплати</div>
+        <div className="list">
+          {dayEmployeeIds.map((id) => {
+            const total = Math.round(((payByEmployee.get(id) ?? 0) + dayCombined.roadAllowance.perPerson) * 100) / 100;
+            return (
+              <div key={id} className="cell" style={{ cursor: "default" }}>
+                <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                  {employeeName(id)}
                 </span>
-                <span className="badge ok">{masked ? "🔒 •••" : `${pack.objectTotal} грн`}</span>
-              </button>
-              {expanded &&
-                (() => {
-                  const objectWorks = combinedWorksForObject(pack.objectId);
-                  return (
-                    <div style={{ padding: "0 16px 12px" }} className="hint">
-                      <div style={{ fontWeight: 600 }}>🛠 Роботи</div>
-                      {objectWorks.length
-                        ? objectWorks.map((w) => (
-                            <div key={w.workId}>
-                              {w.workName}
-                              {w.volume && w.volume !== "?" ? `: ${w.volume} ${w.unit}` : ""}
-                            </div>
-                          ))
-                        : "— без робіт —"}
-                      <div style={{ fontWeight: 600, marginTop: 8 }}>👥 Люди та нарахування</div>
-                      {masked ? (
-                        <div>🔒 Буде видно після затвердження адміністратором</div>
-                      ) : (
-                        <>
-                          {pack.rows.map((r) => (
-                            <div key={r.employeeId}>
-                              {r.employeeName}: {r.pay} грн
-                            </div>
-                          ))}
-                          {!pack.rows.length && "— без нарахувань —"}
-                          {pack.companyPay > 0 && <div style={{ marginTop: 4 }}>🏢 Фірма: {pack.companyPay} грн</div>}
-                        </>
-                      )}
-                    </div>
-                  );
-                })()}
-            </div>
-          );
-        })}
+                <span className="cell-sub">{masked ? "🔒 •••" : `${total} ₴`}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="list" style={{ marginTop: 8 }}>
+          <div className="cell" style={{ cursor: "default" }}>
+            <span className="cell-title">💰 Загальна сума</span>
+            <span className="cell-sub">{masked ? "🔒 •••" : `${Math.round(grandTotal * 100) / 100} ₴`}</span>
+          </div>
+        </div>
       </>
     );
   }
