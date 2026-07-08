@@ -466,8 +466,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     }
   }
 
+  // Called after ODO_START (car picked, people maybe not yet) and again
+  // after PICK_PEOPLE (now both are known) -- the car and people halves are
+  // independent server-side, so this must fire as soon as EITHER is ready,
+  // not only once both are. Requiring both meant picking a car and stopping
+  // right there (before choosing people) never actually reserved the car at
+  // all -- it just sat in local state, invisible to every other foreman.
   async function reserveIfPossible() {
-    if (!carId || !employeeIds.length) return;
+    if (!carId && !employeeIds.length) return;
     try {
       await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds });
     } catch (e) {
