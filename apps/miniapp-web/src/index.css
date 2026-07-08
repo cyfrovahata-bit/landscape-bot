@@ -552,3 +552,97 @@ body {
   background: var(--tg-button);
   color: var(--tg-button-text);
 }
+
+/* ---------- Main menu (home screen) ---------- */
+
+.menu-header {
+  padding: 32px 20px 8px;
+  text-align: center;
+}
+
+.menu-greeting-emoji {
+  font-size: 40px;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.menu-header h1 {
+  font-size: 22px;
+  margin: 0 0 4px;
+}
+
+.menu-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 16px 16px 12px;
+}
+
+.menu-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 16px;
+  border-radius: 18px;
+  border: none;
+  background: var(--tg-secondary-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 1px 8px rgba(0, 0, 0, 0.04);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.menu-card:active {
+  transform: scale(0.96);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.menu-card-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+}
+
+.menu-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.menu-card-badge {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+
+.menu-card .accent-blue {
+  background: rgba(0, 122, 255, 0.14);
+}
+
+.menu-card .accent-green {
+  background: rgba(52, 199, 89, 0.16);
+}
+
+.menu-card .accent-orange {
+  background: rgba(255, 149, 0, 0.16);
+}
+
+.menu-card .accent-purple {
+  background: rgba(88, 86, 214, 0.16);
+}
+
+.menu-card .accent-teal {
+  background: rgba(50, 173, 230, 0.16);
+}
+
+.menu-card .accent-gray {
+  background: rgba(142, 142, 147, 0.16);
+}

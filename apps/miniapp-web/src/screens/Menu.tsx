@@ -1,30 +1,45 @@
 export type Screen = "menu" | "logistics" | "roadTimesheet" | "materials" | "stats" | "tools" | "approval";
 
-const ITEMS: { screen: Screen; icon: string; title: string; ready: boolean }[] = [
-  { screen: "logistics", icon: "🚚", title: "Логістика", ready: true },
-  { screen: "roadTimesheet", icon: "🚗", title: "Дорожній табель", ready: true },
-  { screen: "materials", icon: "🧱", title: "Матеріали", ready: true },
-  { screen: "stats", icon: "📊", title: "Статистика", ready: true },
-  { screen: "tools", icon: "🧰", title: "Інструменти", ready: false },
-  { screen: "approval", icon: "✅", title: "Затвердження", ready: false },
+type Accent = "blue" | "green" | "orange" | "purple" | "teal" | "gray";
+
+const ITEMS: { screen: Screen; icon: string; title: string; ready: boolean; accent: Accent }[] = [
+  { screen: "logistics", icon: "🚚", title: "Логістика", ready: true, accent: "blue" },
+  { screen: "roadTimesheet", icon: "🚗", title: "Дорожній табель", ready: true, accent: "green" },
+  { screen: "materials", icon: "🧱", title: "Матеріали", ready: true, accent: "orange" },
+  { screen: "stats", icon: "📊", title: "Статистика", ready: true, accent: "purple" },
+  { screen: "tools", icon: "🧰", title: "Інструменти", ready: false, accent: "teal" },
+  { screen: "approval", icon: "✅", title: "Затвердження", ready: false, accent: "gray" },
 ];
 
+// A bit of warmth on the one screen every user sees every single time --
+// doesn't need real data, just the time of day already known client-side.
+function greeting(): { emoji: string; text: string } {
+  const hour = new Date().getHours();
+  if (hour < 6) return { emoji: "🌙", text: "Доброї ночі" };
+  if (hour < 12) return { emoji: "🌅", text: "Доброго ранку" };
+  if (hour < 18) return { emoji: "☀️", text: "Доброго дня" };
+  return { emoji: "🌆", text: "Доброго вечора" };
+}
+
 export function Menu({ userName, onNavigate }: { userName?: string; onNavigate: (s: Screen) => void }) {
+  const { emoji, text } = greeting();
   return (
     <div>
-      <div className="header">
-        <h1>👋 {userName ? userName : "Вітаємо"}</h1>
+      <div className="menu-header">
+        <div className="menu-greeting-emoji">{emoji}</div>
+        <h1>
+          {text}
+          {userName ? `, ${userName}` : ""}
+        </h1>
         <div className="hint">Оберіть розділ</div>
       </div>
 
-      <div className="list">
+      <div className="menu-grid">
         {ITEMS.map((item) => (
-          <button key={item.screen} className="cell" onClick={() => onNavigate(item.screen)}>
-            <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="cell-icon">{item.icon}</span>
-              <span className="cell-title">{item.title}</span>
-            </span>
-            {!item.ready && <span className="badge">Скоро</span>}
+          <button key={item.screen} className="menu-card" onClick={() => onNavigate(item.screen)}>
+            {!item.ready && <span className="badge menu-card-badge">Скоро</span>}
+            <span className={`menu-card-icon accent-${item.accent}`}>{item.icon}</span>
+            <span className="menu-card-title">{item.title}</span>
           </button>
         ))}
       </div>
