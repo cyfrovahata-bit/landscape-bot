@@ -88,8 +88,14 @@ type ObjectInput = {
  * mockup's step 3.13) and the real POST / save (which additionally persists
  * everything). Never mutates the database.
  */
-async function computePayroll(params: { odoStart: number; odoEnd: number; employeeIds: string[]; objects: ObjectInput[] }) {
-  const { odoStart, odoEnd, employeeIds, objects } = params;
+async function computePayroll(params: {
+  odoStart: number;
+  odoEnd: number;
+  employeeIds: string[];
+  objects: ObjectInput[];
+  selfTransportIds?: string[];
+}) {
+  const { odoStart, odoEnd, employeeIds, objects, selfTransportIds = [] } = params;
 
   const km = Number.isFinite(odoEnd) && Number.isFinite(odoStart) ? odoEnd - odoStart : undefined;
   const tripClass: "S" | "M" | "L" | "XL" =
@@ -154,7 +160,10 @@ async function computePayroll(params: { odoStart: number; odoEnd: number; employ
     settingRows.length && Number.isFinite(Number(settingRows[0].value))
       ? Number(settingRows[0].value)
       : DEFAULT_ROAD_ALLOWANCE_BY_CLASS[tripClass];
-  const riders = employeeIds ?? [];
+  // Anyone who showed up under their own transport (see /reserve and the
+  // AT_OBJECT "Приїхали самі" action) rides free of the travel allowance --
+  // they still split the object's work pay like everyone else, just not this.
+  const riders = (employeeIds ?? []).filter((id) => !selfTransportIds.includes(id));
   const perPerson = riders.length ? roadAllowanceTotal / riders.length : 0;
 
   return {
@@ -175,13 +184,14 @@ async function computePayroll(params: { odoStart: number; odoEnd: number; employ
  * (mockup step 3.13) before they commit to "Відправити на підтвердження".
  */
 roadTimesheetRouter.post("/preview", async (req, res) => {
-  const { odoStart, odoEnd, employeeIds, objects } = req.body as {
+  const { odoStart, odoEnd, employeeIds, objects, selfTransportIds } = req.body as {
     odoStart: number;
     odoEnd: number;
     employeeIds: string[];
     objects: ObjectInput[];
+    selfTransportIds?: string[];
   };
-  const result = await computePayroll({ odoStart, odoEnd, employeeIds, objects });
+  const result = await computePayroll({ odoStart, odoEnd, employeeIds, objects, selfTransportIds });
   res.json({
     km: result.km,
     tripClass: result.tripClass,
@@ -325,6 +335,7 @@ type StoredTrip = {
   status: string;
   carId: string | null;
   employeeIds: string[];
+  selfTransportIds: string[];
   objects: ObjectInput[];
   odoStart?: number;
   odoEnd?: number;
@@ -345,7 +356,15 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
 
   const byTripSeq = new Map<number, StoredTrip>();
   for (const row of rows) {
-    let payload: { tripSeq?: number; objects?: ObjectInput[]; odoStart?: number; odoEnd?: number; km?: number; tripClass?: string } = {};
+    let payload: {
+      tripSeq?: number;
+      objects?: ObjectInput[];
+      odoStart?: number;
+      odoEnd?: number;
+      km?: number;
+      tripClass?: string;
+      selfTransportIds?: string[];
+    } = {};
     try {
       payload = JSON.parse(row.payload ?? "{}");
     } catch {
@@ -365,6 +384,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
       status: row.status,
       carId: row.carId,
       employeeIds,
+      selfTransportIds: payload.selfTransportIds ?? [],
       objects: payload.objects ?? [],
       odoStart: payload.odoStart,
       odoEnd: payload.odoEnd,
@@ -431,18 +451,20 @@ function mergeObjects(objectsByLeg: ObjectInput[][]): ObjectInput[] {
  * last submission.
  */
 roadTimesheetRouter.post("/", async (req, res) => {
-  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects, idempotencyKey, tripSeq } = req.body as {
-    date: string;
-    carId: string;
-    odoStart: number;
-    odoStartPhoto?: string;
-    odoEnd: number;
-    odoEndPhoto?: string;
-    employeeIds: string[];
-    objects: ObjectInput[];
-    idempotencyKey?: string;
-    tripSeq?: number;
-  };
+  const { date, carId, odoStart, odoStartPhoto, odoEnd, odoEndPhoto, employeeIds, objects, idempotencyKey, tripSeq, selfTransportIds } =
+    req.body as {
+      date: string;
+      carId: string;
+      odoStart: number;
+      odoStartPhoto?: string;
+      odoEnd: number;
+      odoEndPhoto?: string;
+      employeeIds: string[];
+      objects: ObjectInput[];
+      idempotencyKey?: string;
+      tripSeq?: number;
+      selfTransportIds?: string[];
+    };
 
   if (!date || !carId || !Array.isArray(objects) || !objects.length || !Array.isArray(employeeIds) || !employeeIds.length) {
     res.status(400).json({ error: "date, carId, at least one employee and at least one object are required" });
@@ -455,7 +477,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
   // card -- separate from the day-combined totals computed below. Read-only
   // dictionary lookups, doesn't depend on any other foreman's/leg's state,
   // so it's fine to compute before the lock.
-  const legResult = await computePayroll({ odoStart, odoEnd, employeeIds, objects });
+  const legResult = await computePayroll({ odoStart, odoEnd, employeeIds, objects, selfTransportIds });
 
   // The idempotency key (generated once per "Відправити" tap on the client,
   // reused across its own network retries) makes the eventId stable across
@@ -501,17 +523,33 @@ roadTimesheetRouter.post("/", async (req, res) => {
       const oldMergedObjects = mergeObjects(allTripsBefore.map((t) => t.objects));
       const tripsAfter = [
         ...allTripsBefore.filter((t) => t.tripSeq !== effectiveTripSeq),
-        { tripSeq: effectiveTripSeq, eventId: "", carId, employeeIds: employeeIds ?? [], objects, odoStart, odoEnd },
+        {
+          tripSeq: effectiveTripSeq,
+          eventId: "",
+          carId,
+          employeeIds: employeeIds ?? [],
+          selfTransportIds: selfTransportIds ?? [],
+          objects,
+          odoStart,
+          odoEnd,
+        },
       ];
       const newMergedObjects = mergeObjects(tripsAfter.map((t) => t.objects));
       const unionEmployeeIds = [...new Set(tripsAfter.flatMap((t) => t.employeeIds))];
+      const unionSelfTransportIds = [...new Set(tripsAfter.flatMap((t) => t.selfTransportIds ?? []))];
       totalKm = tripsAfter.reduce((acc, t) => {
         const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
         return acc + (Number.isFinite(legKm) ? legKm : 0);
       }, 0);
       // Day-combined totals: what actually gets written to reports/timesheet/
       // allowances below, since those tables have no per-trip dimension.
-      combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: newMergedObjects });
+      combined = await computePayroll({
+        odoStart: 0,
+        odoEnd: totalKm,
+        employeeIds: unionEmployeeIds,
+        objects: newMergedObjects,
+        selfTransportIds: unionSelfTransportIds,
+      });
       newMergedObjectsForNotify = newMergedObjects;
 
       await writeOdometerDay(
@@ -654,9 +692,13 @@ roadTimesheetRouter.post("/", async (req, res) => {
       // based on the day's total km across every car used, split evenly
       // among everyone who rode along in ANY leg today (not just those who
       // worked) -- matches the bot's single-allowance-per-day model.
-      if (unionEmployeeIds.length) {
+      // Anyone who showed up under their own transport doesn't get a travel
+      // allowance row at all (not even a zero one) -- they still get their
+      // work pay via the reports/timesheet writes above.
+      const allowanceEligibleIds = unionEmployeeIds.filter((id) => !unionSelfTransportIds.includes(id));
+      if (allowanceEligibleIds.length) {
         await writeAllowanceRows(
-          unionEmployeeIds.map((employeeId) => ({
+          allowanceEligibleIds.map((employeeId) => ({
             date,
             foremanTgId,
             type: "ROAD_TRIP",
@@ -687,6 +729,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
             km: legResult.km,
             tripClass: legResult.tripClass,
             objects,
+            selfTransportIds: selfTransportIds ?? [],
             salaryPacks: legResult.salaryPacks,
             roadAllowance: legResult.roadAllowance,
           }),
@@ -1059,11 +1102,18 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
 
   const mergedObjects = mergeObjects(trips.map((t) => t.objects));
   const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+  const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
   const totalKm = trips.reduce((acc, t) => {
     const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
     return acc + (Number.isFinite(legKm) ? legKm : 0);
   }, 0);
-  const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
+  const combined = await computePayroll({
+    odoStart: 0,
+    odoEnd: totalKm,
+    employeeIds: unionEmployeeIds,
+    objects: mergedObjects,
+    selfTransportIds: unionSelfTransportIds,
+  });
 
   res.json({
     found: true,
@@ -1075,6 +1125,7 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
         status: t.status,
         carId: t.carId,
         employeeIds: t.employeeIds,
+        selfTransportIds: t.selfTransportIds,
         odoStart: t.odoStart ?? odo?.startValue ?? null,
         odoStartPhoto: odo?.startPhoto ?? null,
         odoEnd: t.odoEnd ?? odo?.endValue ?? null,
@@ -1186,11 +1237,18 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
       const trips = await fetchAllTrips(r.date, foremanTgId);
       const mergedObjects = mergeObjects(trips.map((t) => t.objects));
       const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+      const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
       const totalKm = trips.reduce((acc, t) => {
         const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
         return acc + (Number.isFinite(legKm) ? legKm : 0);
       }, 0);
-      const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
+      const combined = await computePayroll({
+        odoStart: 0,
+        odoEnd: totalKm,
+        employeeIds: unionEmployeeIds,
+        objects: mergedObjects,
+        selfTransportIds: unionSelfTransportIds,
+      });
       return {
         date: r.date,
         foremanTgId,
@@ -1206,6 +1264,7 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
           works: (o.works ?? []).map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume })),
         })),
         employeeIds: unionEmployeeIds,
+        selfTransportIds: unionSelfTransportIds,
       };
     }),
   );
@@ -1252,11 +1311,18 @@ async function exportApprovedDayToAccounting(date: string, foremanTgId: number):
     const trips = await fetchAllTrips(date, foremanTgId);
     const mergedObjects = mergeObjects(trips.map((t) => t.objects));
     const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+    const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
     const totalKm = trips.reduce((acc, t) => {
       const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
       return acc + (Number.isFinite(legKm) ? legKm : 0);
     }, 0);
-    const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
+    const combined = await computePayroll({
+      odoStart: 0,
+      odoEnd: totalKm,
+      employeeIds: unionEmployeeIds,
+      objects: mergedObjects,
+      selfTransportIds: unionSelfTransportIds,
+    });
 
     const workIds = [...new Set(mergedObjects.flatMap((o) => (o.works ?? []).map((w) => w.workId)))];
     const workRows = workIds.length ? await db.select().from(schema.works).where(inArray(schema.works.id, workIds)) : [];
@@ -1268,7 +1334,7 @@ async function exportApprovedDayToAccounting(date: string, foremanTgId: number):
       objects: mergedObjects,
       salaryPacks: combined.salaryPacks,
       roadAllowancePerPerson: combined.roadAllowance.perPerson,
-      unionEmployeeIds,
+      unionEmployeeIds: unionEmployeeIds.filter((id) => !unionSelfTransportIds.includes(id)),
       employeeNameById,
       tariffByWorkId,
       unitByWorkId,

@@ -16,6 +16,7 @@ type PendingItem = {
   salaryPacks: SalaryPack[];
   objects: PendingObject[];
   employeeIds: string[];
+  selfTransportIds: string[];
 };
 type PendingResponse = { items: PendingItem[]; reasons: Record<string, string> };
 
@@ -180,6 +181,7 @@ export function Approval({
                               {initials(emp?.name ?? id)}
                             </span>
                             <span className="hint">{emp?.name ?? id}</span>
+                            {it.selfTransportIds.includes(id) && <span className="badge">🚶 без доплати</span>}
                           </span>
                         );
                       })}

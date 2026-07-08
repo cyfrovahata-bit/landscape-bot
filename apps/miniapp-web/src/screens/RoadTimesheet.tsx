@@ -93,6 +93,7 @@ type SubmittedTrip = {
   status: string;
   carId: string | null;
   employeeIds: string[];
+  selfTransportIds?: string[];
   odoStart: number | null;
   odoStartPhoto: string | null;
   odoEnd: number | null;
@@ -127,6 +128,7 @@ type DraftShape = {
   odoEnd: string;
   odoEndPhoto: string | null;
   employeeIds: string[];
+  selfTransportIds: string[];
   plans: ObjPlan[];
   onboard: string[];
   tripStartedAt: string | null;
@@ -237,6 +239,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   // --- people / objects ---
   const [employeeIds, setEmployeeIds] = useState<string[]>([]);
+  // Subset of employeeIds who showed up under their own transport (see
+  // confirmAddArrived) -- excluded from the road/travel allowance split, but
+  // still counted like everyone else for the object work-pay split.
+  const [selfTransportIds, setSelfTransportIds] = useState<string[]>([]);
   const [expandedBrigadeId, setExpandedBrigadeId] = useState<string | null>(null);
   const [selectedPeopleExpanded, setSelectedPeopleExpanded] = useState(false);
   const [peopleSearch, setPeopleSearch] = useState("");
@@ -394,6 +400,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setOdoEnd(draft.odoEnd);
       setOdoEndPhoto(draft.odoEndPhoto);
       setEmployeeIds(draft.employeeIds);
+      setSelfTransportIds(draft.selfTransportIds ?? []);
       setPlans((draft.plans ?? []).map(normalizeDraftPlan));
       setOnboard(draft.onboard);
       setTripStartedAt(draft.tripStartedAt);
@@ -459,6 +466,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       odoEnd,
       odoEndPhoto,
       employeeIds,
+      selfTransportIds,
       plans,
       onboard,
       tripStartedAt,
@@ -477,6 +485,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     odoEnd,
     odoEndPhoto,
     employeeIds,
+    selfTransportIds,
     plans,
     onboard,
     tripStartedAt,
@@ -593,6 +602,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setOdoEnd("");
     setOdoEndPhoto(null);
     setEmployeeIds([]);
+    setSelfTransportIds([]);
     setPlans([]);
     setCoefs({});
     setOnboard([]);
@@ -643,6 +653,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       pack.rows.forEach((r) => payByEmployee.set(r.employeeId, (payByEmployee.get(r.employeeId) ?? 0) + r.pay)),
     );
     const dayEmployeeIds = [...new Set(submittedTrips.flatMap((t) => t.employeeIds))];
+    const daySelfTransportIds = new Set(submittedTrips.flatMap((t) => t.selfTransportIds ?? []));
     const grandTotal = dayCombined.salaryPacks.reduce((a, pack) => a + pack.objectTotal, 0) + dayCombined.roadAllowance.total;
 
     return (
@@ -657,12 +668,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <div className="section-title">Виплати</div>
         <div className="list">
           {dayEmployeeIds.map((id) => {
-            const total = Math.round(((payByEmployee.get(id) ?? 0) + dayCombined.roadAllowance.perPerson) * 100) / 100;
+            const gotAllowance = !daySelfTransportIds.has(id);
+            const total = Math.round(((payByEmployee.get(id) ?? 0) + (gotAllowance ? dayCombined.roadAllowance.perPerson : 0)) * 100) / 100;
             return (
               <div key={id} className="cell" style={{ cursor: "default" }}>
                 <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
                   {employeeName(id)}
+                  {!gotAllowance && <span className="badge">🚶 без доплати за дорогу</span>}
                 </span>
                 <span className="cell-sub">{masked ? "🔒 •••" : `${total} ₴`}</span>
               </div>
@@ -764,6 +777,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setOdoEnd(trip.odoEnd !== null ? String(trip.odoEnd) : "");
     setOdoEndPhoto(trip.odoEndPhoto);
     setEmployeeIds(trip.employeeIds);
+    setSelfTransportIds(trip.selfTransportIds ?? []);
     setOnboard(trip.employeeIds);
     const restoredPlans = objectsToPlans(trip.objects);
     setPlans(restoredPlans);
@@ -775,6 +789,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         odoStart: trip.odoStart ?? 0,
         odoEnd: trip.odoEnd ?? 0,
         employeeIds: trip.employeeIds,
+        selfTransportIds: trip.selfTransportIds ?? [],
         objects: restoredPlans.map((p) => ({
           objectId: p.objectId,
           objectName: p.objectName,
@@ -802,6 +817,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setOdoEnd("");
     setOdoEndPhoto(null);
     setEmployeeIds([]);
+    setSelfTransportIds([]);
     setPlans([]);
     setCoefs({});
     setOnboard([]);
@@ -917,6 +933,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // unrelated route edits made in the few seconds before the undo is tapped.
   function removeEmployeesFromTrip(ids: string[], undoLabel: string) {
     if (!ids.length) return;
+    const removedSelfTransportIds = ids.filter((id) => selfTransportIds.includes(id));
     if (tripStartedAt) {
       const priorLocationById = new Map<string, Location>(
         ids.map((id) => {
@@ -930,6 +947,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         .map((p) => ({ objectId: p.objectId, sessions: p.sessions.filter((s) => ids.includes(s.employeeId)) }));
       pushUndo(undoLabel, () => {
         setEmployeeIds((prev) => [...new Set([...prev, ...ids])]);
+        if (removedSelfTransportIds.length) setSelfTransportIds((prev) => [...new Set([...prev, ...removedSelfTransportIds])]);
         for (const [id, loc] of priorLocationById) moveEmployeesTo([id], loc);
         if (removedSessionsByObject.length) {
           setPlans((prev) =>
@@ -943,6 +961,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       logChange(undoLabel);
     }
     setEmployeeIds((prev) => prev.filter((x) => !ids.includes(x)));
+    setSelfTransportIds((prev) => prev.filter((x) => !ids.includes(x)));
     stripSessionsFor(ids);
     moveEmployeesTo(ids, { kind: "nowhere" });
   }
@@ -1397,9 +1416,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       return;
     }
     setEmployeeIds(mergedEmployeeIds);
+    setSelfTransportIds((prev) => [...new Set([...prev, ...ids])]);
     moveEmployeesTo(ids, { kind: "object", objectId: atObjectId });
     haptic("success");
-    logChange(`Приїхали самі на ${objectName}: ${ids.map(employeeName).join(", ")}`);
+    logChange(`Приїхали самі на ${objectName} (без доплати за дорогу): ${ids.map(employeeName).join(", ")}`);
     setAddArrivedSelected([]);
     setShowAddArrivedPicker(false);
   }
@@ -1435,6 +1455,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         odoStart: Number(odoStart),
         odoEnd: Number(odoEnd),
         employeeIds,
+        selfTransportIds,
         objects: buildObjectsPayload(),
       });
       setPreview(res);
@@ -1462,6 +1483,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         odoEnd: Number(odoEnd),
         odoEndPhoto,
         employeeIds,
+        selfTransportIds,
         objects: buildObjectsPayload(),
         idempotencyKey,
         tripSeq: editingTripSeq ?? undefined,
@@ -1474,6 +1496,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         status: "АКТИВНА",
         carId,
         employeeIds,
+        selfTransportIds,
         odoStart: Number(odoStart),
         odoStartPhoto,
         odoEnd: Number(odoEnd),
@@ -3333,6 +3356,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
                       {employeeName(id)}
                     </span>
+                    {selfTransportIds.includes(id) && <span className="badge">🚶 без доплати за дорогу</span>}
                   </div>
                 ))
               ) : (
