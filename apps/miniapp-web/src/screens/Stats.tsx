@@ -35,7 +35,7 @@ function daysAgoISO(n: number): string {
   return d.toLocaleDateString("sv-SE", { timeZone: "Europe/Kyiv" });
 }
 
-export function Stats({ onBack }: { onBack: () => void }) {
+export function Stats({ onBack, isAdmin }: { onBack: () => void; isAdmin?: boolean }) {
   const [from, setFrom] = useState(() => daysAgoISO(6));
   const [to, setTo] = useState(() => todayISO());
   const [data, setData] = useState<StatsRangeResponse | null>(null);
@@ -66,6 +66,7 @@ export function Stats({ onBack }: { onBack: () => void }) {
         <h1>📊 Статистика</h1>
         <div className="hint">
           {from} — {to}
+          {isAdmin ? " · усі бригадири" : ""}
         </div>
       </div>
 

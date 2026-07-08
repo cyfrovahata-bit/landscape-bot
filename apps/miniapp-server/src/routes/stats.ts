@@ -28,6 +28,8 @@ type RtsSavePayload = {
  * edit/resubmit reconciliation. If a day was submitted more than once, only
  * the latest submission counts (matches how editing-and-resubmitting is
  * meant to fully replace the previous attempt everywhere else in this app).
+ * Scoped to the caller's own foreman data -- unless they're an ADMIN, in
+ * which case every foreman's data is included, unfiltered and unmasked.
  */
 statsRouter.get("/range", async (req, res) => {
   const from = String(req.query.from || "");
@@ -36,6 +38,10 @@ statsRouter.get("/range", async (req, res) => {
     res.status(400).json({ error: "from and to (YYYY-MM-DD) query params are required" });
     return;
   }
+  // Admins see every foreman's data in range; a brigadier only ever sees
+  // their own -- same rule as everywhere else in the app (role comes from
+  // the КОРИСТУВАЧІ dictionary via requireTelegramAuth, not client input).
+  const isAdmin = req.user!.role === "ADMIN";
   const foremanTgId = BigInt(req.user!.tgId);
 
   const [eventRows, reportRows, odoRows, timesheetRows, worksDict, objectsDict, employeesDict, carsDict] = await Promise.all([
@@ -43,16 +49,26 @@ statsRouter.get("/range", async (req, res) => {
       .select()
       .from(schema.events)
       .where(
-        and(eq(schema.events.type, "RTS_SAVE"), eq(schema.events.foremanTgId, foremanTgId), gte(schema.events.date, from), lte(schema.events.date, to)),
+        isAdmin
+          ? and(eq(schema.events.type, "RTS_SAVE"), gte(schema.events.date, from), lte(schema.events.date, to))
+          : and(eq(schema.events.type, "RTS_SAVE"), eq(schema.events.foremanTgId, foremanTgId), gte(schema.events.date, from), lte(schema.events.date, to)),
       ),
     db
       .select()
       .from(schema.reports)
-      .where(and(eq(schema.reports.foremanTgId, foremanTgId), gte(schema.reports.date, from), lte(schema.reports.date, to))),
+      .where(
+        isAdmin
+          ? and(gte(schema.reports.date, from), lte(schema.reports.date, to))
+          : and(eq(schema.reports.foremanTgId, foremanTgId), gte(schema.reports.date, from), lte(schema.reports.date, to)),
+      ),
     db
       .select()
       .from(schema.odometerDays)
-      .where(and(eq(schema.odometerDays.foremanTgId, foremanTgId), gte(schema.odometerDays.date, from), lte(schema.odometerDays.date, to))),
+      .where(
+        isAdmin
+          ? and(gte(schema.odometerDays.date, from), lte(schema.odometerDays.date, to))
+          : and(eq(schema.odometerDays.foremanTgId, foremanTgId), gte(schema.odometerDays.date, from), lte(schema.odometerDays.date, to)),
+      ),
     db.select().from(schema.timesheetEntries).where(and(gte(schema.timesheetEntries.date, from), lte(schema.timesheetEntries.date, to))),
     db.select().from(schema.works),
     db.select().from(schema.objects),
@@ -65,23 +81,32 @@ statsRouter.get("/range", async (req, res) => {
   const employeeNameById = new Map(employeesDict.map((e) => [e.id, e.name]));
   const carNameById = new Map(carsDict.map((c) => [c.id, c.name]));
 
-  // Only the latest RTS_SAVE per date counts -- a resubmit fully replaces it.
+  // Only the latest RTS_SAVE per (date, foreman) counts -- a resubmit fully
+  // replaces it. Keyed by foreman too (not just date), since an admin's
+  // query spans every foreman -- two different foremen submitting on the
+  // same date must not clobber each other down to a single "latest" row.
   const latestEventByDate = new Map<string, (typeof eventRows)[number]>();
   for (const e of eventRows) {
-    const cur = latestEventByDate.get(e.date);
-    if (!cur || e.ts > cur.ts) latestEventByDate.set(e.date, e);
+    const key = `${e.date}|${e.foremanTgId}`;
+    const cur = latestEventByDate.get(key);
+    if (!cur || e.ts > cur.ts) latestEventByDate.set(key, e);
   }
 
   // Same rule as /road-timesheet/day-status: a day only counts as approved
   // once the admin flow sets the event's status to "ЗАТВЕРДЖЕНО". If any date
   // in range is still pending, mask all money in the response -- showing a
   // mix of approved and pending amounts in one aggregated total would let a
-  // brigadier back out the pending day's numbers by diffing totals.
-  const pendingDates = [...latestEventByDate.entries()]
-    .filter(([, e]) => e.status !== "ЗАТВЕРДЖЕНО")
-    .map(([d]) => d)
-    .sort();
-  const moneyApproved = pendingDates.length === 0;
+  // brigadier back out the pending day's numbers by diffing totals. Doesn't
+  // apply to admins -- they already see real, unmasked amounts everywhere
+  // else (e.g. the "Затвердження" review screen), so masking here would
+  // just be inconsistent.
+  const pendingDates = isAdmin
+    ? []
+    : [...latestEventByDate.entries()]
+        .filter(([, e]) => e.status !== "ЗАТВЕРДЖЕНО")
+        .map(([, e]) => e.date)
+        .sort();
+  const moneyApproved = isAdmin || pendingDates.length === 0;
 
   const parsedEvents = [...latestEventByDate.values()].map((e) => {
     let payload: RtsSavePayload = {};

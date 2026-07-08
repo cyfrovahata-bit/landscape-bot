@@ -65,7 +65,7 @@ export default function App() {
       {screen === "logistics" && <Logistics onBack={goMenu} onSaved={showSavedToast} />}
       {screen === "materials" && <Materials onBack={goMenu} onSaved={showSavedToast} />}
       {screen === "roadTimesheet" && <RoadTimesheet onBack={goMenu} onSaved={showSavedToast} />}
-      {screen === "stats" && <Stats onBack={goMenu} />}
+      {screen === "stats" && <Stats onBack={goMenu} isAdmin={me?.role === "ADMIN"} />}
       {screen === "tools" && <ComingSoon title="🧰 Інструменти" onBack={goMenu} />}
       {screen === "approval" && (
         <Approval onBack={goMenu} focusDate={approvalFocus?.date} focusForeman={approvalFocus?.foremanTgId} />
