@@ -277,15 +277,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // --- people / objects ---
   const [employeeIds, setEmployeeIds] = useState<string[]>([]);
   const [expandedBrigadeId, setExpandedBrigadeId] = useState<string | null>(null);
+  const [selectedPeopleExpanded, setSelectedPeopleExpanded] = useState(false);
   const [peopleSearch, setPeopleSearch] = useState("");
   const [objectSearch, setObjectSearch] = useState("");
   const [expandedCityId, setExpandedCityId] = useState<string | null>(null);
+  const [selectedObjectsExpanded, setSelectedObjectsExpanded] = useState(false);
   const [plans, setPlans] = useState<ObjPlan[]>([]);
 
   // --- planning (works / people per object / volumes) ---
   const [planObjectId, setPlanObjectId] = useState<string | null>(null);
   const [planWorksSearch, setPlanWorksSearch] = useState("");
   const [expandedWorkCategoryId, setExpandedWorkCategoryId] = useState<string | null>(null);
+  const [selectedWorksExpanded, setSelectedWorksExpanded] = useState(false);
   const [planVolumeWorkId, setPlanVolumeWorkId] = useState<string | null>(null);
   const [volumeBuffer, setVolumeBuffer] = useState("");
   const [volumeUnit, setVolumeUnit] = useState("");
@@ -1664,6 +1667,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           <div className="step-badge">🚙 АВТО</div>
           <div className="section-title">Вибір авто</div>
+          {carId && (
+            <div className="hint" style={{ padding: "0 16px 8px" }}>
+              Обрано: {cars.find((c) => c.id === carId)?.name ?? carId}
+            </div>
+          )}
           <div className="list">
             {cars.map((c) => {
               const takenBy = takenCars.get(c.id);
@@ -1758,6 +1766,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </button>
             )}
           </div>
+          {employeeIds.length > 0 && (
+            <div style={{ padding: "0 16px 8px" }}>
+              <button className="back-btn" onClick={() => setSelectedPeopleExpanded((v) => !v)}>
+                {selectedPeopleExpanded ? "▾ Сховати обраних" : "▸ Показати обраних"}
+              </button>
+              {selectedPeopleExpanded && <div className="hint">{employeeIds.map(employeeName).join(", ")}</div>}
+            </div>
+          )}
           {retroAssignEmployeeId ? (
             <>
               <div className="section-title">На якому обʼєкті була {employeeName(retroAssignEmployeeId)}?</div>
@@ -1879,6 +1895,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </button>
             )}
           </div>
+          {plans.length > 0 && (
+            <div style={{ padding: "0 16px 8px" }}>
+              <button className="back-btn" onClick={() => setSelectedObjectsExpanded((v) => !v)}>
+                {selectedObjectsExpanded ? "▾ Сховати обрані" : "▸ Показати обрані"}
+              </button>
+              {selectedObjectsExpanded && <div className="hint">{plans.map((p) => p.objectName).join(", ")}</div>}
+            </div>
+          )}
           <input className="search-box" placeholder="Пошук обʼєкта…" value={objectSearch} onChange={(e) => setObjectSearch(e.target.value)} />
           <div className="list">
             {groupByCity(objects.filter((o) => `${o.name} ${o.address ?? ""}`.toLowerCase().includes(objectSearch.toLowerCase()))).map((g) => {
@@ -1974,6 +1998,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </button>
             )}
           </div>
+          {planFor(planObjectId).works.length > 0 && (
+            <div style={{ padding: "0 16px 8px" }}>
+              <button className="back-btn" onClick={() => setSelectedWorksExpanded((v) => !v)}>
+                {selectedWorksExpanded ? "▾ Сховати обрані" : "▸ Показати обрані"}
+              </button>
+              {selectedWorksExpanded && <div className="hint">{planFor(planObjectId).works.map((w) => w.workName).join(", ")}</div>}
+            </div>
+          )}
           <div className="hint" style={{ padding: "0 16px 8px" }}>Обери роботи. Обсяги вкажете пізніше, під час виконання на обʼєкті</div>
           <input className="search-box" placeholder="Пошук роботи…" value={planWorksSearch} onChange={(e) => setPlanWorksSearch(e.target.value)} />
           <div className="list">
