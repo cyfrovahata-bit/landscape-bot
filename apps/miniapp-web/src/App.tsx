@@ -68,7 +68,12 @@ export default function App() {
       {screen === "stats" && <Stats onBack={goMenu} isAdmin={me?.role === "ADMIN"} />}
       {screen === "tools" && <ComingSoon title="🧰 Інструменти" onBack={goMenu} />}
       {screen === "approval" && (
-        <Approval onBack={goMenu} focusDate={approvalFocus?.date} focusForeman={approvalFocus?.foremanTgId} />
+        <Approval
+          onBack={goMenu}
+          focusDate={approvalFocus?.date}
+          focusForeman={approvalFocus?.foremanTgId}
+          isAdmin={me?.role === "ADMIN"}
+        />
       )}
     </>
   );

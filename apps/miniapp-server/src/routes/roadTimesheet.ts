@@ -442,8 +442,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
     tripSeq?: number;
   };
 
-  if (!date || !carId || !Array.isArray(objects) || !objects.length) {
-    res.status(400).json({ error: "date, carId and at least one object are required" });
+  if (!date || !carId || !Array.isArray(objects) || !objects.length || !Array.isArray(employeeIds) || !employeeIds.length) {
+    res.status(400).json({ error: "date, carId, at least one employee and at least one object are required" });
     return;
   }
 

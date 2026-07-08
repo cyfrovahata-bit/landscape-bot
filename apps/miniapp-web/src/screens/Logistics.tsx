@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Employee, type LogisticDirection } from "../lib/api";
 import { todayISO } from "../lib/date";
-import { haptic } from "../lib/telegram";
+import { haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade } from "../lib/employee";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
@@ -76,6 +76,10 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     setStage(history[history.length - 1]);
     setHistory((h) => h.slice(0, -1));
   }
+
+  // Otherwise Telegram's native back gesture/button exits the whole mini app
+  // instead of stepping back one stage, same as the in-app "‹ Назад" row.
+  useTelegramBackButton(goBack);
 
   function pickDirection(dir: LogisticDirection) {
     const dup = items.some((it, i) => it.logisticId === dir.id && i !== editingIndex);

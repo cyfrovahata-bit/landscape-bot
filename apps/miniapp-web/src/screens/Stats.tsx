@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { todayISO } from "../lib/date";
+import { useTelegramBackButton } from "../lib/telegram";
 import { BackRow } from "../components/BackRow";
 
 type WorkStat = { workName: string; unit: string; totalVolume: number; employeeNames: string[] };
@@ -43,6 +44,10 @@ export function Stats({ onBack, isAdmin }: { onBack: () => void; isAdmin?: boole
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>("objects");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Otherwise Telegram's native back gesture/button exits the whole mini app
+  // instead of stepping back to the menu, same as the in-app "‹ Назад" row.
+  useTelegramBackButton(onBack);
 
   useEffect(() => {
     setLoading(true);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Employee, type SalaryPack } from "../lib/api";
-import { confirmDialog, haptic } from "../lib/telegram";
+import { confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent } from "../lib/employee";
 import { BackRow } from "../components/BackRow";
 
@@ -27,10 +27,12 @@ export function Approval({
   onBack,
   focusDate,
   focusForeman,
+  isAdmin,
 }: {
   onBack: () => void;
   focusDate?: string;
   focusForeman?: number;
+  isAdmin?: boolean;
 }) {
   const [data, setData] = useState<PendingResponse | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -44,13 +46,19 @@ export function Approval({
 
   const employeeById = new Map(employees.map((e) => [e.id, e]));
 
+  // Otherwise Telegram's native back gesture/button exits the whole mini app
+  // instead of stepping back to the menu, same as the in-app "‹ Назад" row.
+  useTelegramBackButton(onBack);
+
   function load() {
     setLoading(true);
     setError(null);
-    Promise.all([
-      api.get<PendingResponse>("/api/road-timesheet/pending"),
-      api.get<Employee[]>("/api/dictionaries/employees"),
-    ])
+    // Returned (not fire-and-forget) so approve()/confirmReturn() can await
+    // the refreshed list before clearing their busy guard -- otherwise the
+    // button re-enables the instant the POST resolves, while the just-acted-on
+    // row is still showing its stale (pre-approval) state for the ~100-300ms
+    // the refetch takes, inviting a second tap to send a duplicate request.
+    return Promise.all([api.get<PendingResponse>("/api/road-timesheet/pending"), api.get<Employee[]>("/api/dictionaries/employees")])
       .then(([pending, emps]) => {
         setData(pending);
         setEmployees(emps);
@@ -64,6 +72,16 @@ export function Approval({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Resets the return-reason sub-form -- used both by "Скасувати" and after a
+  // successful return, so a leftover reason/comment typed for one foreman's
+  // day never carries over and gets attached to a DIFFERENT foreman's return
+  // (reasonCode/note are screen-level state shared across every row).
+  function closeReturnForm() {
+    setReturningKey(null);
+    setReasonCode("OTHER");
+    setNote("");
+  }
+
   async function approve(it: PendingItem) {
     const ok = await confirmDialog(`Затвердити день ${it.date} для ${it.foremanName}?`);
     if (!ok) return;
@@ -71,7 +89,7 @@ export function Approval({
     try {
       await api.post("/api/road-timesheet/pending/approve", { date: it.date, foremanTgId: it.foremanTgId });
       haptic("success");
-      load();
+      await load();
     } catch (e) {
       setError((e as Error).message);
       haptic("error");
@@ -85,15 +103,28 @@ export function Approval({
     try {
       await api.post("/api/road-timesheet/pending/return", { date: it.date, foremanTgId: it.foremanTgId, reasonCode, note });
       haptic("success");
-      setReturningKey(null);
-      setNote("");
-      load();
+      closeReturnForm();
+      await load();
     } catch (e) {
       setError((e as Error).message);
       haptic("error");
     } finally {
       setBusyKey(null);
     }
+  }
+
+  // Defense-in-depth only -- the server already 403s every /pending* route
+  // for a non-admin regardless of this. This just keeps the UI from ever
+  // rendering someone else's approval data if this screen were ever reached
+  // without going through Menu's admin-only filter or the deep-link's own
+  // role check (both gate it today).
+  if (isAdmin === false) {
+    return (
+      <div>
+        <BackRow onBack={onBack} />
+        <div className="empty-state">⛔️ Доступно лише адміністратору</div>
+      </div>
+    );
   }
 
   return (
@@ -203,7 +234,7 @@ export function Approval({
                           onChange={(e) => setNote(e.target.value)}
                         />
                         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                          <button className="chip" onClick={() => setReturningKey(null)}>
+                          <button className="chip" onClick={closeReturnForm}>
                             Скасувати
                           </button>
                           <button className="chip danger-btn" onClick={() => confirmReturn(it)} disabled={busy}>
@@ -220,7 +251,20 @@ export function Approval({
                         >
                           {busy ? "…" : "✅ Підтвердити"}
                         </button>
-                        <button className="chip danger-btn" onClick={() => setReturningKey(key)} disabled={busy}>
+                        <button
+                          className="chip danger-btn"
+                          onClick={() => {
+                            // Always start from a clean reason/comment -- reasonCode/note
+                            // are shared screen-wide state, so opening this for a
+                            // different foreman without ever tapping "Скасувати" on the
+                            // previous one (e.g. collapse row A, expand row B) must not
+                            // carry A's leftover reason/comment into B's return.
+                            setReasonCode("OTHER");
+                            setNote("");
+                            setReturningKey(key);
+                          }}
+                          disabled={busy}
+                        >
                           🔴 Повернути на редагування
                         </button>
                       </div>

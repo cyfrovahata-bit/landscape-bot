@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Material, type WorkObject } from "../lib/api";
 import { todayISO } from "../lib/date";
-import { haptic } from "../lib/telegram";
+import { haptic, useTelegramBackButton } from "../lib/telegram";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
 
@@ -47,6 +47,10 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     setStage(history[history.length - 1]);
     setHistory((h) => h.slice(0, -1));
   }
+
+  // Otherwise Telegram's native back gesture/button exits the whole mini app
+  // instead of stepping back one stage, same as the in-app "‹ Назад" row.
+  useTelegramBackButton(goBack);
 
   function pickMoveType(mt: MoveType) {
     setMoveType(mt);
@@ -184,7 +188,7 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                       style={{ marginTop: 8 }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <button onClick={() => setQty(m.id, item.qty - 1)}>−</button>
+                      <button onClick={() => (item.qty <= 1 ? removeItem(m.id) : setQty(m.id, item.qty - 1))}>−</button>
                       <input value={item.qty} onChange={(e) => setQty(m.id, Number(e.target.value) || 0)} />
                       <button onClick={() => setQty(m.id, item.qty + 1)}>+</button>
                       <span className="hint" style={{ marginLeft: 4 }}>{m.unit}</span>
@@ -247,7 +251,7 @@ export function Materials({ onBack, onSaved }: { onBack: () => void; onSaved: ()
           <MainButton
             text={saving ? "Збереження…" : "💾 Зберегти"}
             onClick={save}
-            disabled={!objectId || !moveType || !items.length || saving}
+            disabled={!objectId || !moveType || !items.length || items.some((it) => it.qty <= 0) || saving}
           />
         </>
       )}

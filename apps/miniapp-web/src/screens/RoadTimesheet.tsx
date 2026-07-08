@@ -394,6 +394,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keeps "resume where I left off" pointed at wherever the user ACTUALLY is,
+  // not frozen at whatever step a draft happened to restore to on mount --
+  // the day-status effect below can force step to "DONE" asynchronously
+  // (e.g. once it learns today already has a submission), and without this
+  // the "▶️ Продовжити" card on DONE would send the user back to a stale step
+  // instead of the one they'd actually progressed to since mount.
+  useEffect(() => {
+    if (step !== "HUB" && step !== "DONE") setInProgressResumeStep(step);
+  }, [step]);
+
   // Not-yet-approved submissions aren't locked -- the foreman can keep
   // viewing/editing them. Always shows every trip submitted today as
   // collapsed cards (never just dumps into an editable screen), regardless
@@ -871,21 +881,50 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     cancelRetroAssign();
   }
 
+  // Removes one or more employees from the trip roster entirely -- strips
+  // their sessions and clears their location, same as toggling each off one
+  // by one. The undo restores exactly what was removed (each person's prior
+  // location -- onboard / a specific object / nowhere -- plus their session
+  // records per object) via targeted functional updates, instead of
+  // snapshotting and replacing the whole `plans`/`onboard` state, which would
+  // otherwise both fail to restore `onboard` (never captured) and clobber any
+  // unrelated route edits made in the few seconds before the undo is tapped.
+  function removeEmployeesFromTrip(ids: string[], undoLabel: string) {
+    if (!ids.length) return;
+    if (tripStartedAt) {
+      const priorLocationById = new Map<string, Location>(
+        ids.map((id) => {
+          if (onboard.includes(id)) return [id, { kind: "onboard" } as Location];
+          const atPlan = plans.find((p) => p.here.includes(id));
+          return [id, atPlan ? ({ kind: "object", objectId: atPlan.objectId } as Location) : ({ kind: "nowhere" } as Location)];
+        }),
+      );
+      const removedSessionsByObject = plans
+        .filter((p) => p.sessions.some((s) => ids.includes(s.employeeId)))
+        .map((p) => ({ objectId: p.objectId, sessions: p.sessions.filter((s) => ids.includes(s.employeeId)) }));
+      pushUndo(undoLabel, () => {
+        setEmployeeIds((prev) => [...new Set([...prev, ...ids])]);
+        for (const [id, loc] of priorLocationById) moveEmployeesTo([id], loc);
+        if (removedSessionsByObject.length) {
+          setPlans((prev) =>
+            prev.map((p) => {
+              const restore = removedSessionsByObject.find((r) => r.objectId === p.objectId);
+              return restore ? { ...p, sessions: [...p.sessions, ...restore.sessions] } : p;
+            }),
+          );
+        }
+      });
+      logChange(undoLabel);
+    }
+    setEmployeeIds((prev) => prev.filter((x) => !ids.includes(x)));
+    stripSessionsFor(ids);
+    moveEmployeesTo(ids, { kind: "nowhere" });
+  }
+
   function toggleEmployee(id: string) {
     if (busyEmployees.has(id)) return;
     if (employeeIds.includes(id)) {
-      if (tripStartedAt) {
-        const name = employeeName(id);
-        const prevPlans = plans;
-        pushUndo(`${name} видалено з поїздки`, () => {
-          setEmployeeIds((prev) => [...prev, id]);
-          setPlans(prevPlans);
-        });
-        logChange(`${name} видалено з поїздки`);
-      }
-      setEmployeeIds((prev) => prev.filter((x) => x !== id));
-      stripSessionsFor([id]);
-      moveEmployeesTo([id], { kind: "nowhere" });
+      removeEmployeesFromTrip([id], `${employeeName(id)} видалено з поїздки`);
     } else if (editReturnStep === "REVIEW" && plans.length) {
       // Fixing an already-submitted report: adding someone needs an object
       // (for the works+hours to mean anything), so hold off on actually
@@ -917,8 +956,19 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   function removeObjectFromRoute(objectId: string) {
     const plan = plans.find((p) => p.objectId === objectId);
     if (!plan) return;
-    if (plan.works.length || plan.sessions.length) {
-      pushUndo(`Обʼєкт "${plan.objectName}" видалено`, () => setPlans((prev) => [...prev, plan]));
+    if (plan.works.length || plan.sessions.length || plan.here.length) {
+      pushUndo(`Обʼєкт "${plan.objectName}" видалено`, () => {
+        // Replace, don't just append -- if the same object was re-added
+        // (fresh and blank) via PICK_OBJECTS before this undo was tapped,
+        // appending the old snapshot on top would leave two plans sharing
+        // one objectId (duplicate React key, and the object's works/sessions
+        // would get double-counted at submit).
+        setPlans((prev) => [...prev.filter((p) => p.objectId !== plan.objectId), plan]);
+        // Reverse the onboard-transfer below too -- otherwise anyone moved
+        // into the car when the object was removed would end up duplicated
+        // (both "in the car" and back at the restored object's `here`).
+        if (plan.here.length) moveEmployeesTo(plan.here, { kind: "object", objectId: plan.objectId });
+      });
       logChange(`Обʼєкт видалено: ${plan.objectName}`);
     }
     // Anyone still standing on the removed object goes back into the car --
@@ -926,6 +976,31 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     // and block the end-of-day "everyone accounted for" check forever.
     if (plan.here.length) moveEmployeesTo(plan.here, { kind: "onboard" });
     setPlans((prev) => prev.filter((p) => p.objectId !== objectId));
+    haptic("selection");
+  }
+
+  // Same "send anyone standing there back to the car first, offer an undo
+  // that reverses it too" treatment as removeObjectFromRoute, just for every
+  // object in the route at once (the "Очистити вибір" bulk action) instead
+  // of one at a time -- a plain `setPlans([])` would strand everyone
+  // currently `here` at any object with no way back.
+  function clearAllObjects() {
+    if (!plans.length) return;
+    const removedPlans = plans;
+    if (removedPlans.some((p) => p.works.length || p.sessions.length || p.here.length)) {
+      pushUndo("Маршрут очищено", () => {
+        const removedIds = new Set(removedPlans.map((p) => p.objectId));
+        setPlans((prev) => [...prev.filter((p) => !removedIds.has(p.objectId)), ...removedPlans]);
+        for (const p of removedPlans) {
+          if (p.here.length) moveEmployeesTo(p.here, { kind: "object", objectId: p.objectId });
+        }
+      });
+      logChange("Маршрут очищено");
+    }
+    for (const p of removedPlans) {
+      if (p.here.length) moveEmployeesTo(p.here, { kind: "onboard" });
+    }
+    setPlans([]);
     haptic("selection");
   }
 
@@ -966,6 +1041,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
   function updateNotes(objectId: string, notes: string) {
     setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, notes })));
+  }
+
+  function removeObjectPhoto(objectId: string, url: string) {
+    setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, photoUrls: p.photoUrls.filter((u) => u !== url) })));
   }
 
   async function uploadObjectPhoto(objectId: string, file: File) {
@@ -1403,10 +1482,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       // entirely -- otherwise back mid-pick silently discards the pending
       // selection and dumps you back a whole screen further than expected.
       if (showDropPicker) {
+        setDropSelected([]);
         setShowDropPicker(false);
         return;
       }
       if (showMovePicker) {
+        setMoveSelected([]);
+        setMoveTargetId(null);
         setShowMovePicker(false);
         return;
       }
@@ -1802,7 +1884,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title row">
             <span>Люди в поїздці — Обрано {employeeIds.length}</span>
             {employeeIds.length > 0 && (
-              <button className="chip" onClick={() => setEmployeeIds([])}>
+              <button className="chip" onClick={() => removeEmployeesFromTrip(employeeIds, "Вибір людей очищено")}>
                 🗑 Очистити вибір
               </button>
             )}
@@ -1846,7 +1928,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <button className="chip" onClick={cancelRetroAssign}>
                   Скасувати
                 </button>
-                <button className="chip selected" onClick={confirmRetroAssign} disabled={!retroAssignObjectId || !retroAssignHours}>
+                <button
+                  className="chip selected"
+                  onClick={confirmRetroAssign}
+                  disabled={!retroAssignObjectId || !(Number.isFinite(Number(retroAssignHours)) && Number(retroAssignHours) > 0)}
+                >
                   Додати
                 </button>
               </div>
@@ -1874,14 +1960,22 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         <div style={{ paddingLeft: 12 }}>
                           <button
                             className={`bulk-select-btn ${allSelected ? "active" : ""}`}
-                            onClick={() =>
-                              setEmployeeIds((prev) =>
-                                allSelected
-                                  ? prev.filter((id) => !selectable.some((e) => e.id === id))
-                                  : [...new Set([...prev, ...selectable.map((e) => e.id)])],
-                              )
-                            }
-                            disabled={!selectable.length}
+                            onClick={() => {
+                              if (allSelected) {
+                                removeEmployeesFromTrip(
+                                  selectable.map((e) => e.id),
+                                  `Бригаду "${g.title}" знято з поїздки`,
+                                );
+                              } else if (!(editReturnStep === "REVIEW" && plans.length)) {
+                                setEmployeeIds((prev) => [...new Set([...prev, ...selectable.map((e) => e.id)])]);
+                                haptic("selection");
+                              }
+                            }}
+                            // Bulk-adding is disabled while fixing an already-submitted
+                            // report -- each new person there needs their own object+hours
+                            // picked (see the retro-assign flow on the per-person toggle),
+                            // which doesn't make sense to do for a whole brigade at once.
+                            disabled={!selectable.length || (!allSelected && editReturnStep === "REVIEW" && plans.length > 0)}
                           >
                             {allSelected ? "✕ Зняти всю бригаду" : "✓ Обрати всю бригаду"}
                           </button>
@@ -1919,6 +2013,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   setStep(editReturnStep);
                   setEditReturnStep("HUB");
                 }}
+                disabled={!employeeIds.length}
               />
             </>
           )}
@@ -1931,7 +2026,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title row">
             <span>Обʼєкти маршруту — Обрано {plans.length}</span>
             {plans.length > 0 && (
-              <button className="chip" onClick={() => setPlans([])}>
+              <button className="chip" onClick={clearAllObjects}>
                 🗑 Очистити вибір
               </button>
             )}
@@ -2101,7 +2196,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="field">
             <label className="hint">📷 Фото обʼєкта (можна кілька)</label>
             <input type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && uploadObjectPhoto(planObjectId, e.target.files[0])} />
-            {planFor(planObjectId).photoUrls.length > 0 && <div className="badge ok">{planFor(planObjectId).photoUrls.length} фото додано</div>}
+            {planFor(planObjectId).photoUrls.length > 0 && (
+              <div className="chip-row" style={{ marginTop: 8 }}>
+                {planFor(planObjectId).photoUrls.map((url, i) => (
+                  <span key={url} className="chip">
+                    📷 Фото {i + 1}
+                    <button
+                      style={{ marginLeft: 6, border: "none", background: "none", cursor: "pointer" }}
+                      onClick={() => removeObjectPhoto(planObjectId, url)}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <MainButton
@@ -2674,7 +2783,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
                 {!showDropPicker && !showMovePicker && (
                   <div className="list" style={{ marginTop: 8 }}>
-                    <button className="cell" onClick={() => setShowDropPicker(true)} disabled={!onboard.length}>
+                    <button
+                      className="cell"
+                      onClick={() => {
+                        setDropSelected([]);
+                        setShowDropPicker(true);
+                      }}
+                      disabled={!onboard.length}
+                    >
                       <span className="cell-title">👥 Висадити людей тут</span>
                       <span className="cell-sub">🚐 {onboard.length} в машині</span>
                     </button>
@@ -2695,7 +2811,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       <span className="cell-title">✏️ Додати/змінити роботи</span>
                       <span className="cell-sub">{plan.works.length} робіт</span>
                     </button>
-                    <button className="cell" onClick={() => setShowMovePicker(true)} disabled={!plan.here.length}>
+                    <button
+                      className="cell"
+                      onClick={() => {
+                        setMoveSelected([]);
+                        setMoveTargetId(null);
+                        setShowMovePicker(true);
+                      }}
+                      disabled={!plan.here.length}
+                    >
                       <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
                     </button>
                   </div>
@@ -2732,7 +2856,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       ))}
                     </div>
                     <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                      <button className="chip" onClick={() => setShowDropPicker(false)}>
+                      <button
+                        className="chip"
+                        onClick={() => {
+                          setDropSelected([]);
+                          setShowDropPicker(false);
+                        }}
+                      >
                         Скасувати
                       </button>
                       <button className="chip selected" onClick={confirmDrop} disabled={!dropSelected.length}>
@@ -2770,7 +2900,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         ))}
                     </div>
                     <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
-                      <button className="chip" onClick={() => setShowMovePicker(false)}>
+                      <button
+                        className="chip"
+                        onClick={() => {
+                          setMoveSelected([]);
+                          setMoveTargetId(null);
+                          setShowMovePicker(false);
+                        }}
+                      >
                         Скасувати
                       </button>
                       <button className="chip selected" onClick={confirmMove} disabled={!moveSelected.length || !moveTargetId}>
@@ -3020,6 +3157,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="hint" style={{ padding: "0 16px 8px" }}>{odoStart} км</div>
 
           <div className="section-title row">
+            <span>🏁 Одометр на фініші</span>
+            <button
+              className="chip"
+              onClick={() => {
+                setReviewReturnStep("REVIEW");
+                setStep("RETURN");
+              }}
+            >
+              ✏️ Редагувати
+            </button>
+          </div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>{odoEnd || "—"} км</div>
+
+          <div className="section-title row">
             <span>Люди — {employeeIds.length}</span>
             <button
               className="chip"
@@ -3229,7 +3380,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <MainButton
             text={saving ? "Відправлення…" : editingTripSeq !== null ? "📤 Оновити звіт" : "📤 Відправити на підтвердження"}
             onClick={save}
-            disabled={saving || plans.some((p) => p.works.some((w) => !w.volume || w.volume === "?"))}
+            disabled={saving || !employeeIds.length || plans.some((p) => p.works.some((w) => !w.volume || w.volume === "?"))}
           />
         </>
       )}
