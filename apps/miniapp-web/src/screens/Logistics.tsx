@@ -5,12 +5,11 @@ import { haptic } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade } from "../lib/employee";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
-import { NumericKeypad } from "../components/NumericKeypad";
 
 type Item = { logisticId: string; qty: number; employeeIds: string[] };
 type Stage = "dest" | "qty" | "people" | "review";
 
-const QTY_QUICK = [1, 2, 3, 5, 10];
+const QTY_QUICK = [1, 2, 3, 4, 5];
 
 function itemTotal(it: Item, dir: LogisticDirection | undefined): number {
   if (!dir) return 0;
@@ -220,7 +219,11 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
             <span>{directionById.get(draftDirectionId)?.name}</span>
             <span className="badge">{directionById.get(draftDirectionId)?.tariff} грн/од.</span>
           </div>
-          <div className="big-number">{qtyBuffer || "0"}</div>
+          <div className="stepper" style={{ justifyContent: "center", padding: "12px 16px" }}>
+            <button onClick={() => setQtyBuffer(String(Math.max(1, (Number(qtyBuffer) || 0) - 1)))}>−</button>
+            <div className="big-number" style={{ padding: 0, minWidth: 90 }}>{qtyBuffer || "0"}</div>
+            <button onClick={() => setQtyBuffer(String(Math.min(999, (Number(qtyBuffer) || 0) + 1)))}>+</button>
+          </div>
           <div className="chip-row">
             {QTY_QUICK.map((n) => (
               <button key={n} className={`chip ${Number(qtyBuffer) === n ? "selected" : ""}`} onClick={() => setQtyBuffer(String(n))}>
@@ -228,7 +231,6 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
               </button>
             ))}
           </div>
-          <NumericKeypad value={qtyBuffer} onChange={(next) => next.length <= 3 && setQtyBuffer(next)} />
           <MainButton text="Далі → Люди" onClick={confirmQty} disabled={!qtyBuffer || Number(qtyBuffer) < 1} />
         </>
       )}
