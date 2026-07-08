@@ -55,11 +55,6 @@ export function buildSalaryPacksWithRoles(params: {
       return true;
     });
 
-    const sumWorkerPoints = workerRows.reduce(
-      (a, r) => a + Number(r.points ?? 0),
-      0,
-    );
-
     const brigadierOnePay =
       brigadierRows.length > 0
         ? (objectTotal * brigadierPercent) / brigadierRows.length
@@ -69,6 +64,13 @@ export function buildSalaryPacksWithRoles(params: {
       seniorRows.length > 0
         ? (objectTotal * seniorPercent) / seniorRows.length
         : 0;
+
+    // Everyone did the same work at the object -- the worker share splits
+    // EVENLY across every worker who worked there, regardless of hours or
+    // discipline/productivity coefficients (still entered per person for
+    // record, but no longer weight anyone's share).
+    const workerOnePay =
+      workerRows.length > 0 ? (objectTotal * workerPercent) / workerRows.length : 0;
 
     const rows: SalaryRow[] = rowsSrc.map((r) => {
       const id = String(r.employeeId ?? "");
@@ -81,10 +83,7 @@ export function buildSalaryPacksWithRoles(params: {
       } else if (hasSenior && seniorSet.has(id)) {
         pay = seniorOnePay;
       } else {
-        pay =
-          sumWorkerPoints > 0
-            ? (objectTotal * workerPercent * points) / sumWorkerPoints
-            : 0;
+        pay = workerOnePay;
       }
 
       return {

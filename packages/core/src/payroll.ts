@@ -61,10 +61,12 @@ export type ObjectSalaryPack = {
  * Per-object payroll split: 1 brigadier (if present among that object's
  * workers) gets 20% split among brigadier rows (practically always just
  * one), seniors split 10%, everyone else splits the remainder (70%, or 90%
- * if no brigadier worked at this object) proportionally by points
- * (hours-unit * disciplineCoef * productivityCoef). If nobody senior worked
- * there, that 10% isn't handed to workers instead -- it stays with the
- * company (companyPay), exactly like the bot's roleTotals.company.
+ * if no brigadier worked at this object) EVENLY -- everyone is assumed to
+ * have done the same work at the object, so hours and the discipline/
+ * productivity coefficients (still entered per person, kept for record) no
+ * longer weight anyone's share. If nobody senior worked there, that 10%
+ * isn't handed to workers instead -- it stays with the company
+ * (companyPay), exactly like the bot's roleTotals.company.
  */
 export function buildSalaryPacksWithRoles(params: {
   objects: Array<{
@@ -104,15 +106,20 @@ export function buildSalaryPacksWithRoles(params: {
       return true;
     });
 
-    const sumWorkerPoints = workerRows.reduce((a, r) => a + r.points, 0);
     const brigadierOnePay = brigadierRows.length ? (o.objectTotal * brigadierPercent) / brigadierRows.length : 0;
     const seniorOnePay = seniorRows.length ? (o.objectTotal * seniorPercent) / seniorRows.length : 0;
+    // Everyone did the same work at the object -- the worker share (70%/90%
+    // of the object's total, after the brigadier/senior cuts above) splits
+    // EVENLY across every worker who worked there, regardless of hours or
+    // discipline/productivity coefficients. Those coefficients stay entered
+    // per person for record-keeping, but no longer weight the split.
+    const workerOnePay = workerRows.length ? (o.objectTotal * workerPercent) / workerRows.length : 0;
 
     const rows: SalaryRow[] = rowsSrc.map((r) => {
       let pay = 0;
       if (hasBrigadier && r.employeeId === brigadierEmployeeId) pay = brigadierOnePay;
       else if (hasSenior && seniorSet.has(r.employeeId)) pay = seniorOnePay;
-      else pay = sumWorkerPoints > 0 ? (o.objectTotal * workerPercent * r.points) / sumWorkerPoints : 0;
+      else pay = workerOnePay;
 
       return {
         employeeId: r.employeeId,
