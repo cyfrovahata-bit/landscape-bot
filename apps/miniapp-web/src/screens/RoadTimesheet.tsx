@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject } from "../lib/api";
 import { todayISO } from "../lib/date";
 import { confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
-import { employeeRole, initials, roleAccent } from "../lib/employee";
+import { employeeRole, initials, roleAccent, groupByBrigade } from "../lib/employee";
 import { saveDraft, loadDraft, clearDraft } from "../lib/draft";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
@@ -165,24 +165,6 @@ function normalizeDraftPlan(raw: unknown): ObjPlan {
 
 const UNITS = ["м²", "м", "пог.м", "шт"];
 const COEF_PRESETS = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
-
-function groupByBrigade(employees: Employee[]) {
-  const NO_BRIGADE = "__NO_BRIGADE__";
-  const map = new Map<string, Employee[]>();
-  for (const e of employees) {
-    const id = e.brigadeId?.trim() || NO_BRIGADE;
-    const list = map.get(id) ?? [];
-    list.push(e);
-    map.set(id, list);
-  }
-  return [...map.entries()]
-    .map(([id, members]) => {
-      const leader = members.find((e) => employeeRole(e) === "бригадир");
-      const title = id === NO_BRIGADE ? "Без бригади" : leader ? leader.position!.replace(/^бригадир\s*/i, "").trim() || leader.position! : id;
-      return { id, title, members: [...members].sort((a, b) => a.name.localeCompare(b.name)) };
-    })
-    .sort((a, b) => (a.id === NO_BRIGADE ? 1 : b.id === NO_BRIGADE ? -1 : a.title.localeCompare(b.title)));
-}
 
 function groupByCity(objects: WorkObject[]) {
   const NO_CITY = "__NO_CITY__";

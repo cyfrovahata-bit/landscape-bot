@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { api, type Employee, type LogisticDirection } from "../lib/api";
 import { todayISO } from "../lib/date";
 import { haptic } from "../lib/telegram";
-import { employeeRole, initials, roleAccent } from "../lib/employee";
+import { employeeRole, initials, roleAccent, groupByBrigade } from "../lib/employee";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
+import { NumericKeypad } from "../components/NumericKeypad";
 
 type Item = { logisticId: string; qty: number; employeeIds: string[] };
 type Stage = "dest" | "qty" | "people" | "review";
@@ -30,9 +31,11 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
   // null = adding a brand-new item; otherwise the index in `items` currently being edited.
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftDirectionId, setDraftDirectionId] = useState("");
-  const [draftQty, setDraftQty] = useState(1);
+  const [qtyBuffer, setQtyBuffer] = useState("1");
   const [draftEmployeeIds, setDraftEmployeeIds] = useState<string[]>([]);
   const [editActionIndex, setEditActionIndex] = useState<number | null>(null);
+  const [peopleSearch, setPeopleSearch] = useState("");
+  const [expandedBrigadeId, setExpandedBrigadeId] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +51,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
   function resetDraft() {
     setEditingIndex(null);
     setDraftDirectionId("");
-    setDraftQty(1);
+    setQtyBuffer("1");
     setDraftEmployeeIds([]);
   }
 
@@ -89,7 +92,8 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
   }
 
   function confirmQty() {
-    if (!draftQty || draftQty < 1 || draftQty > 999) {
+    const n = Number(qtyBuffer);
+    if (!n || n < 1 || n > 999) {
       setError("Введи число від 1 до 999");
       haptic("error");
       return;
@@ -114,7 +118,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
       haptic("error");
       return;
     }
-    const newItem: Item = { logisticId: draftDirectionId, qty: draftQty, employeeIds: draftEmployeeIds };
+    const newItem: Item = { logisticId: draftDirectionId, qty: Number(qtyBuffer) || 1, employeeIds: draftEmployeeIds };
     setItems((prev) => {
       if (editingIndex !== null) {
         const next = [...prev];
@@ -136,7 +140,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     const it = items[idx];
     setEditingIndex(idx);
     setDraftDirectionId(part === "dest" ? "" : it.logisticId);
-    setDraftQty(it.qty);
+    setQtyBuffer(String(it.qty));
     setDraftEmployeeIds(it.employeeIds);
     setEditActionIndex(null);
     setError(null);
@@ -212,57 +216,100 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
       {stage === "qty" && (
         <>
           <div className="step-badge">🔢 КІЛЬКІСТЬ</div>
-          <div className="section-title">{directionById.get(draftDirectionId)?.name}</div>
-          <div className="hint" style={{ padding: "0 16px 8px" }}>
-            {directionById.get(draftDirectionId)?.tariff} грн за одиницю
+          <div className="section-title row">
+            <span>{directionById.get(draftDirectionId)?.name}</span>
+            <span className="badge">{directionById.get(draftDirectionId)?.tariff} грн/од.</span>
           </div>
-          <div className="big-number">{draftQty}</div>
-          <div className="field">
-            <label>Кількість обʼєктів</label>
-            <div className="stepper">
-              <button onClick={() => setDraftQty((q) => Math.max(1, q - 1))}>−</button>
-              <input value={draftQty} onChange={(e) => setDraftQty(Number(e.target.value) || 1)} />
-              <button onClick={() => setDraftQty((q) => Math.min(999, q + 1))}>+</button>
-            </div>
-          </div>
+          <div className="big-number">{qtyBuffer || "0"}</div>
           <div className="chip-row">
             {QTY_QUICK.map((n) => (
-              <button key={n} className={`chip ${draftQty === n ? "selected" : ""}`} onClick={() => setDraftQty(n)}>
+              <button key={n} className={`chip ${Number(qtyBuffer) === n ? "selected" : ""}`} onClick={() => setQtyBuffer(String(n))}>
                 {n}
               </button>
             ))}
           </div>
-          <MainButton text="Далі → Люди" onClick={confirmQty} />
+          <NumericKeypad value={qtyBuffer} onChange={(next) => next.length <= 3 && setQtyBuffer(next)} />
+          <MainButton text="Далі → Люди" onClick={confirmQty} disabled={!qtyBuffer || Number(qtyBuffer) < 1} />
         </>
       )}
 
       {stage === "people" && (
         <>
           <div className="step-badge">👥 ЛЮДИ</div>
-          <div className="section-title">Працівники — {directionById.get(draftDirectionId)?.name}</div>
+          <div className="section-title row">
+            <span>Працівники — Обрано {draftEmployeeIds.length}</span>
+            {draftEmployeeIds.length > 0 && (
+              <button className="chip" onClick={() => setDraftEmployeeIds([])}>
+                🗑 Очистити вибір
+              </button>
+            )}
+          </div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>{directionById.get(draftDirectionId)?.name}</div>
+          <input
+            className="search-box"
+            placeholder="Пошук людини…"
+            value={peopleSearch}
+            onChange={(e) => setPeopleSearch(e.target.value)}
+          />
           <div className="list">
-            {employees.map((emp) => {
-              const lockedByOther = items.some((it, i) => i !== editingIndex && it.employeeIds.includes(emp.id));
-              const checked = draftEmployeeIds.includes(emp.id);
+            {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase()))).map((g) => {
+              const expanded = expandedBrigadeId === g.id || !!peopleSearch;
+              const selectedCount = g.members.filter((e) => draftEmployeeIds.includes(e.id)).length;
+              const lockedElsewhere = new Set(items.flatMap((it, i) => (i === editingIndex ? [] : it.employeeIds)));
+              const selectable = g.members.filter((e) => !lockedElsewhere.has(e.id));
+              const allSelected = selectable.length > 0 && selectable.every((e) => draftEmployeeIds.includes(e.id));
               return (
-                <button
-                  key={emp.id}
-                  className={`cell ${checked ? "selected" : ""}`}
-                  disabled={lockedByOther}
-                  style={lockedByOther ? { opacity: 0.4 } : undefined}
-                  onClick={() => toggleDraftEmployee(emp.id)}
-                >
-                  <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
-                    <span className={`avatar-circle ${roleAccent(employeeRole(emp))}`}>{initials(emp.name)}</span>
-                    {emp.name}
-                  </span>
-                  {lockedByOther && <span className="badge warn">🔒 зайнятий</span>}
-                </button>
+                <div key={g.id}>
+                  <button className="cell" onClick={() => setExpandedBrigadeId(expanded ? null : g.id)}>
+                    <span className="cell-title">
+                      {expanded ? "▾" : "▸"} {g.title}
+                    </span>
+                    <span className="badge">
+                      {selectedCount}/{g.members.length}
+                    </span>
+                  </button>
+                  {expanded && (
+                    <div style={{ paddingLeft: 12 }}>
+                      <button
+                        className={`bulk-select-btn ${allSelected ? "active" : ""}`}
+                        onClick={() =>
+                          setDraftEmployeeIds((prev) =>
+                            allSelected
+                              ? prev.filter((id) => !selectable.some((e) => e.id === id))
+                              : [...new Set([...prev, ...selectable.map((e) => e.id)])],
+                          )
+                        }
+                        disabled={!selectable.length}
+                      >
+                        {allSelected ? "✕ Зняти всю бригаду" : "✓ Обрати всю бригаду"}
+                      </button>
+                      {g.members.map((emp) => {
+                        const locked = lockedElsewhere.has(emp.id);
+                        const checked = draftEmployeeIds.includes(emp.id);
+                        return (
+                          <button
+                            key={emp.id}
+                            className={`cell ${checked ? "selected" : ""}`}
+                            disabled={locked}
+                            style={locked ? { opacity: 0.4 } : undefined}
+                            onClick={() => toggleDraftEmployee(emp.id)}
+                          >
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                              <span className={`avatar-circle ${roleAccent(employeeRole(emp))}`}>{initials(emp.name)}</span>
+                              {emp.name}
+                            </span>
+                            {locked ? <span className="badge warn">🔒 зайнятий</span> : <span className="role-tag">{employeeRole(emp)}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
-          <MainButton text="Готово ✅" onClick={commitItem} />
+          <MainButton text="Готово ✅" onClick={commitItem} disabled={!draftEmployeeIds.length} />
         </>
       )}
 
