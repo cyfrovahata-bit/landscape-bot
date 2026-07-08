@@ -537,6 +537,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       "Точно почати день заново? Усі дані поточної поїздки буде видалено з цього екрана (уже відправлений звіт на сервері це не видаляє, лише перезапише його наступною відправкою).",
     );
     if (!confirmed) return;
+    if (carId || employeeIds.length) {
+      try {
+        await api.post("/api/road-timesheet/reserve/release", {
+          date,
+          carId: carId || undefined,
+          employeeIds: employeeIds.length ? employeeIds : undefined,
+        });
+      } catch {
+        // best-effort -- resetting the local draft must not be blocked by a network hiccup
+      }
+    }
     clearDraft();
     setCarId("");
     setOdoStart("");

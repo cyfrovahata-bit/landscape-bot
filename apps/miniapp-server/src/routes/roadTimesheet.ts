@@ -199,7 +199,7 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
   const events = await tx
     .select()
     .from(schema.events)
-    .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", "RTS_SAVE"])));
+    .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", ...PEOPLE_RELEASE_TYPES])));
 
   const latestByEmployee = new Map<string, { type: string; ts: Date }>();
   for (const e of events) {
@@ -216,15 +216,18 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
     }
   }
 
-  const takenIds = new Set([...latestByEmployee.entries()].filter(([, v]) => v.type !== "RTS_SAVE").map(([id]) => id));
+  const takenIds = new Set([...latestByEmployee.entries()].filter(([, v]) => !PEOPLE_RELEASE_TYPES.includes(v.type)).map(([id]) => id));
   return employeeIds.filter((id) => takenIds.has(id));
 }
 
 // A car frees up once it's returned (RTS_CAR_RETURN, written the moment the
-// foreman records the return odometer -- see POST /car-return) or once the
-// day gets fully submitted (RTS_SAVE) -- whichever comes first. Anything
-// else (just RTS_RESERVE_CAR) means it's still actively out.
-const CAR_RELEASE_TYPES = ["RTS_CAR_RETURN", "RTS_SAVE"];
+// foreman records the return odometer -- see POST /car-return), the day gets
+// fully submitted (RTS_SAVE), or the foreman cancels the reservation outright
+// (RTS_RESERVE_CANCEL, written when they reset the day before submitting --
+// see POST /reserve/release) -- whichever comes first. Anything else (just
+// RTS_RESERVE_CAR) means it's still actively out.
+const CAR_RELEASE_TYPES = ["RTS_CAR_RETURN", "RTS_SAVE", "RTS_RESERVE_CANCEL"];
+const PEOPLE_RELEASE_TYPES = ["RTS_SAVE", "RTS_RESERVE_CANCEL"];
 
 /** Same "latest event wins, RTS_CAR_RETURN/RTS_SAVE frees it" rule as
  * findEmployeeConflicts, but for a single car. Runs inside the caller's
@@ -697,6 +700,46 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
 });
 
 /**
+ * POST /api/road-timesheet/reserve/release — called when the foreman resets
+ * the day (🗑 "Скинути день") before the final submit, so the car/people they
+ * had reserved stop showing as taken for everyone else right away instead of
+ * staying locked with nothing to ever release them (a plain client-side
+ * reset never touches the server-side RTS_RESERVE_CAR/RTS_RESERVE_PEOPLE
+ * events, so without this the reservation would otherwise last forever).
+ */
+roadTimesheetRouter.post("/reserve/release", async (req, res) => {
+  const { date, carId, employeeIds } = req.body as { date: string; carId?: string; employeeIds?: string[] };
+  if (!date) {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+  const foremanTgId = req.user!.tgId;
+
+  if (carId) {
+    await writeEvent({
+      eventId: makeEventId("RTSRSV"),
+      status: "АКТИВНА",
+      date,
+      foremanTgId,
+      type: "RTS_RESERVE_CANCEL",
+      carId,
+    });
+  }
+  if (employeeIds?.length) {
+    await writeEvent({
+      eventId: makeEventId("RTSRSV"),
+      status: "АКТИВНА",
+      date,
+      foremanTgId,
+      type: "RTS_RESERVE_CANCEL",
+      employeeIds: JSON.stringify(employeeIds),
+    });
+  }
+
+  res.json({ ok: true });
+});
+
+/**
  * GET /api/road-timesheet/cars-last-odometer — the most recent known
  * odometer value per car (any date), shown next to each car in the PICK_CAR
  * screen so the foreman can sanity-check the new reading against it.
@@ -791,8 +834,8 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
 /**
  * GET /api/road-timesheet/people-status?date=YYYY-MM-DD — which employees
  * are already riding with another foreman today. An employee frees up again
- * once that foreman's day is fully submitted (RTS_SAVE), matching the bot's
- * FREE_TYPES logic in buildBusyEmployeesMap.
+ * once that foreman's day is fully submitted (RTS_SAVE) or the reservation is
+ * cancelled outright (RTS_RESERVE_CANCEL -- see POST /reserve/release).
  */
 roadTimesheetRouter.get("/people-status", async (req, res) => {
   const date = String(req.query.date || "");
@@ -805,7 +848,7 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
     db
       .select()
       .from(schema.events)
-      .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", "RTS_SAVE"]))),
+      .where(and(eq(schema.events.date, date), inArray(schema.events.type, ["RTS_RESERVE_PEOPLE", ...PEOPLE_RELEASE_TYPES]))),
     db.select().from(schema.users),
   ]);
   const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
@@ -827,7 +870,7 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
   }
 
   const taken = [...latestByEmployee.entries()]
-    .filter(([, v]) => v.type !== "RTS_SAVE")
+    .filter(([, v]) => !PEOPLE_RELEASE_TYPES.includes(v.type))
     .map(([employeeId, v]) => ({ employeeId, foremanName: nameByTgId.get(v.foremanTgId) ?? `Бригадир ${v.foremanTgId}` }));
 
   res.json({ taken });
