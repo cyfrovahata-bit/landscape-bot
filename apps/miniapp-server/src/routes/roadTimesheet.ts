@@ -18,6 +18,8 @@ import {
   withLock,
   sendTelegramMessage,
   config,
+  buildAccountingRows,
+  writeAccountingReportForDay,
   type LockedTx,
 } from "@landscape/core";
 import { and, eq, inArray, desc, lt, gte } from "drizzle-orm";
@@ -1239,6 +1241,53 @@ async function setDayStatus(date: string, foremanTgId: number, status: string) {
   return rows.length;
 }
 
+/** Builds and writes this day's payroll into the shared БУХЗВІТ report for the
+ * accountant, split per work item (see buildAccountingRows) -- mirrors what
+ * the legacy bot does on ITS OWN approval flow, which never fires for a day
+ * approved through the mini-app. Errors are logged, not thrown: the approval
+ * itself has already succeeded by the time this runs, and a Sheets hiccup
+ * here must not make the admin think the approval failed. */
+async function exportApprovedDayToAccounting(date: string, foremanTgId: number): Promise<{ ok: boolean; rows: number }> {
+  try {
+    const trips = await fetchAllTrips(date, foremanTgId);
+    const mergedObjects = mergeObjects(trips.map((t) => t.objects));
+    const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
+    const totalKm = trips.reduce((acc, t) => {
+      const legKm = typeof t.odoStart === "number" && typeof t.odoEnd === "number" ? t.odoEnd - t.odoStart : 0;
+      return acc + (Number.isFinite(legKm) ? legKm : 0);
+    }, 0);
+    const combined = await computePayroll({ odoStart: 0, odoEnd: totalKm, employeeIds: unionEmployeeIds, objects: mergedObjects });
+
+    const workIds = [...new Set(mergedObjects.flatMap((o) => (o.works ?? []).map((w) => w.workId)))];
+    const workRows = workIds.length ? await db.select().from(schema.works).where(inArray(schema.works.id, workIds)) : [];
+    const tariffByWorkId = new Map(workRows.map((w) => [w.id, w.tariff]));
+    const unitByWorkId = new Map(workRows.map((w) => [w.id, w.unit ?? ""]));
+    const employeeNameById = new Map([...combined.employeeById].map(([id, v]) => [id, v.name]));
+
+    const rows = buildAccountingRows({
+      objects: mergedObjects,
+      salaryPacks: combined.salaryPacks,
+      roadAllowancePerPerson: combined.roadAllowance.perPerson,
+      unionEmployeeIds,
+      employeeNameById,
+      tariffByWorkId,
+      unitByWorkId,
+    });
+
+    // Keyed on the trips' own eventIds (not just date+foreman) so a day that
+    // gets returned for correction, resubmitted, and re-approved is treated
+    // as a NEW state to export -- the corrected numbers must reach the
+    // accountant instead of being skipped as "already done" from the first,
+    // wrong approval.
+    const exportKey = `MINIAPP|${date}|${foremanTgId}|${trips.map((t) => t.eventId).sort().join(",")}`;
+    const result = await writeAccountingReportForDay({ key: exportKey, rows });
+    return { ok: true, rows: result.rows };
+  } catch (e) {
+    console.error(`[accounting] failed to export date=${date} foremanTgId=${foremanTgId}: ${(e as Error).message}`);
+    return { ok: false, rows: 0 };
+  }
+}
+
 /** POST /api/road-timesheet/pending/approve — admin-only. { date, foremanTgId } */
 roadTimesheetRouter.post("/pending/approve", async (req, res) => {
   if (blockNonAdmin(req, res)) return;
@@ -1254,8 +1303,10 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
     return;
   }
 
+  const accounting = await exportApprovedDayToAccounting(date, foremanTgId);
+
   await sendTelegramMessage(foremanTgId, `✅ *День затверджено адміністратором*\n📅 Дата: ${date}`);
-  res.json({ ok: true });
+  res.json({ ok: true, accountingExported: accounting.ok });
 });
 
 /** POST /api/road-timesheet/pending/return — admin-only. { date, foremanTgId, reasonCode, note? } */

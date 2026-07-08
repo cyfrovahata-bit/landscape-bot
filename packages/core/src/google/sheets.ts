@@ -63,6 +63,36 @@ export function buildRowByHeaders(headers: string[], map: Record<string, number>
   return row;
 }
 
+/** Creates the tab with a header row if it doesn't exist yet -- lets a writer
+ * target a brand-new report tab (e.g. an accounting export) without a manual
+ * setup step in the spreadsheet first. */
+export async function ensureSheet(sheetName: string, headers: readonly string[]) {
+  const sheets = getSheetsClient();
+
+  const meta = await withSheetsRetry("spreadsheet metadata", () =>
+    sheets.spreadsheets.get({ spreadsheetId: config.sheetId, fields: "sheets.properties.title" }),
+  );
+  const exists = (meta.data.sheets ?? []).some((s) => s.properties?.title === sheetName);
+  if (exists) return;
+
+  await withSheetsRetry(`${sheetName} create`, () =>
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId: config.sheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
+    }),
+  );
+
+  const lastCol = colToA1(headers.length - 1);
+  await withSheetsRetry(`${sheetName}!A1:${lastCol}1 update`, () =>
+    sheets.spreadsheets.values.update({
+      spreadsheetId: config.sheetId,
+      range: `${sheetRef(sheetName)}!A1:${lastCol}1`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[...headers]] },
+    }),
+  );
+}
+
 export async function loadSheet(sheetName: string, range = "A:Z"): Promise<LoadedSheet> {
   const sheets = getSheetsClient();
 
