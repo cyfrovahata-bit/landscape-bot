@@ -1605,7 +1605,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   const label = onboard.includes(id) ? "🚗 в дорозі" : atPlan ? `📍 ${atPlan.objectName}` : "❓";
                   return (
                     <div key={id} className="cell" style={{ cursor: "default" }}>
-                      <span className="cell-title">{employeeName(id)}</span>
+                      <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                        {employeeName(id)}
+                      </span>
                       <span className="cell-sub">{label}</span>
                     </div>
                   );
@@ -2493,7 +2496,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         const session = plan.sessions.find((s) => s.employeeId === id && !s.endedAt);
                         return (
                           <div key={id} className="cell" style={{ cursor: "default" }}>
-                            <span className="cell-title">{employeeName(id)}</span>
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                              {employeeName(id)}
+                            </span>
                             <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
                               {session && <span className="hint">{fmtHMS(now - new Date(session.startedAt).getTime())}</span>}
                               <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
@@ -2949,7 +2955,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <div key={id}>
                   {isWorker ? (
                     <button className="cell" onClick={() => setExpandedCoefEmployeeId(expanded ? null : id)}>
-                      <span className="cell-title">
+                      <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
                         {expanded ? "▾" : "▸"} {employeeName(id)}
                       </span>
                       <span className="cell-sub">
@@ -2958,7 +2965,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     </button>
                   ) : (
                     <div className="cell" style={{ cursor: "default" }}>
-                      <span className="cell-title">{employeeName(id)}</span>
+                      <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                        {employeeName(id)}
+                      </span>
                       <span className="cell-sub">{fmtHours(totalMs)} год</span>
                     </div>
                   )}
