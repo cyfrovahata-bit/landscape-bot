@@ -1486,10 +1486,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           <div className="section-title row">
             <span>Поточна поїздка · {date}</span>
-            {!tripStartedAt && (
-              <span className={`badge ${readinessScore === 4 ? "ok" : readinessScore === 0 ? "" : "warn"}`}>{readinessScore}/4 готово</span>
-            )}
+            {!tripStartedAt && <span className="hint">{readinessScore}/4 готово</span>}
           </div>
+          {!tripStartedAt && (
+            <div className="progress-track">
+              <div className={`progress-fill ${readinessScore === 4 ? "done" : ""}`} style={{ width: `${(readinessScore / 4) * 100}%` }} />
+            </div>
+          )}
 
           {restoredBanner && (
             <div className="hint" style={{ padding: "0 16px 8px" }}>
@@ -1499,8 +1502,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
           {showCopySuggestion && lastTrip && (
             <div className="suggestion-card">
-              <div className="cell-title">🔁 Повторити маршрут з {lastTrip.date}?</div>
-              <div className="hint">
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span className="setup-icon accent-blue" style={{ width: 34, height: 34, fontSize: 16 }}>
+                  🔁
+                </span>
+                <div className="cell-title">Повторити маршрут з {lastTrip.date}?</div>
+              </div>
+              <div className="hint" style={{ marginTop: 6 }}>
                 {cars.find((c) => c.id === lastTrip.carId)?.name ?? lastTrip.carId} · {lastTrip.employeeIds.length} людей · {lastTrip.objects.length} обʼєктів
               </div>
               <div style={{ marginTop: 6 }}>
@@ -1533,19 +1541,31 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
           <div className="list">
             <button className="cell" onClick={() => { setEditReturnStep("HUB"); setStep("PICK_CAR"); }}>
-              <span className="cell-title">🚙 Авто{carId ? `: ${cars.find((c) => c.id === carId)?.name ?? ""}` : ""}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span className="setup-icon accent-blue">🚙</span>
+                <span className="cell-title">Авто{carId ? `: ${cars.find((c) => c.id === carId)?.name ?? ""}` : ""}</span>
+              </span>
               {carId && odoStart ? <span className="badge ok">{odoStart} км</span> : <span className="badge warn">не обрано</span>}
             </button>
             <button className="cell" onClick={() => { setEditReturnStep("HUB"); setStep("PICK_PEOPLE"); }}>
-              <span className="cell-title">👥 Люди</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span className="setup-icon accent-purple">👥</span>
+                <span className="cell-title">Люди</span>
+              </span>
               {employeeIds.length ? <span className="badge ok">{employeeIds.length} обрано</span> : <span className="badge warn">не обрано</span>}
             </button>
             <button className="cell" onClick={() => setStep("PICK_OBJECTS")}>
-              <span className="cell-title">📍 Обʼєкти</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span className="setup-icon accent-orange">📍</span>
+                <span className="cell-title">Обʼєкти</span>
+              </span>
               {plans.length ? <span className="badge ok">{plans.length} обрано</span> : <span className="badge warn">не обрано</span>}
             </button>
             <button className="cell" onClick={() => plans.length && setStep("PLAN")} disabled={!plans.length}>
-              <span className="cell-title">🧱 Роботи</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span className="setup-icon accent-teal">🧱</span>
+                <span className="cell-title">Роботи</span>
+              </span>
               {plans.length ? (
                 <span className={`badge ${allObjectsPlanned ? "ok" : "warn"}`}>
                   {plans.filter((p) => p.works.length).length}/{plans.length} з роботами
