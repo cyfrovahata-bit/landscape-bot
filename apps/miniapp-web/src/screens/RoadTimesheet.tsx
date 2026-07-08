@@ -348,6 +348,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [editingTripSeq, setEditingTripSeq] = useState<number | null>(null);
   const [inProgressResumeStep, setInProgressResumeStep] = useState<Step | null>(null);
   const [expandedTripSeq, setExpandedTripSeq] = useState<number | null>(null);
+  const [doneTripPeopleExpanded, setDoneTripPeopleExpanded] = useState(false);
 
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
@@ -1314,7 +1315,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           const expanded = expandedTripSeq === trip.tripSeq;
           return (
             <div key={trip.tripSeq} className="list" style={{ marginTop: 8 }}>
-              <button className="cell" onClick={() => setExpandedTripSeq(expanded ? null : trip.tripSeq)}>
+              <button
+                className="cell"
+                onClick={() => {
+                  setExpandedTripSeq(expanded ? null : trip.tripSeq);
+                  setDoneTripPeopleExpanded(false);
+                }}
+              >
                 <span className="cell-title">
                   {expanded ? "▾" : "▸"} 🚙 {cars.find((c) => c.id === trip.carId)?.name ?? "Поїздка"}
                 </span>
@@ -1327,7 +1334,25 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               </button>
               {expanded && (
                 <div style={{ padding: "0 16px 12px" }} className="hint">
-                  <div>👥 {trip.employeeIds.map(employeeName).join(", ") || "—"}</div>
+                  <button className="back-btn" onClick={() => setDoneTripPeopleExpanded((v) => !v)}>
+                    {doneTripPeopleExpanded ? "▾ Сховати людей" : `▸ Показати людей (${trip.employeeIds.length})`}
+                  </button>
+                  {doneTripPeopleExpanded && (
+                    <div className="list" style={{ margin: "8px 0" }}>
+                      {trip.employeeIds.length ? (
+                        trip.employeeIds.map((id) => (
+                          <div key={id} className="cell" style={{ cursor: "default" }}>
+                            <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                              {employeeName(id)}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="empty-state">Нікого не обрано</div>
+                      )}
+                    </div>
+                  )}
                   {trip.objects.map((o) => (
                     <div key={o.objectId} style={{ marginTop: 6 }}>
                       <div style={{ fontWeight: 600 }}>📍 {o.objectName}</div>
