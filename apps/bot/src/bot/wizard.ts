@@ -1,6 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import { sendAppWelcome } from "./ui.js";
 import { TEXTS } from "./texts.js";
+import { config } from "../config.js";
 import { hydrateAuth } from "./core/auth.js";
 import { fetchUsers, fetchAllUserRows, addUserToSheet, updateUserRow } from "../google/sheets/dictionaries.js";
 
@@ -187,6 +188,27 @@ async function updateUser(tgId: number, role: string, active: string) {
     active,
     role === "Відхилено" ? "Відхилено адміністратором" : "Підтверджено адміністратором",
   ]);
+
+  await triggerMiniAppSync();
+}
+
+// The Mini App reads users from Postgres, which only mirrors this Sheets
+// update on the next scheduled sync (up to SYNC_INTERVAL_MS later) -- so
+// without this, a freshly-approved brigadier hits "Access denied" in the
+// Mini App for up to that whole interval. Best-effort: if the mini-app
+// service is unreachable or PUBLIC_APP_URL isn't set, the scheduled sync
+// still catches it eventually, so a failure here is never fatal.
+async function triggerMiniAppSync() {
+  if (!config.miniAppUrl) return;
+  try {
+    const res = await fetch(`${config.miniAppUrl}/internal/sync-now`, {
+      method: "POST",
+      headers: { "x-bot-token": config.botToken },
+    });
+    if (!res.ok) console.warn(`[BOT][SYNC_NOW] failed status=${res.status}`);
+  } catch (e: any) {
+    console.warn(`[BOT][SYNC_NOW] error: ${e?.message ?? String(e)}`);
+  }
 }
 
 export async function handleCallback(bot: TelegramBot, q: TelegramBot.CallbackQuery) {

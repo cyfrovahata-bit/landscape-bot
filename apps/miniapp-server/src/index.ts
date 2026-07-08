@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import express from "express";
 import cors from "cors";
-import { startSyncLoop, runMigrations, config } from "@landscape/core";
+import { startSyncLoop, runSyncCycle, runMigrations, config } from "@landscape/core";
 import { requireTelegramAuth } from "./authMiddleware.js";
 import { dictionariesRouter } from "./routes/dictionaries.js";
 import { logisticsRouter } from "./routes/logistics.js";
@@ -24,6 +24,26 @@ app.use(cors());
 app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Lets the legacy bot (apps/bot) trigger an immediate Sheets -> Postgres
+// sync right after approving/rejecting a user registration, instead of the
+// new user hitting "Access denied" in the Mini App for up to
+// SYNC_INTERVAL_MS until the next scheduled background sync picks it up.
+// Authenticated with the shared BOT_TOKEN (both services already have it)
+// since the caller is the bot process itself, not a Telegram Mini App
+// session -- there's no Telegram initData to validate here.
+app.post("/internal/sync-now", async (req, res) => {
+  if (!config.botToken || req.header("x-bot-token") !== config.botToken) {
+    res.status(403).json({ error: "forbidden" });
+    return;
+  }
+  try {
+    await runSyncCycle();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
 
 const apiRouter = express.Router();
 apiRouter.use(requireTelegramAuth);
