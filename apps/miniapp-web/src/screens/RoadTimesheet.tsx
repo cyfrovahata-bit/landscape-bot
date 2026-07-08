@@ -166,7 +166,6 @@ function normalizeDraftPlan(raw: unknown): ObjPlan {
   };
 }
 
-const UNITS = ["м²", "м", "пог.м", "шт"];
 const COEF_PRESETS = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
 
 function groupByCity(objects: WorkObject[]) {
@@ -258,7 +257,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [selectedWorksExpanded, setSelectedWorksExpanded] = useState(false);
   const [planVolumeWorkId, setPlanVolumeWorkId] = useState<string | null>(null);
   const [volumeBuffer, setVolumeBuffer] = useState("");
-  const [volumeUnit, setVolumeUnit] = useState("");
   const [bulkVolumeInput, setBulkVolumeInput] = useState<string | null>(null);
 
   // --- pre-departure review (READY) ---
@@ -1152,7 +1150,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setPlanObjectId(objectId);
     setPlanVolumeWorkId(work.workId);
     setVolumeBuffer(work.volume && work.volume !== "?" ? work.volume : "");
-    setVolumeUnit(work.unit);
   }
 
   function saveVolumeDetail(deferred: boolean) {
@@ -1163,9 +1160,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           ? p
           : {
               ...p,
-              works: p.works.map((w) =>
-                w.workId !== planVolumeWorkId ? w : { ...w, volume: deferred ? "?" : volumeBuffer, unit: volumeUnit || w.unit },
-              ),
+              // Unit comes fixed from the works dictionary (set on toggleWork/
+              // toggleAllWorksInCategory when the work is added to the plan) --
+              // never editable here.
+              works: p.works.map((w) => (w.workId !== planVolumeWorkId ? w : { ...w, volume: deferred ? "?" : volumeBuffer })),
             },
       ),
     );
@@ -2440,13 +2438,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               <>
                 <div className="step-badge">ОБСЯГ РОБОТИ</div>
                 <div className="section-title">🛠 {work.workName}</div>
-                <div className="big-number">{volumeBuffer || "0"}</div>
-                <div className="unit-tabs">
-                  {UNITS.map((u) => (
-                    <button key={u} className={`unit-tab ${volumeUnit === u ? "selected" : ""}`} onClick={() => setVolumeUnit(u)}>
-                      {u}
-                    </button>
-                  ))}
+                <div className="big-number">
+                  {volumeBuffer || "0"} {work.unit}
                 </div>
                 <div style={{ textAlign: "center", padding: "0 16px 8px" }}>
                   <button className="back-btn" onClick={() => saveVolumeDetail(true)}>
