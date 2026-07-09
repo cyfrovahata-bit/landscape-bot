@@ -5,7 +5,7 @@ import { ensureSheet, loadSheet, appendRows } from "./google/sheets.js";
 // accountant actually opens -- there must never be two separate "БУХЗВІТ"s.
 const ACCOUNTING_SHEET = "БУХЗВІТ";
 const ACCOUNTING_META_SHEET = "БУХЗВІТ_META";
-const ACCOUNTING_HEADERS = ["№", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Нарахування", "Примітки"] as const;
+const ACCOUNTING_HEADERS = ["№", "Дата", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Нарахування", "Примітки"] as const;
 const ACCOUNTING_META_HEADERS = ["key", "createdAt", "rowsCount"] as const;
 
 function money(n: number) {
@@ -17,6 +17,7 @@ export type AccountingObject = { objectId: string; objectName: string; works: Ac
 export type AccountingSalaryRow = { employeeId: string; employeeName: string; pay: number };
 export type AccountingSalaryPack = { objectId: string; objectName: string; rows: AccountingSalaryRow[] };
 export type AccountingRow = {
+  date: string;
   employeeName: string;
   objectName: string;
   workName: string;
@@ -37,6 +38,7 @@ export type AccountingRow = {
  * to an accountant.
  */
 export function buildAccountingRows(params: {
+  date: string;
   objects: AccountingObject[];
   salaryPacks: AccountingSalaryPack[];
   roadAllowancePerPerson: number;
@@ -45,7 +47,7 @@ export function buildAccountingRows(params: {
   tariffByWorkId: Map<string, number>;
   unitByWorkId: Map<string, string>;
 }): AccountingRow[] {
-  const { objects, salaryPacks, roadAllowancePerPerson, unionEmployeeIds, employeeNameById, tariffByWorkId, unitByWorkId } = params;
+  const { date, objects, salaryPacks, roadAllowancePerPerson, unionEmployeeIds, employeeNameById, tariffByWorkId, unitByWorkId } = params;
   const objectsById = new Map(objects.map((o) => [o.objectId, o]));
   const out: AccountingRow[] = [];
 
@@ -81,6 +83,7 @@ export function buildAccountingRows(params: {
         remaining = money(remaining - amount);
         if (amount <= 0) return;
         out.push({
+          date,
           employeeName: row.employeeName,
           objectName: pack.objectName,
           workName: w.workName,
@@ -94,6 +97,7 @@ export function buildAccountingRows(params: {
   if (roadAllowancePerPerson > 0) {
     for (const empId of unionEmployeeIds) {
       out.push({
+        date,
         employeeName: employeeNameById.get(empId) ?? empId,
         objectName: "—",
         workName: "Доплата за виїзд",
@@ -108,7 +112,7 @@ export function buildAccountingRows(params: {
 
 async function loadAccountingSheet() {
   await ensureSheet(ACCOUNTING_SHEET, ACCOUNTING_HEADERS);
-  return loadSheet(ACCOUNTING_SHEET, "A:G");
+  return loadSheet(ACCOUNTING_SHEET, "A:H");
 }
 
 async function loadAccountingMetaSheet() {
@@ -130,7 +134,7 @@ async function appendAccountingReportRows(rows: AccountingRow[]) {
 
   await appendRows(
     ACCOUNTING_SHEET,
-    rows.map((row) => [nextNo++, row.employeeName, row.objectName, row.workName, row.volume, row.amount, ""]),
+    rows.map((row) => [nextNo++, row.date, row.employeeName, row.objectName, row.workName, row.volume, row.amount, ""]),
   );
 }
 

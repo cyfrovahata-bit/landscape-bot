@@ -9,6 +9,7 @@ const ACCOUNTING_SHEET = "БУХЗВІТ";
 const ACCOUNTING_META_SHEET = "БУХЗВІТ_META";
 const ACCOUNTING_HEADERS = [
   "№",
+  "Дата",
   "Працівник",
   "Об'єкт",
   "Роботи",
@@ -40,6 +41,7 @@ type RoadEventLike = {
 };
 
 type AccountingRow = {
+  date: string;
   employeeName: string;
   objectName: string;
   workName: string;
@@ -89,7 +91,7 @@ async function ensureSheet(sheetName: string, headers: readonly string[]) {
 
 async function loadAccountingSheet() {
   await ensureSheet(ACCOUNTING_SHEET, ACCOUNTING_HEADERS);
-  return loadSheet(ACCOUNTING_SHEET, "A:G");
+  return loadSheet(ACCOUNTING_SHEET, "A:H");
 }
 
 async function loadAccountingMetaSheet() {
@@ -370,6 +372,7 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
         const formattedQty = formatWorkQty(qty, unit);
 
         out.push({
+          date: ev.date,
           employeeName,
           objectName,
           workName: totalWork.workName || totalWork.workId || "—",
@@ -419,6 +422,7 @@ export async function appendAccountingReportRows(rows: AccountingRow[]) {
     ACCOUNTING_SHEET,
     rows.map((row) => [
       nextNo++,
+      row.date,
       row.employeeName,
       row.objectName,
       row.workName,

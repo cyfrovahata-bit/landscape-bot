@@ -1344,6 +1344,7 @@ async function exportApprovedDayToAccounting(
     const employeeNameById = new Map([...combined.employeeById].map(([id, v]) => [id, v.name]));
 
     const rows = buildAccountingRows({
+      date,
       objects: mergedObjects,
       salaryPacks: combined.salaryPacks,
       roadAllowancePerPerson: combined.roadAllowance.perPerson,
