@@ -239,8 +239,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // --- people / objects ---
   const [employeeIds, setEmployeeIds] = useState<string[]>([]);
   // Subset of employeeIds who showed up under their own transport (see
-  // confirmAddArrived) -- excluded from the road/travel allowance split, but
-  // still counted like everyone else for the object work-pay split.
+  // confirmDropAndArrived) -- excluded from the road/travel allowance split,
+  // but still counted like everyone else for the object work-pay split.
   const [selfTransportIds, setSelfTransportIds] = useState<string[]>([]);
   const [expandedBrigadeId, setExpandedBrigadeId] = useState<string | null>(null);
   const [selectedPeopleExpanded, setSelectedPeopleExpanded] = useState(false);
@@ -302,9 +302,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [showMovePicker, setShowMovePicker] = useState(false);
   // People who show up at an object on their own (their own car, etc.) --
   // never picked in PICK_PEOPLE, so not in employeeIds/onboard/here at all
-  // until added here.
+  // until added here. Picked from the same "drop off" screen (showDropPicker)
+  // as the vehicle's own passengers, with its own search/expanded-brigade
+  // state so it doesn't interfere with PICK_PEOPLE's.
   const [addArrivedSelected, setAddArrivedSelected] = useState<string[]>([]);
-  const [showAddArrivedPicker, setShowAddArrivedPicker] = useState(false);
+  const [arrivedSearch, setArrivedSearch] = useState("");
+  const [expandedArrivedBrigadeId, setExpandedArrivedBrigadeId] = useState<string | null>(null);
 
   // --- undo / change log / draft / submitted-lock / copy-yesterday ---
   const undoTimeoutRef = useRef<number | null>(null);
@@ -1364,13 +1367,44 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     openVolumesForObject(atObjectId, "AT_OBJECT");
   }
 
-  function confirmDrop() {
-    if (!atObjectId || !dropSelected.length) return;
+  // Handles both halves of "who's here now": people stepping out of the car
+  // (dropSelected, from onboard) and people who showed up under their own
+  // transport (addArrivedSelected, never on the trip roster until now) --
+  // one combined action/picker since both answer the same real-world
+  // question at the same moment. The self-transport half is reserved
+  // server-side with the merged list directly (not via reserveIfPossible/its
+  // employeeIds closure, which would still see pre-add state) so another
+  // foreman can't also claim them, same as picking someone up front; if that
+  // reservation fails, neither half applies, so a rejected add doesn't leave
+  // the drop-off half silently mismatched with the server.
+  async function confirmDropAndArrived() {
+    if (!atObjectId || (!dropSelected.length && !addArrivedSelected.length)) return;
     const objectName = currentAtPlan()?.objectName ?? "";
-    moveEmployeesTo(dropSelected, { kind: "object", objectId: atObjectId });
-    haptic("light");
-    logChange(`Висаджено ${dropSelected.length} на ${objectName}`);
+
+    if (addArrivedSelected.length) {
+      const mergedEmployeeIds = [...new Set([...employeeIds, ...addArrivedSelected])];
+      try {
+        await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds: mergedEmployeeIds });
+      } catch (e) {
+        setError((e as Error).message);
+        haptic("error");
+        return;
+      }
+      setEmployeeIds(mergedEmployeeIds);
+      setSelfTransportIds((prev) => [...new Set([...prev, ...addArrivedSelected])]);
+    }
+
+    const allHere = [...dropSelected, ...addArrivedSelected];
+    if (allHere.length) moveEmployeesTo(allHere, { kind: "object", objectId: atObjectId });
+
+    const parts: string[] = [];
+    if (dropSelected.length) parts.push(`висаджено ${dropSelected.length}`);
+    if (addArrivedSelected.length) parts.push(`приїхали самі (без доплати за дорогу): ${addArrivedSelected.map(employeeName).join(", ")}`);
+    logChange(`${objectName}: ${parts.join("; ")}`);
+    haptic("success");
+
     setDropSelected([]);
+    setAddArrivedSelected([]);
     setShowDropPicker(false);
   }
 
@@ -1393,33 +1427,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setMoveSelected([]);
     setMoveTargetId(null);
     setShowMovePicker(false);
-  }
-
-  // Adds someone who showed up at the object under their own steam (their
-  // own car, etc.) -- they were never picked in PICK_PEOPLE, so this is the
-  // only place they enter the day's roster at all. Reserves them server-side
-  // with the merged list directly (not via reserveIfPossible/its employeeIds
-  // closure, which would still see the state from before this add) so
-  // another foreman can't also claim them, same as picking someone up front.
-  async function confirmAddArrived() {
-    if (!atObjectId || !addArrivedSelected.length) return;
-    const ids = addArrivedSelected;
-    const objectName = currentAtPlan()?.objectName ?? "";
-    const mergedEmployeeIds = [...new Set([...employeeIds, ...ids])];
-    try {
-      await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds: mergedEmployeeIds });
-    } catch (e) {
-      setError((e as Error).message);
-      haptic("error");
-      return;
-    }
-    setEmployeeIds(mergedEmployeeIds);
-    setSelfTransportIds((prev) => [...new Set([...prev, ...ids])]);
-    moveEmployeesTo(ids, { kind: "object", objectId: atObjectId });
-    haptic("success");
-    logChange(`Приїхали самі на ${objectName} (без доплати за дорогу): ${ids.map(employeeName).join(", ")}`);
-    setAddArrivedSelected([]);
-    setShowAddArrivedPicker(false);
   }
 
   // "Everyone accounted for" = nobody is still standing on an object. Do NOT
@@ -1575,6 +1582,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       // selection and dumps you back a whole screen further than expected.
       if (showDropPicker) {
         setDropSelected([]);
+        setAddArrivedSelected([]);
         setShowDropPicker(false);
         return;
       }
@@ -1582,11 +1590,6 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setMoveSelected([]);
         setMoveTargetId(null);
         setShowMovePicker(false);
-        return;
-      }
-      if (showAddArrivedPicker) {
-        setAddArrivedSelected([]);
-        setShowAddArrivedPicker(false);
         return;
       }
       setStep(atObjectReturnStep);
@@ -2881,29 +2884,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </>
                 )}
 
-                {!showDropPicker && !showMovePicker && !showAddArrivedPicker && (
+                {!showDropPicker && !showMovePicker && (
                   <div className="list" style={{ marginTop: 8 }}>
                     <button
                       className="cell"
                       onClick={() => {
                         setDropSelected([]);
+                        setAddArrivedSelected([]);
                         setShowDropPicker(true);
                       }}
-                      disabled={!onboard.length}
                     >
-                      <span className="cell-title">👥 Висадити людей тут</span>
+                      <span className="cell-title">👥 Хто тут — висадити / додати приїхавших самих</span>
                       <span className="cell-sub">🚐 {onboard.length} в машині</span>
-                    </button>
-                    <button
-                      className="cell"
-                      onClick={() => {
-                        setAddArrivedSelected([]);
-                        setShowAddArrivedPicker(true);
-                      }}
-                      disabled={!employees.some((e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id))}
-                    >
-                      <span className="cell-title">🚶 Приїхали самі — додати</span>
-                      <span className="cell-sub">свій транспорт</span>
                     </button>
                     {notStarted.length > 0 && (
                       <button className="cell" onClick={startShift} disabled={!plan.works.length}>
@@ -2936,7 +2928,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </div>
                 )}
 
-                {plans.length > 1 && !showDropPicker && !showMovePicker && !showAddArrivedPicker && (
+                {plans.length > 1 && !showDropPicker && !showMovePicker && (
                   <>
                     <div className="section-title">Інші обʼєкти — переключитись</div>
                     <div className="list">
@@ -2954,64 +2946,107 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
                 {showDropPicker && (
                   <>
-                    <div className="section-title">Кого залишити тут</div>
-                    <div className="chip-row">
-                      {onboard.map((id) => (
-                        <div
-                          key={id}
-                          className={`chip ${dropSelected.includes(id) ? "selected" : ""}`}
-                          onClick={() => setDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
-                        >
-                          {employeeName(id)}
+                    {onboard.length > 0 && (
+                      <>
+                        <div className="section-title">Кого залишити тут</div>
+                        <div className="chip-row">
+                          {onboard.map((id) => (
+                            <div
+                              key={id}
+                              className={`chip ${dropSelected.includes(id) ? "selected" : ""}`}
+                              onClick={() => setDropSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                            >
+                              {employeeName(id)}
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      </>
+                    )}
+
+                    <div className="section-title">🚶 Хто приїхав сам (свій транспорт)</div>
+                    <input
+                      className="search-box"
+                      placeholder="Пошук людини…"
+                      value={arrivedSearch}
+                      onChange={(e) => setArrivedSearch(e.target.value)}
+                    />
+                    <div className="list">
+                      {groupByBrigade(
+                        employees.filter(
+                          (e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id) && e.name.toLowerCase().includes(arrivedSearch.toLowerCase()),
+                        ),
+                      ).map((g) => {
+                        const expanded = expandedArrivedBrigadeId === g.id || !!arrivedSearch;
+                        const selectedCount = g.members.filter((e) => addArrivedSelected.includes(e.id)).length;
+                        const allSelected = g.members.length > 0 && g.members.every((e) => addArrivedSelected.includes(e.id));
+                        return (
+                          <div key={g.id}>
+                            <button className="cell" onClick={() => setExpandedArrivedBrigadeId(expanded ? null : g.id)}>
+                              <span className="cell-title">
+                                {expanded ? "▾" : "▸"} {g.title}
+                              </span>
+                              <span className="badge">
+                                {selectedCount}/{g.members.length}
+                              </span>
+                            </button>
+                            {expanded && (
+                              <div style={{ paddingLeft: 12 }}>
+                                <button
+                                  className={`bulk-select-btn ${allSelected ? "active" : ""}`}
+                                  onClick={() =>
+                                    setAddArrivedSelected((prev) =>
+                                      allSelected
+                                        ? prev.filter((id) => !g.members.some((e) => e.id === id))
+                                        : [...new Set([...prev, ...g.members.map((e) => e.id)])],
+                                    )
+                                  }
+                                >
+                                  {allSelected ? "✕ Зняти всю бригаду" : "✓ Обрати всю бригаду"}
+                                </button>
+                                {g.members.map((emp) => {
+                                  const checked = addArrivedSelected.includes(emp.id);
+                                  return (
+                                    <button
+                                      key={emp.id}
+                                      className={`cell ${checked ? "selected" : ""}`}
+                                      onClick={() =>
+                                        setAddArrivedSelected((prev) =>
+                                          prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id],
+                                        )
+                                      }
+                                    >
+                                      <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                        <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                                        <span className={`avatar-circle ${roleAccent(employeeRole(emp))}`}>{initials(emp.name)}</span>
+                                        {emp.name}
+                                      </span>
+                                      <span className="role-tag">{employeeRole(emp)}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
+
                     <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
                       <button
                         className="chip"
                         onClick={() => {
                           setDropSelected([]);
+                          setAddArrivedSelected([]);
                           setShowDropPicker(false);
                         }}
                       >
                         Скасувати
                       </button>
-                      <button className="chip selected" onClick={confirmDrop} disabled={!dropSelected.length}>
-                        Підтвердити
-                      </button>
-                    </div>
-                  </>
-                )}
-
-                {showAddArrivedPicker && (
-                  <>
-                    <div className="section-title">Хто приїхав сам</div>
-                    <div className="chip-row">
-                      {employees
-                        .filter((e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id))
-                        .map((e) => (
-                          <div
-                            key={e.id}
-                            className={`chip ${addArrivedSelected.includes(e.id) ? "selected" : ""}`}
-                            onClick={() =>
-                              setAddArrivedSelected((prev) => (prev.includes(e.id) ? prev.filter((x) => x !== e.id) : [...prev, e.id]))
-                            }
-                          >
-                            {e.name}
-                          </div>
-                        ))}
-                    </div>
-                    <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
                       <button
-                        className="chip"
-                        onClick={() => {
-                          setAddArrivedSelected([]);
-                          setShowAddArrivedPicker(false);
-                        }}
+                        className="chip selected"
+                        onClick={confirmDropAndArrived}
+                        disabled={!dropSelected.length && !addArrivedSelected.length}
                       >
-                        Скасувати
-                      </button>
-                      <button className="chip selected" onClick={confirmAddArrived} disabled={!addArrivedSelected.length}>
                         Підтвердити
                       </button>
                     </div>
