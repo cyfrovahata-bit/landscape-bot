@@ -38,7 +38,18 @@ type Step =
   | "REVIEW"
   | "DONE";
 
-type PlannedWork = { workId: string; workName: string; unit: string; volume: string };
+// workStartedAt/workAccumulatedMs let each work item at an object be
+// started/stopped independently of every other work there (e.g. mowing
+// finishes while watering keeps going) -- same accumulated+segment pattern
+// as the driving timer (drivingAccumulatedMs/drivingSegmentStartedAt).
+type PlannedWork = {
+  workId: string;
+  workName: string;
+  unit: string;
+  volume: string;
+  workStartedAt?: string | null;
+  workAccumulatedMs?: number;
+};
 // Per-employee work session at an object: started when work begins for that
 // person, ended either individually (picked up early / stopped alone) or all
 // together via "Завершити". Lets people finish and leave an object at
@@ -1353,18 +1364,91 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     logChange(`Почато роботи на ${plan.objectName} (${plan.here.length} людей)`);
   }
 
-  // Stops every still-open session at the object at once.
+  // Stops every still-open session AND every still-running work timer at the
+  // object at once -- the bulk "Завершити все" shortcut, on top of the
+  // per-person/per-work individual Стоп buttons below.
   function finishShift() {
     if (!atObjectId) return;
     const plan = currentAtPlan();
-    if (!plan || !plan.sessions.some((s) => !s.endedAt)) return;
-    const now = new Date().toISOString();
+    if (!plan || (!plan.sessions.some((s) => !s.endedAt) && !plan.works.some((w) => w.workStartedAt))) return;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
     setPlans((prev) =>
-      prev.map((p) => (p.objectId !== atObjectId ? p : { ...p, sessions: p.sessions.map((s) => (s.endedAt ? s : { ...s, endedAt: now })) })),
+      prev.map((p) =>
+        p.objectId !== atObjectId
+          ? p
+          : {
+              ...p,
+              sessions: p.sessions.map((s) => (s.endedAt ? s : { ...s, endedAt: nowIso })),
+              works: p.works.map((w) =>
+                w.workStartedAt
+                  ? { ...w, workStartedAt: null, workAccumulatedMs: (w.workAccumulatedMs ?? 0) + (nowMs - new Date(w.workStartedAt).getTime()) }
+                  : w,
+              ),
+            },
+      ),
     );
     haptic("success");
     logChange(`Завершено роботи на ${plan.objectName}`);
     openVolumesForObject(atObjectId, "AT_OBJECT");
+  }
+
+  // Per-work timer, independent of every other work at the same object --
+  // lets the foreman stop e.g. "покіс" while "полив" keeps running.
+  function startWorkTimer(objectId: string, workId: string) {
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId
+          ? p
+          : { ...p, works: p.works.map((w) => (w.workId !== workId || w.workStartedAt ? w : { ...w, workStartedAt: new Date().toISOString() })) },
+      ),
+    );
+    haptic("light");
+  }
+
+  function stopWorkTimer(objectId: string, workId: string) {
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId
+          ? p
+          : {
+              ...p,
+              works: p.works.map((w) => {
+                if (w.workId !== workId || !w.workStartedAt) return w;
+                const elapsed = Date.now() - new Date(w.workStartedAt).getTime();
+                return { ...w, workStartedAt: null, workAccumulatedMs: (w.workAccumulatedMs ?? 0) + elapsed };
+              }),
+            },
+      ),
+    );
+    haptic("light");
+  }
+
+  // Per-person timer, independent of "Забрати" (which also physically moves
+  // the person off the object) -- lets the foreman pause one person's clock
+  // (e.g. a break) while they stay `here`, then resume it later.
+  function startPersonTimer(objectId: string, employeeId: string) {
+    const startedAt = new Date().toISOString();
+    setPlans((prev) =>
+      prev.map((p) => {
+        if (p.objectId !== objectId) return p;
+        if (p.sessions.some((s) => s.employeeId === employeeId && !s.endedAt)) return p;
+        return { ...p, sessions: [...p.sessions, { employeeId, startedAt }] };
+      }),
+    );
+    haptic("light");
+  }
+
+  function stopPersonTimer(objectId: string, employeeId: string) {
+    const now = new Date().toISOString();
+    setPlans((prev) =>
+      prev.map((p) =>
+        p.objectId !== objectId
+          ? p
+          : { ...p, sessions: p.sessions.map((s) => (s.employeeId === employeeId && !s.endedAt ? { ...s, endedAt: now } : s)) },
+      ),
+    );
+    haptic("light");
   }
 
   // Handles both halves of "who's here now": people stepping out of the car
@@ -2838,33 +2922,57 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     <div className="timer-big" style={{ padding: "4px 0" }}>
                       {earliestOpenStart ? fmtHMS(now - earliestOpenStart) : "00:00:00"}
                     </div>
-                    <button className="back-btn" onClick={() => setAtObjectDetailsExpanded((v) => !v)}>
-                      {atObjectDetailsExpanded ? "▾ Сховати деталі" : "▸ Показати деталі (роботи, люди)"}
-                    </button>
                   </div>
                 ) : (
                   <div className="empty-state">Роботи ще не розпочато</div>
                 )}
 
-                {shiftOpen && atObjectDetailsExpanded && worksTotal > 0 && (
+                {(worksTotal > 0 || plan.here.length > 0) && (
+                  <button className="back-btn" onClick={() => setAtObjectDetailsExpanded((v) => !v)}>
+                    {atObjectDetailsExpanded ? "▾ Сховати деталі" : "▸ Показати деталі (роботи, люди)"}
+                  </button>
+                )}
+
+                {atObjectDetailsExpanded && worksTotal > 0 && (
                   <div className="list" style={{ marginBottom: 8 }}>
                     <div className="cell" style={{ cursor: "default" }}>
-                      <span className="cell-title">🛠 Роботи на обʼєкті</span>
+                      <span className="cell-title">🛠 Роботи на обʼєкті — кожна зі своїм таймером</span>
                       <span className="badge ok">{worksTotal}</span>
                     </div>
-                    {plan.works.map((w) => (
-                      <div key={w.workId} className="cell" style={{ cursor: "default" }}>
-                        <span className="cell-title">{w.workName}</span>
-                      </div>
-                    ))}
+                    {plan.works.map((w) => {
+                      const running = !!w.workStartedAt;
+                      const elapsed = (w.workAccumulatedMs ?? 0) + (running ? now - new Date(w.workStartedAt as string).getTime() : 0);
+                      return (
+                        <div key={w.workId} className="cell" style={{ cursor: "default" }}>
+                          <span className="cell-title">{w.workName}</span>
+                          <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            {elapsed > 0 && <span className="hint">{fmtHMS(elapsed)}</span>}
+                            {running ? (
+                              <button className="chip danger-btn" onClick={() => stopWorkTimer(atObjectId, w.workId)}>
+                                ⏹ Стоп
+                              </button>
+                            ) : (
+                              <button className="chip" onClick={() => startWorkTimer(atObjectId, w.workId)}>
+                                ▶️ Старт
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-                {(shiftOpen ? atObjectDetailsExpanded : true) && plan.here.length > 0 && (
+                {atObjectDetailsExpanded && plan.here.length > 0 && (
                   <>
-                    <div className="section-title">Люди тут</div>
+                    <div className="section-title">Люди тут — кожен зі своїм таймером</div>
                     <div className="list">
                       {plan.here.map((id) => {
                         const session = plan.sessions.find((s) => s.employeeId === id && !s.endedAt);
+                        const running = !!session;
+                        const closedMs = plan.sessions
+                          .filter((s) => s.employeeId === id && s.endedAt)
+                          .reduce((a, s) => a + (new Date(s.endedAt as string).getTime() - new Date(s.startedAt).getTime()), 0);
+                        const elapsed = closedMs + (running ? now - new Date(session!.startedAt).getTime() : 0);
                         return (
                           <div key={id} className="cell" style={{ cursor: "default" }}>
                             <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2872,7 +2980,16 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                               {employeeName(id)}
                             </span>
                             <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                              {session && <span className="hint">{fmtHMS(now - new Date(session.startedAt).getTime())}</span>}
+                              {elapsed > 0 && <span className="hint">{fmtHMS(elapsed)}</span>}
+                              {running ? (
+                                <button className="chip danger-btn" onClick={() => stopPersonTimer(atObjectId, id)}>
+                                  ⏹ Стоп
+                                </button>
+                              ) : (
+                                <button className="chip" onClick={() => startPersonTimer(atObjectId, id)}>
+                                  ▶️ Старт
+                                </button>
+                              )}
                               <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
                                 🔼 Забрати
                               </button>
