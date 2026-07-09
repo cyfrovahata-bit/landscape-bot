@@ -2686,7 +2686,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           ) : (
             <MainButton
               text="🏁 Повернутись на базу"
-              onClick={() => setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN")}
+              onClick={() => {
+                pauseDrivingSegment();
+                setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN");
+              }}
             />
           )}
         </>
