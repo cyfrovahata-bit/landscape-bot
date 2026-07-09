@@ -1234,7 +1234,11 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
   const items = await Promise.all(
     pendingGroups.map(async (r) => {
       const foremanTgId = Number(r.foremanTgId);
-      const trips = await fetchAllTrips(r.date, foremanTgId);
+      // Only legs still awaiting a decision -- a leg already approved earlier
+      // (possibly days ago, possibly already exported to БУХЗВІТ) must not
+      // reappear bundled into a LATER, unrelated leg's pending request just
+      // because it shares the same date+foreman.
+      const trips = (await fetchAllTrips(r.date, foremanTgId)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
       const mergedObjects = mergeObjects(trips.map((t) => t.objects));
       const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
       const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
@@ -1278,8 +1282,14 @@ async function setDayStatus(date: string, foremanTgId: number, status: string) {
     .select()
     .from(schema.events)
     .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")));
+  // Never re-touch a leg that's already fully approved -- a foreman can add a
+  // brand-new leg (tripSeq) to a date after an earlier one was already
+  // approved, and that later approve/return action must not drag the
+  // already-finalized (and possibly already exported to БУХЗВІТ) leg back
+  // into pending or flip it to "returned" alongside the new one.
+  const rowsToUpdate = rows.filter((r) => r.status !== "ЗАТВЕРДЖЕНО");
   await Promise.all(
-    rows.map((r) =>
+    rowsToUpdate.map((r) =>
       writeEvent({
         eventId: r.eventId,
         status,
@@ -1297,7 +1307,7 @@ async function setDayStatus(date: string, foremanTgId: number, status: string) {
       }),
     ),
   );
-  return rows.length;
+  return rowsToUpdate.length;
 }
 
 /** Builds and writes this day's payroll into the shared БУХЗВІТ report for the
@@ -1306,9 +1316,12 @@ async function setDayStatus(date: string, foremanTgId: number, status: string) {
  * approved through the mini-app. Errors are logged, not thrown: the approval
  * itself has already succeeded by the time this runs, and a Sheets hiccup
  * here must not make the admin think the approval failed. */
-async function exportApprovedDayToAccounting(date: string, foremanTgId: number): Promise<{ ok: boolean; rows: number }> {
+async function exportApprovedDayToAccounting(
+  date: string,
+  foremanTgId: number,
+  trips: StoredTrip[],
+): Promise<{ ok: boolean; rows: number }> {
   try {
-    const trips = await fetchAllTrips(date, foremanTgId);
     const mergedObjects = mergeObjects(trips.map((t) => t.objects));
     const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
     const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
@@ -1363,13 +1376,24 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
     return;
   }
 
+  // Captured BEFORE setDayStatus flips their status, so the accounting
+  // export below only ever covers the legs THIS action just approved --
+  // once setDayStatus runs, an already-approved-earlier leg would be
+  // indistinguishable from one just approved now (both "ЗАТВЕРДЖЕНО"),
+  // which would re-export it and double-count it in БУХЗВІТ.
+  const pendingTrips = (await fetchAllTrips(date, foremanTgId)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
+  if (!pendingTrips.length) {
+    res.status(404).json({ error: "No submission found for that date/foreman" });
+    return;
+  }
+
   const count = await setDayStatus(date, foremanTgId, "ЗАТВЕРДЖЕНО");
   if (!count) {
     res.status(404).json({ error: "No submission found for that date/foreman" });
     return;
   }
 
-  const accounting = await exportApprovedDayToAccounting(date, foremanTgId);
+  const accounting = await exportApprovedDayToAccounting(date, foremanTgId, pendingTrips);
 
   await sendTelegramMessage(foremanTgId, `✅ *День затверджено адміністратором*\n📅 Дата: ${date}`);
   res.json({ ok: true, accountingExported: accounting.ok });
