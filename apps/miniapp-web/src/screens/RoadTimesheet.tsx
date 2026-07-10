@@ -2033,7 +2033,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               +{Math.round((Number(odoStart) - lastOdometer[carId]) * 10) / 10} км з попереднього виїзду
             </div>
           )}
-          <NumericKeypad value={odoStart} onChange={setOdoStart} />
+          {odoStart && lastOdometer[carId] !== undefined && Number(odoStart) > lastOdometer[carId] && (
+            <div className="hint" style={{ textAlign: "center", color: "var(--tg-destructive-text, #e53935)" }}>
+              ⚠️ Не може бути більше за останнє відоме значення ({lastOdometer[carId]} км)
+            </div>
+          )}
+          <NumericKeypad
+            value={odoStart}
+            onChange={setOdoStart}
+            max={lastOdometer[carId]}
+            onRejected={() => haptic("error")}
+          />
           <div className="field">
             {odoStartPhoto ? (
               <div className="badge ok">📷 Фото додано</div>
@@ -2057,7 +2067,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               setStep(editReturnStep);
               setEditReturnStep("HUB");
             }}
-            disabled={!odoStart || uploadingPhoto}
+            disabled={!odoStart || uploadingPhoto || (lastOdometer[carId] !== undefined && Number(odoStart) > lastOdometer[carId])}
           />
         </>
       )}
@@ -3387,6 +3397,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="hint" style={{ padding: "0 16px" }}>Старт: {odoStart} км</div>
           <div className="big-number">{odoEnd || "0"} км</div>
           {odoEnd && Number(odoEnd) >= Number(odoStart) && <div className="hint" style={{ textAlign: "center" }}>Пройдено {Math.round((Number(odoEnd) - Number(odoStart)) * 10) / 10} км</div>}
+          {odoEnd && Number(odoEnd) < Number(odoStart) && (
+            <div className="hint" style={{ textAlign: "center", color: "var(--tg-destructive-text, #e53935)" }}>
+              ⚠️ Не може бути менше за старт ({odoStart} км)
+            </div>
+          )}
           <NumericKeypad value={odoEnd} onChange={setOdoEnd} />
           <div className="field">
             {odoEndPhoto ? (
@@ -3408,7 +3423,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               setStep("REVIEW");
               await loadPreview();
             }}
-            disabled={!odoEnd || !allBack || uploadingPhoto}
+            disabled={!odoEnd || !allBack || uploadingPhoto || Number(odoEnd) < Number(odoStart)}
           />
         </>
       )}
