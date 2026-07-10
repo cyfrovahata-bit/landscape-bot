@@ -2779,8 +2779,14 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <MainButton
               text="🏁 Повернутись на базу"
               onClick={() => {
-                pauseDrivingSegment();
-                setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN");
+                const hasPending = plans.some((p) => p.here.length > 0);
+                // Still people left at objects to pick up on the way -- the
+                // car keeps driving through RETURN_PICKUP, so the segment
+                // stays open; it only pauses for real once "Приїхали на
+                // базу" fires there. Nobody left means this click IS the
+                // arrival at base, so pause right away.
+                if (!hasPending) pauseDrivingSegment();
+                setStep(hasPending ? "RETURN_PICKUP" : "RETURN");
               }}
             />
           )}
@@ -3250,6 +3256,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             return (
               <>
                 <div className="step-badge">ПОВЕРНЕННЯ НА БАЗУ</div>
+                <div className="timer-big">
+                  {fmtHMS(drivingAccumulatedMs + (drivingSegmentStartedAt ? now - new Date(drivingSegmentStartedAt).getTime() : 0))}
+                </div>
+                <div className="hint" style={{ textAlign: "center" }}>лише час у дорозі — на об'єктах не рахується</div>
                 <div className="section-title">Обʼєкти</div>
                 <div className="list">
                   {visited.map((p) => {
