@@ -2033,17 +2033,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               +{Math.round((Number(odoStart) - lastOdometer[carId]) * 10) / 10} км з попереднього виїзду
             </div>
           )}
-          {odoStart && lastOdometer[carId] !== undefined && Number(odoStart) > lastOdometer[carId] && (
+          {odoStart && lastOdometer[carId] !== undefined && Number(odoStart) < lastOdometer[carId] && (
             <div className="hint" style={{ textAlign: "center", color: "var(--tg-destructive-text, #e53935)" }}>
-              ⚠️ Не може бути більше за останнє відоме значення ({lastOdometer[carId]} км)
+              ⚠️ Не може бути менше за попередній приїзд ({lastOdometer[carId]} км)
             </div>
           )}
-          <NumericKeypad
-            value={odoStart}
-            onChange={setOdoStart}
-            max={lastOdometer[carId]}
-            onRejected={() => haptic("error")}
-          />
+          <NumericKeypad value={odoStart} onChange={setOdoStart} />
           <div className="field">
             {odoStartPhoto ? (
               <div className="badge ok">📷 Фото додано</div>
@@ -2067,7 +2062,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               setStep(editReturnStep);
               setEditReturnStep("HUB");
             }}
-            disabled={!odoStart || uploadingPhoto || (lastOdometer[carId] !== undefined && Number(odoStart) > lastOdometer[carId])}
+            disabled={!odoStart || uploadingPhoto || (lastOdometer[carId] !== undefined && Number(odoStart) < lastOdometer[carId])}
           />
         </>
       )}
