@@ -1331,8 +1331,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // clocks out anyone still working there), then drops into volumes +
   // coefficients for that object so the foreman can fill them in on the way
   // to the next pickup, with an explicit "later" escape hatch either way.
+  // Pressing this means the car has actually arrived at that object, so the
+  // driving segment pauses same as arriveAt() does on the way out -- "▶️
+  // Продовжити рух" on the RETURN_PICKUP screen resumes it once the foreman
+  // heads to the next pickup (or straight to base).
   function returnPickupObject(objectId: string) {
     const plan = planFor(objectId);
+    pauseDrivingSegment();
     pickUpHere(objectId);
     if (plan.works.length) {
       openVolumesForObject(objectId, "RETURN_PICKUP");
@@ -3321,6 +3326,13 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     );
                   })}
                 </div>
+                {!drivingSegmentStartedAt && (
+                  <div style={{ padding: "0 16px 10px" }}>
+                    <button className="chip selected" style={{ width: "100%" }} onClick={resumeDrivingSegment}>
+                      ▶️ Продовжити рух
+                    </button>
+                  </div>
+                )}
                 <MainButton
                   text="🏁 Приїхали на базу"
                   onClick={() => {
