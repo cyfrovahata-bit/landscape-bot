@@ -1351,13 +1351,17 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     if (!atObjectId) return;
     const plan = currentAtPlan();
     if (!plan || !plan.here.length) return;
-    const now = new Date().toISOString();
+    const nowIso = new Date().toISOString();
     setPlans((prev) =>
       prev.map((p) => {
         if (p.objectId !== atObjectId) return p;
         const openIds = new Set(p.sessions.filter((s) => !s.endedAt).map((s) => s.employeeId));
-        const newSessions = p.here.filter((id) => !openIds.has(id)).map((employeeId) => ({ employeeId, startedAt: now }));
-        return { ...p, sessions: [...p.sessions, ...newSessions] };
+        const newSessions = p.here.filter((id) => !openIds.has(id)).map((employeeId) => ({ employeeId, startedAt: nowIso }));
+        // "Почати роботи" is the bulk shortcut -- it should also start every
+        // work item's own timer, not just people's, since the per-work
+        // Старт/Стоп buttons only cover starting one at a time otherwise.
+        const works = p.works.map((w) => (w.workStartedAt ? w : { ...w, workStartedAt: nowIso }));
+        return { ...p, sessions: [...p.sessions, ...newSessions], works };
       }),
     );
     haptic("light");
@@ -3401,7 +3405,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
           <div className="section-title">Одометр на фініші</div>
           <div className="hint" style={{ padding: "0 16px" }}>Старт: {odoStart} км</div>
           <div className="big-number">{odoEnd || "0"} км</div>
-          {odoEnd && Number(odoEnd) >= Number(odoStart) && <div className="hint" style={{ textAlign: "center" }}>Пройдено {Math.round((Number(odoEnd) - Number(odoStart)) * 10) / 10} км</div>}
+          {odoEnd && Number(odoEnd) >= Number(odoStart) && (
+            <div className="hint" style={{ textAlign: "center" }}>
+              Пройдено {Math.round((Number(odoEnd) - Number(odoStart)) * 10) / 10} км · загальний час у дорозі{" "}
+              {fmtHMS(drivingAccumulatedMs + (drivingSegmentStartedAt ? now - new Date(drivingSegmentStartedAt).getTime() : 0))}
+            </div>
+          )}
           {odoEnd && Number(odoEnd) < Number(odoStart) && (
             <div className="hint" style={{ textAlign: "center", color: "var(--tg-destructive-text, #e53935)" }}>
               ⚠️ Не може бути менше за старт ({odoStart} км)
