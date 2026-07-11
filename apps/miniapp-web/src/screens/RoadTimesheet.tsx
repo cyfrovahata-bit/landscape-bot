@@ -146,6 +146,15 @@ type DraftShape = {
   drivingAccumulatedMs: number;
   drivingSegmentStartedAt: string | null;
   atObjectId: string | null;
+  // Where AT_OBJECT's "✅ Готово" button should return to (DRIVE, RETURN,
+  // etc). Without this an app-kill mid-AT_OBJECT restores to the default
+  // "DRIVE", which can wrongly resume the driving-segment timer for a leg
+  // that had actually already finished (reached AT_OBJECT from RETURN).
+  atObjectReturnStep: Step;
+  // Which object PLAN_WORKS/PLAN_VOLUMES is currently editing -- those
+  // screens render nothing without it, so an app-kill mid-edit would
+  // otherwise restore to a blank screen with no way back except resetting.
+  planObjectId: string | null;
   coefs: Record<string, CoefPair>;
   // Which already-submitted trip this draft is mid-edit of, if any -- lost
   // without this, an interrupted edit (app killed before resubmitting) would
@@ -419,6 +428,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       setDrivingAccumulatedMs(draft.drivingAccumulatedMs ?? 0);
       setDrivingSegmentStartedAt(draft.drivingSegmentStartedAt ?? null);
       setAtObjectId(draft.atObjectId);
+      setAtObjectReturnStep(draft.atObjectReturnStep ?? "DRIVE");
+      setPlanObjectId(draft.planObjectId ?? null);
       setCoefs(draft.coefs ?? {});
       setEditingTripSeq(draft.editingTripSeq ?? null);
       setInProgressResumeStep(draft.step);
@@ -485,6 +496,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       drivingAccumulatedMs,
       drivingSegmentStartedAt,
       atObjectId,
+      atObjectReturnStep,
+      planObjectId,
       coefs,
       editingTripSeq,
     });
@@ -504,6 +517,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     drivingAccumulatedMs,
     drivingSegmentStartedAt,
     atObjectId,
+    atObjectReturnStep,
+    planObjectId,
     coefs,
     editingTripSeq,
   ]);
@@ -1685,6 +1700,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setShowMovePicker(false);
         return;
       }
+      // Same resume rule as the in-screen "✅ Готово" button below -- leaving
+      // via the hardware/Telegram back button must not skip it, or the
+      // driving segment stays paused with no way to resume it once back on
+      // DRIVE (that screen has no manual "resume" control of its own).
+      if (atObjectReturnStep === "DRIVE") resumeDrivingSegment();
       setStep(atObjectReturnStep);
       return;
     }
@@ -1695,6 +1715,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setShowRoadsideActions(false);
         return;
       }
+    }
+    if (step === "RETURN_PICKUP") {
+      // Mirrors "▶️ Продовжити рух" on this screen -- leaving via the
+      // hardware/Telegram back button after a pickup stop paused the segment
+      // must resume it too, same reasoning as the AT_OBJECT case above.
+      resumeDrivingSegment();
     }
     if (backTargets[step]) {
       setStep(backTargets[step]!);

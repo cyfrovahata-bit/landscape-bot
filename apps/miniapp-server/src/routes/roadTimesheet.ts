@@ -22,7 +22,7 @@ import {
   writeAccountingReportForDay,
   type LockedTx,
 } from "@landscape/core";
-import { and, eq, inArray, desc, lt, gte } from "drizzle-orm";
+import { and, eq, inArray, desc, lt, gte, ne } from "drizzle-orm";
 import { normRole } from "../authMiddleware.js";
 
 /** 403s and returns true if the caller isn't an admin -- lets a route bail with `if (blockNonAdmin(req, res)) return;`. */
@@ -429,6 +429,14 @@ function mergeObjects(objectsByLeg: ObjectInput[][]): ObjectInput[] {
         const b = Number(w.volume);
         if (Number.isFinite(a) && Number.isFinite(b)) existingWork.volume = a + b;
         else if (Number.isFinite(b)) existingWork.volume = b;
+        // Same work item logged in more than one leg -- merge who's tagged
+        // on it too, not just the first leg's list, so buildAccountingRows
+        // (which tags an employee's pay to a work by employeeIds) doesn't
+        // fall back to the untagged full-pool split for someone who only
+        // did this work in a later leg.
+        if (w.employeeIds?.length) {
+          existingWork.employeeIds = [...new Set([...(existingWork.employeeIds ?? []), ...w.employeeIds])];
+        }
       }
       existing.sessions = [...existing.sessions, ...(obj.sessions ?? [])];
       if (obj.coefs?.length) {
@@ -471,7 +479,32 @@ roadTimesheetRouter.post("/", async (req, res) => {
     return;
   }
 
+  // The client already blocks these (disabled Save/Continue buttons), but
+  // that's only a UI courtesy -- a direct API call could otherwise submit a
+  // negative-km trip, which feeds straight into the road-allowance/trip-
+  // class calculation and the accountant's report.
+  if (!Number.isFinite(odoStart) || !Number.isFinite(odoEnd) || odoEnd < odoStart) {
+    res.status(400).json({ error: "Одометр на фініші не може бути меншим за одометр на старті" });
+    return;
+  }
+
   const foremanTgId = req.user!.tgId;
+
+  // Same "can't be less than the last known reading" rule as the client's
+  // ODO_START screen -- excludes THIS date's own row (unique per date+carId)
+  // so resubmitting/editing today's own already-saved trip with an
+  // unchanged odoStart never compares against its own later odoEnd.
+  const priorOdoRows = await db
+    .select()
+    .from(schema.odometerDays)
+    .where(and(eq(schema.odometerDays.carId, carId), ne(schema.odometerDays.date, date)))
+    .orderBy(desc(schema.odometerDays.date), desc(schema.odometerDays.updatedAt))
+    .limit(1);
+  const lastKnownOdo = priorOdoRows[0] ? (priorOdoRows[0].endValue ?? priorOdoRows[0].startValue) : null;
+  if (lastKnownOdo !== null && odoStart < lastKnownOdo) {
+    res.status(400).json({ error: `Одометр на старті не може бути меншим за попереднє відоме значення (${lastKnownOdo} км)` });
+    return;
+  }
 
   // This leg's own estimate (its own km/tripClass/fund), shown on its own
   // card -- separate from the day-combined totals computed below. Read-only
@@ -514,11 +547,30 @@ roadTimesheetRouter.post("/", async (req, res) => {
       }
 
       const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
+
+      // A lost response + the client's automatic retry resends this exact
+      // same request (same idempotencyKey => same eventId), with no tripSeq
+      // learned from the failed first attempt. Without this check that retry
+      // would look exactly like "no tripSeq from the client" below and get
+      // assigned the NEXT tripSeq -- a second, near-identical leg, doubling
+      // this day's volumes/hours/allowance in Reports/Timesheet/Allowance
+      // even though the event log itself stays idempotent (same eventId).
+      const existingForKey = safeKey ? allTripsBefore.find((t) => t.eventId === eventId) : undefined;
       // No tripSeq from the client = a brand-new leg (the "Розпочати нову
       // поїздку" button never sends one); an explicit tripSeq means "resubmit/
       // edit that specific leg", scoped so it never touches other legs' data.
-      effectiveTripSeq = tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
+      effectiveTripSeq =
+        tripSeq ?? existingForKey?.tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
       const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
+
+      // An already-approved (and possibly already exported to БУХЗВІТ) leg
+      // must not be silently overwritten by a resubmit -- the UI's "day is
+      // locked once approved" rule is currently only a client-side disabled
+      // button; enforce it here too so a direct API call can't bypass it and
+      // trigger a second, duplicate approval+export later.
+      if (legPrevious?.status === "ЗАТВЕРДЖЕНО") {
+        throw new ReservationConflictError("Цей день уже затверджено -- редагування недоступне без запиту на редагування");
+      }
 
       const oldMergedObjects = mergeObjects(allTripsBefore.map((t) => t.objects));
       const tripsAfter = [
@@ -708,6 +760,33 @@ roadTimesheetRouter.post("/", async (req, res) => {
             amount: combined.roadAllowance.perPerson,
             meta: JSON.stringify({ km: totalKm, tripClass: combined.tripClass }),
             dayStatus: "ЧЕРНЕТКА",
+          })),
+          tx,
+        );
+      }
+
+      // Anyone who WAS allowance-eligible before this write (rode along in an
+      // earlier leg, not self-transport) but isn't anymore -- dropped from
+      // the day entirely, or reclassified as self-transport -- keeps a
+      // stale, nonzero ROAD_TRIP row otherwise: the write above only ever
+      // touches CURRENTLY eligible people, the same gap the reports/
+      // timesheet reconciliation above this already closes for volumes/hours.
+      const oldUnionEmployeeIds = [...new Set(allTripsBefore.flatMap((t) => t.employeeIds))];
+      const oldUnionSelfTransportIds = [...new Set(allTripsBefore.flatMap((t) => t.selfTransportIds ?? []))];
+      const oldAllowanceEligibleIds = oldUnionEmployeeIds.filter((id) => !oldUnionSelfTransportIds.includes(id));
+      const droppedFromAllowance = oldAllowanceEligibleIds.filter((id) => !allowanceEligibleIds.includes(id));
+      if (droppedFromAllowance.length) {
+        await writeAllowanceRows(
+          droppedFromAllowance.map((employeeId) => ({
+            date,
+            foremanTgId,
+            type: "ROAD_TRIP",
+            employeeId,
+            employeeName: combined.employeeById.get(employeeId)?.name ?? employeeId,
+            objectId: "ROAD",
+            amount: 0,
+            meta: JSON.stringify({ km: totalKm, tripClass: combined.tripClass }),
+            dayStatus: "СКАСОВАНО",
           })),
           tx,
         );
@@ -969,6 +1048,10 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
   };
   if (!date || !carId || !Number.isFinite(odoEnd)) {
     res.status(400).json({ error: "date, carId and odoEnd are required" });
+    return;
+  }
+  if (typeof odoStart === "number" && Number.isFinite(odoStart) && odoEnd < odoStart) {
+    res.status(400).json({ error: "Одометр на фініші не може бути меншим за одометр на старті" });
     return;
   }
   const foremanTgId = req.user!.tgId;
@@ -1277,8 +1360,8 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
   res.json({ items, reasons: RETURN_REASONS });
 });
 
-async function setDayStatus(date: string, foremanTgId: number, status: string) {
-  const rows = await db
+async function setDayStatus(date: string, foremanTgId: number, status: string, tx?: LockedTx) {
+  const rows = await (tx ?? db)
     .select()
     .from(schema.events)
     .where(and(eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)), eq(schema.events.type, "RTS_SAVE")));
@@ -1290,21 +1373,24 @@ async function setDayStatus(date: string, foremanTgId: number, status: string) {
   const rowsToUpdate = rows.filter((r) => r.status !== "ЗАТВЕРДЖЕНО");
   await Promise.all(
     rowsToUpdate.map((r) =>
-      writeEvent({
-        eventId: r.eventId,
-        status,
-        refEventId: r.refEventId ?? undefined,
-        chatId: r.chatId ? Number(r.chatId) : undefined,
-        ts: r.ts.toISOString(),
-        date: r.date,
-        foremanTgId: Number(r.foremanTgId),
-        type: r.type,
-        objectId: r.objectId ?? undefined,
-        carId: r.carId ?? undefined,
-        employeeIds: r.employeeIds ?? undefined,
-        payload: r.payload ?? undefined,
-        msgId: r.msgId ?? undefined,
-      }),
+      writeEvent(
+        {
+          eventId: r.eventId,
+          status,
+          refEventId: r.refEventId ?? undefined,
+          chatId: r.chatId ? Number(r.chatId) : undefined,
+          ts: r.ts.toISOString(),
+          date: r.date,
+          foremanTgId: Number(r.foremanTgId),
+          type: r.type,
+          objectId: r.objectId ?? undefined,
+          carId: r.carId ?? undefined,
+          employeeIds: r.employeeIds ?? undefined,
+          payload: r.payload ?? undefined,
+          msgId: r.msgId ?? undefined,
+        },
+        tx,
+      ),
     ),
   );
   return rowsToUpdate.length;
@@ -1382,19 +1468,30 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
     return;
   }
 
-  // Captured BEFORE setDayStatus flips their status, so the accounting
-  // export below only ever covers the legs THIS action just approved --
-  // once setDayStatus runs, an already-approved-earlier leg would be
-  // indistinguishable from one just approved now (both "ЗАТВЕРДЖЕНО"),
-  // which would re-export it and double-count it in БУХЗВІТ.
-  const pendingTrips = (await fetchAllTrips(date, foremanTgId)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
-  if (!pendingTrips.length) {
-    res.status(404).json({ error: "No submission found for that date/foreman" });
-    return;
-  }
+  // Shares the same per-date lock as POST / (final save) and is itself
+  // idempotent-safe under concurrency: a foreman submitting a brand-new leg
+  // at the exact moment an admin approves, or an admin double-tapping
+  // "Затвердити", would otherwise race outside a lock -- either a
+  // just-submitted leg gets marked ЗАТВЕРДЖЕНО without ever being exported
+  // (money silently missing from БУХЗВІТ, and unrecoverable since an
+  // already-approved leg is filtered out of every future pending list), or
+  // two concurrent approvals both see "not yet exported" and both export,
+  // double-paying the day. Re-reading pendingTrips INSIDE the lock (not
+  // before it) is what actually closes both windows.
+  let pendingTrips: StoredTrip[] = [];
+  let count = 0;
+  await withLock(`reserve:${date}`, async (tx) => {
+    // Captured BEFORE setDayStatus flips their status, so the accounting
+    // export below only ever covers the legs THIS action just approved --
+    // once setDayStatus runs, an already-approved-earlier leg would be
+    // indistinguishable from one just approved now (both "ЗАТВЕРДЖЕНО"),
+    // which would re-export it and double-count it in БУХЗВІТ.
+    pendingTrips = (await fetchAllTrips(date, foremanTgId, tx)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
+    if (!pendingTrips.length) return;
+    count = await setDayStatus(date, foremanTgId, "ЗАТВЕРДЖЕНО", tx);
+  });
 
-  const count = await setDayStatus(date, foremanTgId, "ЗАТВЕРДЖЕНО");
-  if (!count) {
+  if (!pendingTrips.length || !count) {
     res.status(404).json({ error: "No submission found for that date/foreman" });
     return;
   }

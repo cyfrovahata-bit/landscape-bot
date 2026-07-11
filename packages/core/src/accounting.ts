@@ -12,6 +12,36 @@ function money(n: number) {
   return Math.round(Number(n || 0) * 100) / 100;
 }
 
+/**
+ * Splits `total` (money) across `shares` (proportions, need not sum to 1) so
+ * the results sum EXACTLY to money(total) in kopecks -- largest-remainder
+ * apportionment, not independent per-item rounding. Independently rounding
+ * each share (money(total * share)) can over- or under-shoot the true total
+ * once several shares round in the same direction, and letting "the last
+ * item absorb the rest" breaks the moment that drift goes negative (the
+ * last item would need a negative amount, which gets silently dropped
+ * instead of subtracted -- the earlier, already-pushed rows then sum to
+ * MORE than `total`). This never produces a negative remainder: every
+ * item's cents are >= its floor, and only whole leftover cents (which by
+ * construction can't exceed the number of items) get redistributed.
+ */
+function splitMoneyByShares(total: number, shares: number[]): number[] {
+  const totalCents = Math.round(total * 100);
+  if (!shares.length || totalCents <= 0) return shares.map(() => 0);
+  const shareSum = shares.reduce((a, s) => a + s, 0);
+  const raw = shares.map((s) => (shareSum > 0 ? (totalCents * s) / shareSum : totalCents / shares.length));
+  const floors = raw.map((c) => Math.floor(c));
+  let leftover = totalCents - floors.reduce((a, b) => a + b, 0);
+  const order = raw
+    .map((c, i) => ({ i, frac: c - floors[i] }))
+    .sort((a, b) => b.frac - a.frac);
+  const cents = [...floors];
+  for (let k = 0; k < order.length && leftover > 0; k++, leftover--) {
+    cents[order[k].i] += 1;
+  }
+  return cents.map((c) => c / 100);
+}
+
 export type AccountingWork = { workId: string; workName: string; volume?: string | number; employeeIds?: string[] };
 export type AccountingObject = { objectId: string; objectName: string; works: AccountingWork[] };
 export type AccountingSalaryRow = { employeeId: string; employeeName: string; pay: number };
@@ -32,11 +62,10 @@ export type AccountingRow = {
  * tagged on at that object (WorkInput.employeeIds), weighted by each work's
  * own money value (volume * tariff). Falls back to splitting across every
  * work at the object if the employee isn't tagged on any specific one, so
- * nobody's pay silently disappears from the report. The last work-row for
- * each employee absorbs whatever rounding leaves over, so a person's rows
- * always sum to EXACTLY the pay figure they're shown in the app -- a
- * bookkeeping report that doesn't tie out to the kopeck isn't fit to hand
- * to an accountant.
+ * nobody's pay silently disappears from the report. Uses largest-remainder
+ * apportionment (splitMoneyByShares) so a person's rows always sum to
+ * EXACTLY the pay figure they're shown in the app -- a bookkeeping report
+ * that doesn't tie out to the kopeck isn't fit to hand to an accountant.
  */
 export function buildAccountingRows(params: {
   date: string;
@@ -78,13 +107,11 @@ export function buildAccountingRows(params: {
       const pool = tagged.length ? tagged : works;
       const values = pool.map(workValue);
       const totalValue = values.reduce((a, v) => a + v, 0);
+      const shares = totalValue > 0 ? values : pool.map(() => 1);
+      const amounts = splitMoneyByShares(row.pay, shares);
 
-      let remaining = row.pay;
       pool.forEach((w, i) => {
-        const isLast = i === pool.length - 1;
-        const share = totalValue > 0 ? values[i] / totalValue : 1 / pool.length;
-        const amount = isLast ? money(remaining) : money(row.pay * share);
-        remaining = money(remaining - amount);
+        const amount = amounts[i];
         if (amount <= 0) return;
         out.push({
           date,

@@ -16,6 +16,7 @@ type RtsSavePayload = {
   objects?: ObjectPayload[];
   salaryPacks?: SalaryPackPayload[];
   roadAllowance?: { perPerson: number };
+  selfTransportIds?: string[];
 };
 
 /**
@@ -188,11 +189,16 @@ statsRouter.get("/range", async (req, res) => {
     agg.employees.set(t.employeeId, emp);
   }
 
-  // Road allowance is per-trip, not per-object -- tracked separately per employee.
+  // Road allowance is per-trip, not per-object -- tracked separately per
+  // employee. Anyone who showed up under their own transport that trip never
+  // got the allowance in the first place (see writeAllowanceRows'
+  // allowanceEligibleIds filter), so they must be excluded here too.
   const allowanceByEmployee = new Map<string, number>();
   for (const e of parsedEvents) {
     if (!e.roadAllowance) continue;
+    const selfTransportIds = new Set(e.selfTransportIds ?? []);
     for (const empId of e.employeeIds) {
+      if (selfTransportIds.has(empId)) continue;
       allowanceByEmployee.set(empId, (allowanceByEmployee.get(empId) ?? 0) + e.roadAllowance.perPerson);
     }
   }
