@@ -1,6 +1,7 @@
 import { config } from "../../config.js";
 import { getSheetsClient } from "../client.js";
 import { appendRows, getCell, loadSheet, invalidateSheetCache, withSheetsRetry } from "./core.js";
+import { fetchUsers } from "./dictionaries.js";
 import { EVENTS_HEADERS } from "./headers.js";
 import { SHEET_NAMES } from "./names.js";
 import { nowISO, sheetRef } from "./utils.js";
@@ -47,6 +48,7 @@ type AccountingRow = {
   workName: string;
   volume: string;
   amount: number;
+  foremanName: string;
   eventId: string;
 };
 
@@ -203,7 +205,7 @@ function parsePayload(ev: RoadEventLike) {
   }
 }
 
-export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): AccountingRow[] {
+export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike, foremanName: string): AccountingRow[] {
   const payload = parsePayload(ev);
   const workMoneyRows = Array.isArray(payload.workMoneyRows)
     ? payload.workMoneyRows
@@ -378,6 +380,7 @@ export function buildAccountingRowsFromApprovedRoadEvent(ev: RoadEventLike): Acc
           workName: totalWork.workName || totalWork.workId || "—",
           volume: formattedQty,
           amount,
+          foremanName,
           eventId: ev.eventId,
         });
 
@@ -428,7 +431,7 @@ export async function appendAccountingReportRows(rows: AccountingRow[]) {
       row.workName,
       row.volume,
       row.amount,
-      "",
+      row.foremanName,
     ]),
     "USER_ENTERED",
   );
@@ -449,7 +452,11 @@ export async function appendAccountingReportForApprovedRoadEvent(ev: RoadEventLi
     return { skipped: true, rows: 0 };
   }
 
-  const rows = buildAccountingRowsFromApprovedRoadEvent(ev);
+  const users = await fetchUsers();
+  const foremanName =
+    users.find((u) => Number(u.tgId) === Number(ev.foremanTgId))?.pib ?? String(ev.foremanTgId);
+
+  const rows = buildAccountingRowsFromApprovedRoadEvent(ev, foremanName);
   console.log(`[accounting] prepared rows=${rows.length} eventId=${ev.eventId}`);
 
   if (!rows.length) {

@@ -1338,13 +1338,18 @@ async function exportApprovedDayToAccounting(
     });
 
     const workIds = [...new Set(mergedObjects.flatMap((o) => (o.works ?? []).map((w) => w.workId)))];
-    const workRows = workIds.length ? await db.select().from(schema.works).where(inArray(schema.works.id, workIds)) : [];
+    const [workRows, foremanUser] = await Promise.all([
+      workIds.length ? db.select().from(schema.works).where(inArray(schema.works.id, workIds)) : Promise.resolve([]),
+      db.select().from(schema.users).where(eq(schema.users.tgId, BigInt(foremanTgId))).limit(1),
+    ]);
     const tariffByWorkId = new Map(workRows.map((w) => [w.id, w.tariff]));
     const unitByWorkId = new Map(workRows.map((w) => [w.id, w.unit ?? ""]));
     const employeeNameById = new Map([...combined.employeeById].map(([id, v]) => [id, v.name]));
+    const foremanName = foremanUser[0]?.pib ?? String(foremanTgId);
 
     const rows = buildAccountingRows({
       date,
+      foremanName,
       objects: mergedObjects,
       salaryPacks: combined.salaryPacks,
       roadAllowancePerPerson: combined.roadAllowance.perPerson,

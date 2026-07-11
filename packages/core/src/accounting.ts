@@ -23,6 +23,7 @@ export type AccountingRow = {
   workName: string;
   volume: string;
   amount: number;
+  foremanName: string;
 };
 
 /**
@@ -39,6 +40,9 @@ export type AccountingRow = {
  */
 export function buildAccountingRows(params: {
   date: string;
+  // Whoever submitted/filled this report -- written into the "Примітки"
+  // column so the accountant knows which brigadier's numbers each row is.
+  foremanName: string;
   objects: AccountingObject[];
   salaryPacks: AccountingSalaryPack[];
   roadAllowancePerPerson: number;
@@ -47,7 +51,7 @@ export function buildAccountingRows(params: {
   tariffByWorkId: Map<string, number>;
   unitByWorkId: Map<string, string>;
 }): AccountingRow[] {
-  const { date, objects, salaryPacks, roadAllowancePerPerson, unionEmployeeIds, employeeNameById, tariffByWorkId, unitByWorkId } = params;
+  const { date, foremanName, objects, salaryPacks, roadAllowancePerPerson, unionEmployeeIds, employeeNameById, tariffByWorkId, unitByWorkId } = params;
   const objectsById = new Map(objects.map((o) => [o.objectId, o]));
   const out: AccountingRow[] = [];
 
@@ -89,6 +93,7 @@ export function buildAccountingRows(params: {
           workName: w.workName,
           volume: formatVolume(w),
           amount,
+          foremanName,
         });
       });
     }
@@ -103,6 +108,7 @@ export function buildAccountingRows(params: {
         workName: "Доплата за виїзд",
         volume: "",
         amount: money(roadAllowancePerPerson),
+        foremanName,
       });
     }
   }
@@ -134,7 +140,7 @@ async function appendAccountingReportRows(rows: AccountingRow[]) {
 
   await appendRows(
     ACCOUNTING_SHEET,
-    rows.map((row) => [nextNo++, row.date, row.employeeName, row.objectName, row.workName, row.volume, row.amount, ""]),
+    rows.map((row) => [nextNo++, row.date, row.employeeName, row.objectName, row.workName, row.volume, row.amount, row.foremanName]),
   );
 }
 
