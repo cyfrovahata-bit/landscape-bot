@@ -20,7 +20,7 @@ export function NumericKeypad({
     }
     if (key === ".") {
       if (value.includes(".")) return;
-      onChange(value + key);
+      onChange((value || "0") + key);
       return;
     }
     // No leading zero -- "0" then "5" replaces to "5" instead of growing "05".
@@ -36,7 +36,7 @@ export function NumericKeypad({
     ["1", "2", "3"],
     ["4", "5", "6"],
     ["7", "8", "9"],
-    ["clear", "0", "back"],
+    [".", "0", "clear", "back"],
   ];
 
   return (
