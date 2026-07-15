@@ -2165,7 +2165,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <>
               <input className="search-box" placeholder="Пошук людини…" value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} />
               <div className="list">
-                {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase()))).map((g) => {
+                {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase())), employees).map((g) => {
                   const expanded = expandedBrigadeId === g.id || !!peopleSearch;
                   const selectedCount = g.members.filter((e) => employeeIds.includes(e.id)).length;
                   const selectable = g.members.filter((e) => !busyEmployees.has(e.id));
@@ -3142,6 +3142,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         employees.filter(
                           (e) => !employeeIds.includes(e.id) && !busyEmployees.has(e.id) && e.name.toLowerCase().includes(arrivedSearch.toLowerCase()),
                         ),
+                        employees,
                       ).map((g) => {
                         const expanded = expandedArrivedBrigadeId === g.id || !!arrivedSearch;
                         const selectedCount = g.members.filter((e) => addArrivedSelected.includes(e.id)).length;

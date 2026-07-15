@@ -258,7 +258,7 @@ export function Logistics({ onBack, onSaved }: { onBack: () => void; onSaved: ()
             onChange={(e) => setPeopleSearch(e.target.value)}
           />
           <div className="list">
-            {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase()))).map((g) => {
+            {groupByBrigade(employees.filter((e) => e.name.toLowerCase().includes(peopleSearch.toLowerCase())), employees).map((g) => {
               const expanded = expandedBrigadeId === g.id || !!peopleSearch;
               const selectedCount = g.members.filter((e) => draftEmployeeIds.includes(e.id)).length;
               const lockedElsewhere = new Set(items.flatMap((it, i) => (i === editingIndex ? [] : it.employeeIds)));
