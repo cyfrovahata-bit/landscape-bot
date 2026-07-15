@@ -3009,11 +3009,24 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
                 {shiftOpen ? (
                   <div className="active-work-card">
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                       <div style={{ fontWeight: 700 }}>Роботи тривають</div>
-                      <button className="chip danger-btn" onClick={finishShift}>
-                        ⏹ Завершити все
-                      </button>
+                      <span style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        {/* Shown only while someone here still hasn't started
+                            (e.g. work began for early self-transport arrivals,
+                            then the car came and dropped more) -- one tap
+                            starts everyone still idle, each getting their own
+                            timer, then it disappears, leaving just the shared
+                            "finish everyone" control. */}
+                        {notStarted.length > 0 && (
+                          <button className="chip selected" onClick={startShift} disabled={!plan.works.length}>
+                            ▶️ Долучити решту ({notStarted.length})
+                          </button>
+                        )}
+                        <button className="chip danger-btn" onClick={finishShift}>
+                          ⏹ Завершити все
+                        </button>
+                      </span>
                     </div>
                     <div className="timer-big" style={{ padding: "4px 0" }}>
                       {earliestOpenStart ? fmtHMS(now - earliestOpenStart) : "00:00:00"}
@@ -3112,9 +3125,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       </span>
                       <span className="cell-sub">{carPresent ? `🚐 ${onboard.length} в машині` : "машина ще в дорозі"}</span>
                     </button>
-                    {notStarted.length > 0 && (
+                    {/* Once work is underway, "start the rest" lives next to
+                        "finish everyone" in the active-work card above -- keep
+                        this only as the very first "start work" entry point. */}
+                    {!shiftOpen && notStarted.length > 0 && (
                       <button className="cell" onClick={startShift} disabled={!plan.works.length}>
-                        <span className="cell-title">▶️ {shiftOpen ? "Додати до роботи" : "Почати роботи"}</span>
+                        <span className="cell-title">▶️ Почати роботи</span>
                         <span className="cell-sub">{notStarted.length} людей</span>
                       </button>
                     )}
