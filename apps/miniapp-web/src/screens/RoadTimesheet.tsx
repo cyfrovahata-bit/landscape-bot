@@ -1283,6 +1283,27 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     haptic("selection");
   }
 
+  // Opens an object's control panel while the car is STILL EN ROUTE, so the
+  // foreman can register people who reached it first under their own
+  // transport and start their work early. Deliberately does NOT pause the
+  // driving segment (the car keeps moving toward it) and does NOT mark the
+  // object visited (the car hasn't arrived) -- so the object still shows up
+  // as a stop to actually drive to, where the crew still onboard gets
+  // dropped off later. The drop-picker opens straight on the self-transport
+  // half; the "who to leave here from the car" half is hidden while the car
+  // isn't physically here (see carPresent on the AT_OBJECT screen).
+  function openEarlySelfTransport(objectId: string) {
+    const target = plans.find((p) => p.objectId === objectId);
+    if (!target) return;
+    setAtObjectId(objectId);
+    setAtObjectReturnStep("DRIVE");
+    setDropSelected([]);
+    setAddArrivedSelected([]);
+    setShowDropPicker(true);
+    setStep("AT_OBJECT");
+    haptic("selection");
+  }
+
   // ---------- roadside pickup / drop-off during the drive ----------
   // Not tied to any object -- just adjusts who's physically in the car
   // right now (e.g. picking someone up along the way, or sending someone
@@ -2739,6 +2760,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             })()}
 
           <div className="section-title">Маршрут</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>
+            🚶 біля обʼєкта — додати тих, хто вже приїхав туди своїм ходом, і почати їм роботи, поки ви ще в дорозі.
+          </div>
           <div className="list">
             {plans.map((p) => {
               const expanded = expandedDriveObjectId === p.objectId;
@@ -2751,13 +2775,15 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
               const openSessions = p.sessions.filter((s) => !s.endedAt);
               const earliestOpenStart = openSessions.length ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime())) : null;
-              const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
+              // 🚶 = the car hasn't arrived yet, but people who came under
+              // their own transport are already here (and maybe working).
+              const icon = p.visited ? "✅" : peopleHere > 0 ? "🚶" : "📍";
               return (
                 <div key={p.objectId}>
                   <div className="cell-row">
                     <button className="cell" onClick={() => setExpandedDriveObjectId(expanded ? null : p.objectId)}>
                       <span className="cell-title">
-                        {expanded ? "▾" : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
+                        {expanded ? "▾" : "▸"} {icon} {p.objectName}
                       </span>
                       <span style={{ display: "flex", gap: 6 }}>
                         {peopleTotal > 0 && (
@@ -2772,7 +2798,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         )}
                       </span>
                     </button>
-                    {wasHere && (
+                    {p.visited ? (
                       <button
                         className="cell-action"
                         onClick={() => {
@@ -2783,6 +2809,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         title="Редагувати"
                       >
                         ✏️
+                      </button>
+                    ) : (
+                      <button className="cell-action" onClick={() => openEarlySelfTransport(p.objectId)} title="Прибули свої (свій транспорт)">
+                        🚶
                       </button>
                     )}
                   </div>
@@ -2853,16 +2883,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
               const worksBadge = worksTotal === 0 ? "" : worksFilled === 0 ? "danger" : worksFilled === worksTotal ? "ok" : "warn";
               const openSessions = p.sessions.filter((s) => !s.endedAt);
               const earliestOpenStart = openSessions.length ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime())) : null;
-              const wasHere = p.visited || peopleHere > 0 || p.sessions.length > 0;
+              // Gate arrive-vs-review on whether the CAR has actually been
+              // here (p.visited), not on whether anyone's here -- an object
+              // where people arrived early under their own transport is not
+              // yet visited by the car, so tapping it must still register the
+              // car's arrival (to drop the rest of the crew), not just expand.
+              const icon = p.visited ? "✅" : peopleHere > 0 ? "🚶" : "📍";
               return (
                 <div key={p.objectId}>
                   <div className="cell-row">
                     <button
                       className="cell"
-                      onClick={() => (wasHere ? setExpandedDriveObjectId(expanded ? null : p.objectId) : arriveAt(p.objectId))}
+                      onClick={() => (p.visited ? setExpandedDriveObjectId(expanded ? null : p.objectId) : arriveAt(p.objectId))}
                     >
                       <span className="cell-title">
-                        {wasHere ? (expanded ? "▾" : "▸") : "▸"} {wasHere ? "✅" : "📍"} {p.objectName}
+                        {p.visited ? (expanded ? "▾" : "▸") : "▸"} {icon} {p.objectName}
                       </span>
                       <span style={{ display: "flex", gap: 6 }}>
                         {peopleTotal > 0 && (
@@ -2877,7 +2912,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         )}
                       </span>
                     </button>
-                    {wasHere && (
+                    {p.visited && (
                       <button
                         className="cell-action"
                         onClick={() => {
@@ -2891,7 +2926,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                       </button>
                     )}
                   </div>
-                  {wasHere && expanded && (
+                  {p.visited && expanded && (
                     <div style={{ padding: "4px 16px 12px" }}>
                       <div className="hint" style={{ fontWeight: 600 }}>👥 Зараз тут</div>
                       <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "нікого"}</div>
@@ -2946,9 +2981,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             const earliestOpenStart = openSessions.length
               ? Math.min(...openSessions.map((s) => new Date(s.startedAt).getTime()))
               : null;
+            // The car is physically here only when the driving clock is
+            // paused (arriveAt pauses it). If it's still running, this screen
+            // was opened mid-drive to register early self-transport arrivals,
+            // so dropping people OUT of the moving car makes no sense -- hide
+            // that half and keep only "who came on their own".
+            const carPresent = !drivingSegmentStartedAt;
             return (
               <>
-                <div className="step-badge">НА ОБʼЄКТІ</div>
+                <div className="step-badge">{carPresent ? "НА ОБʼЄКТІ" : "🚗 МАШИНА ЩЕ В ДОРОЗІ"}</div>
+                {!carPresent && (
+                  <div className="hint" style={{ padding: "0 16px 8px" }}>
+                    Машина зараз не тут. Додайте тих, хто приїхав своїм ходом, і почніть їм роботи — тих, хто в машині, висадять, коли вона приїде.
+                  </div>
+                )}
                 <div className="section-title row">
                   <span>📍 {plan.objectName}</span>
                   <span style={{ display: "flex", gap: 6 }}>
@@ -3061,8 +3107,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         setShowDropPicker(true);
                       }}
                     >
-                      <span className="cell-title">👥 Хто тут — висадити / додати приїхавших самих</span>
-                      <span className="cell-sub">🚐 {onboard.length} в машині</span>
+                      <span className="cell-title">
+                        {carPresent ? "👥 Хто тут — висадити / додати приїхавших самих" : "🚶 Додати тих, хто приїхав сам"}
+                      </span>
+                      <span className="cell-sub">{carPresent ? `🚐 ${onboard.length} в машині` : "машина ще в дорозі"}</span>
                     </button>
                     {notStarted.length > 0 && (
                       <button className="cell" onClick={startShift} disabled={!plan.works.length}>
@@ -3113,7 +3161,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
 
                 {showDropPicker && (
                   <>
-                    {onboard.length > 0 && (
+                    {carPresent && onboard.length > 0 && (
                       <>
                         <div className="section-title">Кого залишити тут</div>
                         <div className="chip-row">
