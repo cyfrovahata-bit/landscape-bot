@@ -2812,7 +2812,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             <MainButton text="📍 Прибув на обʼєкт" onClick={() => setStep("ARRIVE_PICK")} />
           ) : (
             <MainButton
-              text="🏁 Повернутись на базу"
+              // Distinct label from the last-object "🏁 Повертатись на базу"
+              // button so the two never read as the same "did nothing" tap:
+              // here you're already heading back, so it's either "stop to
+              // pick people up" or (nobody left) "arrived at base".
+              text={plans.some((p) => p.here.length > 0) ? "🛑 Зупинитись, забрати людей" : "🏁 Приїхали на базу"}
               onClick={() => {
                 const hasPending = plans.some((p) => p.here.length > 0);
                 // Still people left at objects to pick up on the way -- the
@@ -3273,6 +3277,19 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                         : "🏁 Повертатись на базу"
                   }
                   onClick={() => {
+                    // Last object done: go STRAIGHT to the return-to-base
+                    // pickup list instead of dropping back onto the DRIVE
+                    // screen, which showed a second, identically-labelled
+                    // "return to base" button and made the foreman think
+                    // their tap did nothing. Stay parked -- the segment is
+                    // already paused from arriveAt(); RETURN_PICKUP's
+                    // "▶️ Продовжити рух" resumes the clock once they drive
+                    // off. If nobody's left to pick up anywhere, skip
+                    // straight to the final odometer.
+                    if (atObjectReturnStep === "DRIVE" && !nextUnvisited) {
+                      setStep(plans.some((p) => p.here.length > 0) ? "RETURN_PICKUP" : "RETURN");
+                      return;
+                    }
                     if (atObjectReturnStep === "DRIVE") resumeDrivingSegment();
                     setStep(atObjectReturnStep);
                   }}
