@@ -60,13 +60,14 @@ export type ObjectSalaryPack = {
 /**
  * Per-object payroll split: 1 brigadier (if present among that object's
  * workers) gets 20% split among brigadier rows (practically always just
- * one), seniors split 10%, everyone else splits the remainder (70%, or 90%
- * if no brigadier worked at this object) EVENLY -- everyone is assumed to
- * have done the same work at the object, so hours and the discipline/
- * productivity coefficients (still entered per person, kept for record) no
- * longer weight anyone's share. If nobody senior worked there, that 10%
- * isn't handed to workers instead -- it stays with the company
- * (companyPay), exactly like the bot's roleTotals.company.
+ * one), seniors split 10%, and the remainder (70%, or 90% if no brigadier
+ * worked at this object) is split among the workers PROPORTIONALLY TO THE
+ * HOURS each actually worked at this object -- someone who put in 10h earns
+ * more than someone who put in 4h (share = own hours / total worker hours ×
+ * worker pool). The discipline/productivity coefficients stay entered per
+ * person for the record but don't weight the split. If nobody senior worked
+ * there, that 10% isn't handed to workers instead -- it stays with the
+ * company (companyPay), exactly like the bot's roleTotals.company.
  */
 export function buildSalaryPacksWithRoles(params: {
   objects: Array<{
@@ -108,23 +109,25 @@ export function buildSalaryPacksWithRoles(params: {
 
     const brigadierOnePay = brigadierRows.length ? (o.objectTotal * brigadierPercent) / brigadierRows.length : 0;
     const seniorOnePay = seniorRows.length ? (o.objectTotal * seniorPercent) / seniorRows.length : 0;
-    // Everyone did the same work at the object -- the worker share (70%/90%
-    // of the object's total, after the brigadier/senior cuts above) splits
-    // EVENLY across every worker who worked there, regardless of hours or
-    // discipline/productivity coefficients. Those coefficients stay entered
-    // per person for record-keeping, but no longer weight the split.
-    const workerOnePay = workerRows.length ? (o.objectTotal * workerPercent) / workerRows.length : 0;
+    // The worker share (70%/90% of the object's total, after the brigadier/
+    // senior cuts above) is split PROPORTIONALLY to the real hours each
+    // worker put in at this object. Coefficients are kept per person for the
+    // record but don't weight the split. Fallback to an even split only if
+    // no hours were recorded at all (so nobody's pay silently vanishes).
+    const workerPool = o.objectTotal * workerPercent;
+    const totalWorkerHours = workerRows.reduce((a, r) => a + Number(r.hours || 0), 0);
 
     const rows: SalaryRow[] = rowsSrc.map((r) => {
       let pay = 0;
       if (hasBrigadier && r.employeeId === brigadierEmployeeId) pay = brigadierOnePay;
       else if (hasSenior && seniorSet.has(r.employeeId)) pay = seniorOnePay;
-      else pay = workerOnePay;
+      else if (totalWorkerHours > 0) pay = workerPool * (Number(r.hours || 0) / totalWorkerHours);
+      else if (workerRows.length) pay = workerPool / workerRows.length;
 
       return {
         employeeId: r.employeeId,
         employeeName: r.employeeName,
-        hours: r.hoursRounded,
+        hours: Math.round(Number(r.hours || 0) * 100) / 100,
         coefTotal: r.coefTotal,
         points: r.points,
         pay: Math.round(pay * 100) / 100,
