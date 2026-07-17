@@ -6,6 +6,7 @@ import express from "express";
 import cors from "cors";
 import { startSyncLoop, runSyncCycle, runMigrations, config } from "@landscape/core";
 import { requireTelegramAuth } from "./authMiddleware.js";
+import { registerTelegramWebhook, setupTelegramWebhook } from "./telegramWebhook.js";
 import { dictionariesRouter } from "./routes/dictionaries.js";
 import { logisticsRouter } from "./routes/logistics.js";
 import { materialsRouter } from "./routes/materials.js";
@@ -45,6 +46,11 @@ app.post("/internal/sync-now", async (req, res) => {
   }
 });
 
+// /start self-registration + admin approve/reject, via Telegram webhook --
+// must be registered before the static catch-all below, which would
+// otherwise swallow POST /telegram/webhook into index.html.
+registerTelegramWebhook(app);
+
 const apiRouter = express.Router();
 apiRouter.use(requireTelegramAuth);
 apiRouter.get("/me", (req, res) => res.json(req.user));
@@ -77,6 +83,7 @@ async function main() {
   });
 
   startSyncLoop(config.syncIntervalMs);
+  await setupTelegramWebhook();
 }
 
 main().catch((err) => {
