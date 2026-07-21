@@ -1324,7 +1324,30 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     logChange(`Висаджено по дорозі: ${employeeName(employeeId)}`);
   }
 
-  function pickUpHere(objectId: string) {
+  // Of the given people at an object, who was NEVER clocked in to work there
+  // (no session at all). Since pay is by hours, picking them up without ever
+  // starting their work means they earn nothing for this object and its
+  // money can't be split -- so callers warn before doing it.
+  function neverStartedHere(objectId: string, ids: string[]) {
+    const plan = planFor(objectId);
+    const startedIds = new Set(plan.sessions.map((s) => s.employeeId));
+    return ids.filter((id) => !startedIds.has(id));
+  }
+
+  // Returns true if it's OK to proceed. Warns (Скасувати / Так) when some of
+  // the people being picked up never had work started here.
+  async function confirmUnstartedPickup(objectId: string, ids: string[]): Promise<boolean> {
+    const unstarted = neverStartedHere(objectId, ids);
+    if (!unstarted.length) return true;
+    const objectName = planFor(objectId).objectName;
+    return confirmDialog(
+      `На об'єкті «${objectName}» не розпочато роботи: ${unstarted.map(employeeName).join(", ")}.\n\n` +
+        `Якщо забрати без нарахування — за цей об'єкт вони нічого не отримають. Ви бажаєте продовжити?`,
+    );
+  }
+
+  // Actual pickup, no prompting -- callers gate it with confirmUnstartedPickup.
+  function doPickUpHere(objectId: string) {
     const plan = planFor(objectId);
     if (!plan.here.length) return;
     const ids = plan.here;
@@ -1339,11 +1362,19 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     logChange(`Забрано з ${plan.objectName}`);
   }
 
+  async function pickUpHere(objectId: string) {
+    const plan = planFor(objectId);
+    if (!plan.here.length) return;
+    if (!(await confirmUnstartedPickup(objectId, plan.here))) return;
+    doPickUpHere(objectId);
+  }
+
   // Picks up (and clocks out, if still working) one specific person without
   // disturbing anyone else still at the object.
-  function pickUpOne(objectId: string, employeeId: string) {
+  async function pickUpOne(objectId: string, employeeId: string) {
     const plan = planFor(objectId);
     if (!plan.here.includes(employeeId)) return;
+    if (!(await confirmUnstartedPickup(objectId, [employeeId]))) return;
     const now = new Date().toISOString();
     moveEmployeesTo([employeeId], { kind: "onboard" });
     setPlans((prev) =>
@@ -1371,10 +1402,11 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // driving segment pauses same as arriveAt() does on the way out -- "▶️
   // Продовжити рух" on the RETURN_PICKUP screen resumes it once the foreman
   // heads to the next pickup (or straight to base).
-  function returnPickupObject(objectId: string) {
+  async function returnPickupObject(objectId: string) {
     const plan = planFor(objectId);
+    if (plan.here.length && !(await confirmUnstartedPickup(objectId, plan.here))) return;
     pauseDrivingSegment();
-    pickUpHere(objectId);
+    doPickUpHere(objectId);
     if (plan.works.length) {
       openVolumesForObject(objectId, "RETURN_PICKUP");
     }
@@ -1599,6 +1631,23 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   }
 
   async function save() {
+    // Catch-all safety net: an object with real volume but nobody ever
+    // clocked in earns money that can't be split (pay is by hours), so 90%
+    // of it would silently vanish. Warn before sending so the foreman can go
+    // back and start work first.
+    const noWorkObjects = plans.filter(
+      (p) => p.sessions.length === 0 && p.works.some((w) => w.volume && w.volume !== "?" && Number(w.volume) > 0),
+    );
+    if (noWorkObjects.length) {
+      const many = noWorkObjects.length > 1;
+      const ok = await confirmDialog(
+        `На об'єкт${many ? "ах" : "і"} ${noWorkObjects.map((p) => `«${p.objectName}»`).join(", ")} ` +
+          `не розпочато роботи нікому — за ${many ? "них" : "нього"} гроші не розподіляться між людьми.\n\n` +
+          `Ви бажаєте продовжити?`,
+      );
+      if (!ok) return;
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -3831,6 +3880,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
             return (
               <div className="hint" style={{ padding: "0 16px 8px", color: "#d70015" }}>
                 ⚠️ Не введено обсяг: {unfilled.join(", ")}. Заповніть перед відправкою.
+              </div>
+            );
+          })()}
+
+          {(() => {
+            const noWork = plans.filter(
+              (p) => p.sessions.length === 0 && p.works.some((w) => w.volume && w.volume !== "?" && Number(w.volume) > 0),
+            );
+            if (!noWork.length) return null;
+            return (
+              <div className="hint" style={{ padding: "0 16px 8px", color: "#d70015" }}>
+                ⚠️ Не розпочато роботи на: {noWork.map((p) => p.objectName).join(", ")}. За ці обʼєкти гроші не розподіляться між людьми.
               </div>
             );
           })()}
