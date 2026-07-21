@@ -320,6 +320,19 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   const [moveSelected, setMoveSelected] = useState<string[]>([]);
   const [moveTargetId, setMoveTargetId] = useState<string | null>(null);
   const [showMovePicker, setShowMovePicker] = useState(false);
+  // Manual hours fallback: if the foreman forgot to start the timer for
+  // someone, they can type the worked hours in directly here. showManualHours
+  // opens the per-person list; manualHoursEmployeeId + manualHoursBuffer drive
+  // the keypad for the one person being edited.
+  const [showManualHours, setShowManualHours] = useState(false);
+  const [manualHoursEmployeeId, setManualHoursEmployeeId] = useState<string | null>(null);
+  const [manualHoursBuffer, setManualHoursBuffer] = useState("");
+  // Never carry an open manual-hours editor from one object to the next,
+  // whichever way the object changes (arrive, switch, or an ✏️ edit entry).
+  useEffect(() => {
+    setShowManualHours(false);
+    setManualHoursEmployeeId(null);
+  }, [atObjectId]);
   // People who show up at an object on their own (their own car, etc.) --
   // never picked in PICK_PEOPLE, so not in employeeIds/onboard/here at all
   // until added here. Picked from the same "drop off" screen (showDropPicker)
@@ -1266,6 +1279,8 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     setAtObjectId(objectId);
     setAtObjectReturnStep("DRIVE");
     setStep("AT_OBJECT");
+    setShowManualHours(false);
+    setManualHoursEmployeeId(null);
     pauseDrivingSegment();
     haptic("medium");
     logChange(`Прибули: ${target.objectName}`);
@@ -1280,6 +1295,9 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     if (!target) return;
     setPlans((prev) => prev.map((p) => (p.objectId !== objectId ? p : { ...p, visited: true })));
     setAtObjectId(objectId);
+    // Never carry an open manual-hours editor across to another object.
+    setShowManualHours(false);
+    setManualHoursEmployeeId(null);
     haptic("selection");
   }
 
@@ -1528,6 +1546,37 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     haptic("light");
   }
 
+  // Total worked hours a person has recorded at an object (sum of every
+  // session, counting an open one up to now) -- what the payroll splits pay
+  // by. Shown next to each person on the manual-hours screen.
+  function hoursAtObject(plan: ObjPlan, employeeId: string) {
+    const now = Date.now();
+    const ms = plan.sessions
+      .filter((s) => s.employeeId === employeeId)
+      .reduce((a, s) => a + Math.max(0, (s.endedAt ? new Date(s.endedAt).getTime() : now) - new Date(s.startedAt).getTime()), 0);
+    return Math.round((ms / 3_600_000) * 100) / 100;
+  }
+
+  // Manual override: replace a person's sessions at an object with ONE closed
+  // session of exactly `hours` long. The safety net for "forgot to press
+  // Почати роботи" (or the timer ran wrong) -- works even for someone no
+  // longer physically here, since payroll only cares about the recorded time,
+  // not the current location. hours=0 removes their time here entirely.
+  function setManualHours(objectId: string, employeeId: string, hours: number) {
+    const end = new Date();
+    const start = new Date(end.getTime() - Math.max(0, hours) * 3_600_000);
+    setPlans((prev) =>
+      prev.map((p) => {
+        if (p.objectId !== objectId) return p;
+        const others = p.sessions.filter((s) => s.employeeId !== employeeId);
+        const manual = hours > 0 ? [{ employeeId, startedAt: start.toISOString(), endedAt: end.toISOString() }] : [];
+        return { ...p, sessions: [...others, ...manual] };
+      }),
+    );
+    haptic("success");
+    logChange(`Години вручну: ${employeeName(employeeId)} — ${hours} год на ${planFor(objectId).objectName}`);
+  }
+
   // Handles both halves of "who's here now": people stepping out of the car
   // (dropSelected, from onboard) and people who showed up under their own
   // transport (addArrivedSelected, never on the trip roster until now) --
@@ -1768,6 +1817,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         setMoveSelected([]);
         setMoveTargetId(null);
         setShowMovePicker(false);
+        return;
+      }
+      if (showManualHours) {
+        // Step out of the per-person keypad first, then out of the list.
+        if (manualHoursEmployeeId) setManualHoursEmployeeId(null);
+        else setShowManualHours(false);
         return;
       }
       // Same resume rule as the in-screen "✅ Готово" button below -- leaving
@@ -3159,7 +3214,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                   </>
                 )}
 
-                {!showDropPicker && !showMovePicker && (
+                {!showDropPicker && !showMovePicker && !showManualHours && (
                   <div className="list" style={{ marginTop: 8 }}>
                     <button
                       className="cell"
@@ -3205,10 +3260,21 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     >
                       <span className="cell-title">🔄 Перенести людей на інший обʼєкт</span>
                     </button>
+                    <button
+                      className="cell"
+                      onClick={() => {
+                        setManualHoursEmployeeId(null);
+                        setManualHoursBuffer("");
+                        setShowManualHours(true);
+                      }}
+                    >
+                      <span className="cell-title">🕒 Ввести години вручну</span>
+                      <span className="cell-sub">якщо забули таймер</span>
+                    </button>
                   </div>
                 )}
 
-                {plans.length > 1 && !showDropPicker && !showMovePicker && (
+                {plans.length > 1 && !showDropPicker && !showMovePicker && !showManualHours && (
                   <>
                     <div className="section-title">Інші обʼєкти — переключитись</div>
                     <div className="list">
@@ -3378,6 +3444,62 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                     </div>
                   </>
                 )}
+
+                {showManualHours &&
+                  (manualHoursEmployeeId ? (
+                    <>
+                      <div className="section-title">🕒 {employeeName(manualHoursEmployeeId)} — години на «{plan.objectName}»</div>
+                      <div className="big-number">{manualHoursBuffer || "0"} год</div>
+                      <NumericKeypad value={manualHoursBuffer} onChange={setManualHoursBuffer} />
+                      <div style={{ display: "flex", gap: 8, padding: "8px 16px" }}>
+                        <button className="chip" onClick={() => setManualHoursEmployeeId(null)}>
+                          ← Назад
+                        </button>
+                        <button
+                          className="chip selected"
+                          onClick={() => {
+                            setManualHours(atObjectId, manualHoursEmployeeId, Number(manualHoursBuffer) || 0);
+                            setManualHoursEmployeeId(null);
+                          }}
+                        >
+                          Зберегти
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="section-title">🕒 Години вручну — {plan.objectName}</div>
+                      <div className="hint" style={{ padding: "0 16px 8px" }}>
+                        Якщо забули ввімкнути таймер — впишіть відпрацьовані години. Це перезапише таймер для цієї людини на цьому обʼєкті.
+                      </div>
+                      <div className="list">
+                        {employeeIds.map((id) => {
+                          const hrs = hoursAtObject(plan, id);
+                          return (
+                            <button
+                              key={id}
+                              className="cell"
+                              onClick={() => {
+                                setManualHoursEmployeeId(id);
+                                setManualHoursBuffer(hrs > 0 ? String(hrs) : "");
+                              }}
+                            >
+                              <span className="cell-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                                {employeeName(id)}
+                              </span>
+                              <span className="cell-sub">{hrs > 0 ? `${hrs} год · ✏️` : "— · ✏️"}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ padding: "8px 16px" }}>
+                        <button className="chip" onClick={() => setShowManualHours(false)}>
+                          ✅ Готово
+                        </button>
+                      </div>
+                    </>
+                  ))}
 
                 <div className="hint" style={{ padding: "0 16px 8px", textAlign: "center" }}>
                   Можна їхати далі з тими, хто залишився в машині — робота тут триватиме без вас.
