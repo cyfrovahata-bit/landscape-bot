@@ -423,6 +423,75 @@ body {
   border: 1px solid rgba(52, 199, 89, 0.3);
 }
 
+/* End-of-object transport choice. The two arrival types deliberately look
+   like separate cards so a foreman cannot accidentally put self-transport
+   workers into the bus with the one-tap bulk action. */
+.departure-groups {
+  display: grid;
+  gap: 10px;
+  padding: 8px 12px 12px;
+}
+
+.departure-group {
+  padding: 12px;
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+}
+
+.departure-group.bus {
+  background: rgba(0, 122, 255, 0.07);
+  border-color: rgba(0, 122, 255, 0.22);
+}
+
+.departure-group.self {
+  background: rgba(255, 149, 0, 0.08);
+  border-color: rgba(255, 149, 0, 0.25);
+}
+
+.departure-group-title,
+.departure-person-name,
+.departure-person-actions {
+  display: flex;
+  align-items: center;
+}
+
+.departure-group-title {
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 700;
+}
+
+.departure-main-action {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.departure-person {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--tg-border);
+}
+
+.departure-person:last-child {
+  padding-bottom: 0;
+}
+
+.departure-person-name {
+  gap: 8px;
+  font-weight: 600;
+}
+
+.departure-person-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.departure-person-actions .chip {
+  flex: 1 1 145px;
+}
+
 .danger-btn {
   border-color: rgba(255, 59, 48, 0.4) !important;
   color: #d70015;

@@ -1364,70 +1364,66 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
     );
   }
 
-  // Actual pickup, no prompting -- callers gate it with confirmUnstartedPickup.
-  function doPickUpHere(objectId: string) {
+  // Finishes the selected people's open sessions and removes them from the
+  // object. Their physical destination is explicit: either the bus, or
+  // `nowhere` when a self-transport employee leaves the object on their own.
+  // `pauseForBus` is used by the return route: putting someone in the bus
+  // means the vehicle has really reached that object, so road time pauses.
+  async function departObject(
+    objectId: string,
+    employeeIdsToMove: string[],
+    destination: "onboard" | "own_transport",
+    pauseForBus = false,
+  ): Promise<boolean> {
     const plan = planFor(objectId);
-    if (!plan.here.length) return;
-    const ids = plan.here;
-    const now = new Date().toISOString();
-    moveEmployeesTo(ids, { kind: "onboard" });
-    setPlans((prev) =>
-      prev.map((p) =>
-        p.objectId !== objectId ? p : { ...p, sessions: p.sessions.map((s) => (ids.includes(s.employeeId) && !s.endedAt ? { ...s, endedAt: now } : s)) },
-      ),
-    );
-    haptic("light");
-    logChange(`Забрано з ${plan.objectName}`);
-  }
+    const ids = employeeIdsToMove.filter((id) => plan.here.includes(id));
+    if (!ids.length) return false;
+    if (!(await confirmUnstartedPickup(objectId, ids))) return false;
+    if (destination === "onboard" && pauseForBus) pauseDrivingSegment();
 
-  async function pickUpHere(objectId: string) {
-    const plan = planFor(objectId);
-    if (!plan.here.length) return;
-    if (!(await confirmUnstartedPickup(objectId, plan.here))) return;
-    doPickUpHere(objectId);
-  }
-
-  // Picks up (and clocks out, if still working) one specific person without
-  // disturbing anyone else still at the object.
-  async function pickUpOne(objectId: string, employeeId: string) {
-    const plan = planFor(objectId);
-    if (!plan.here.includes(employeeId)) return;
-    if (!(await confirmUnstartedPickup(objectId, [employeeId]))) return;
     const now = new Date().toISOString();
-    moveEmployeesTo([employeeId], { kind: "onboard" });
+    moveEmployeesTo(ids, destination === "onboard" ? { kind: "onboard" } : { kind: "nowhere" });
     setPlans((prev) =>
       prev.map((p) =>
         p.objectId !== objectId
           ? p
-          : { ...p, sessions: p.sessions.map((s) => (s.employeeId === employeeId && !s.endedAt ? { ...s, endedAt: now } : s)) },
+          : { ...p, sessions: p.sessions.map((s) => (ids.includes(s.employeeId) && !s.endedAt ? { ...s, endedAt: now } : s)) },
       ),
     );
     haptic("light");
-    logChange(`Забрано ${employeeName(employeeId)} з ${plan.objectName}`);
+    const names = ids.map(employeeName).join(", ");
+    logChange(
+      destination === "onboard"
+        ? `Посаджено в бус з ${plan.objectName}: ${names}`
+        : `Поїхали самостійно з ${plan.objectName}: ${names}`,
+    );
+    return true;
+  }
+
+  async function pickUpHere(objectId: string, ids?: string[], pauseForBus = false) {
+    const plan = planFor(objectId);
+    return departObject(objectId, ids ?? plan.here, "onboard", pauseForBus);
+  }
+
+  // Picks up (and clocks out, if still working) one specific person without
+  // disturbing anyone else still at the object.
+  async function pickUpOne(objectId: string, employeeId: string, pauseForBus = false) {
+    return departObject(objectId, [employeeId], "onboard", pauseForBus);
+  }
+
+  // A person who arrived independently can finish at the object and leave
+  // independently as well. They stay in employeeIds/selfTransportIds so all
+  // worked hours remain in payroll and they remain ineligible for the trip's
+  // road allowance; only their current physical location changes.
+  async function leaveObjectOnOwn(objectId: string, employeeIdsLeaving: string | string[]) {
+    const ids = Array.isArray(employeeIdsLeaving) ? employeeIdsLeaving : [employeeIdsLeaving];
+    return departObject(objectId, ids, "own_transport");
   }
 
   function openVolumesForObject(objectId: string, returnTo: Step) {
     setPlanObjectId(objectId);
     setVolumesReturnStep(returnTo);
     setStep("PLAN_VOLUMES");
-  }
-
-  // Guided end-of-day pickup: picks everyone up from one object (which also
-  // clocks out anyone still working there), then drops into volumes +
-  // coefficients for that object so the foreman can fill them in on the way
-  // to the next pickup, with an explicit "later" escape hatch either way.
-  // Pressing this means the car has actually arrived at that object, so the
-  // driving segment pauses same as arriveAt() does on the way out -- "▶️
-  // Продовжити рух" on the RETURN_PICKUP screen resumes it once the foreman
-  // heads to the next pickup (or straight to base).
-  async function returnPickupObject(objectId: string) {
-    const plan = planFor(objectId);
-    if (plan.here.length && !(await confirmUnstartedPickup(objectId, plan.here))) return;
-    pauseDrivingSegment();
-    doPickUpHere(objectId);
-    if (plan.works.length) {
-      openVolumesForObject(objectId, "RETURN_PICKUP");
-    }
   }
 
   // ---------- at object ----------
@@ -1644,6 +1640,70 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
   // home (roadsideDropoff) stays in the trip roster for the road allowance
   // but is legitimately not in the car, and must not block the day report.
   const allBack = plans.every((p) => p.here.length === 0);
+
+  // Shared departure panel used both directly at an object and during the
+  // return route. People are split by how they arrived, so the default action
+  // is unambiguous: bus arrivals go back into the bus, while self-transport
+  // arrivals can leave independently or opt into a bus seat one by one.
+  function renderDepartureChoices(
+    plan: ObjPlan,
+    { allowBus, pauseForBus }: { allowBus: boolean; pauseForBus: boolean },
+  ) {
+    const busArrivalIds = plan.here.filter((id) => !selfTransportIds.includes(id));
+    const selfArrivalIds = plan.here.filter((id) => selfTransportIds.includes(id));
+    if (!busArrivalIds.length && !selfArrivalIds.length) return null;
+
+    return (
+      <div className="departure-groups">
+        {busArrivalIds.length > 0 && (
+          <div className="departure-group bus">
+            <div className="departure-group-title">
+              <span>🚐 Приїхали бусом</span>
+              <span className="badge">{busArrivalIds.length}</span>
+            </div>
+            <div className="hint">{busArrivalIds.map(employeeName).join(", ")}</div>
+            {allowBus ? (
+              <button className="chip selected departure-main-action" onClick={() => pickUpHere(plan.objectId, busArrivalIds, pauseForBus)}>
+                🚐 Посадити в бус ({busArrivalIds.length})
+              </button>
+            ) : (
+              <div className="hint" style={{ marginTop: 8 }}>Бус ще не прибув на цей обʼєкт</div>
+            )}
+          </div>
+        )}
+
+        {selfArrivalIds.length > 0 && (
+          <div className="departure-group self">
+            <div className="departure-group-title">
+              <span>🚶 Приїхали самі</span>
+              <span className="badge warn">{selfArrivalIds.length}</span>
+            </div>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              Посадіть у бус тих, кого забираєте. Решту зніміть з обʼєкта однією кнопкою
+            </div>
+            {selfArrivalIds.map((id) => (
+              <div key={id} className="departure-person">
+                <span className="departure-person-name">
+                  <span className={`avatar-circle ${roleAccent(roleFor(id))}`}>{initials(employeeName(id))}</span>
+                  {employeeName(id)}
+                </span>
+                {allowBus && (
+                  <span className="departure-person-actions">
+                    <button className="chip selected" onClick={() => pickUpOne(plan.objectId, id, pauseForBus)}>
+                      🚐 Посадити в бус
+                    </button>
+                  </span>
+                )}
+              </div>
+            ))}
+            <button className="chip departure-main-action" onClick={() => leaveObjectOnOwn(plan.objectId, selfArrivalIds)}>
+              🚶 Зняти з обʼєкта ({selfArrivalIds.length})
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // ---------- payload / save ----------
   function buildObjectsPayload() {
@@ -3203,14 +3263,18 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                                   ▶️ Старт
                                 </button>
                               )}
-                              <button className="chip" onClick={() => pickUpOne(atObjectId, id)}>
-                                🔼 Забрати
-                              </button>
                             </span>
                           </div>
                         );
                       })}
                     </div>
+                  </>
+                )}
+
+                {plan.here.length > 0 && !showDropPicker && !showMovePicker && !showManualHours && (
+                  <>
+                    <div className="section-title">Як люди їдуть з обʼєкта</div>
+                    {renderDepartureChoices(plan, { allowBus: carPresent, pauseForBus: false })}
                   </>
                 )}
 
@@ -3539,8 +3603,12 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
       {step === "RETURN_PICKUP" && (
         <>
           {(() => {
-            const visited = plans.filter((p) => p.visited);
-            const anyPending = visited.some((p) => p.here.length > 0);
+            // Include an object that only has early self-transport arrivals,
+            // even if the bus never formally visited it on the outbound leg.
+            // Those people still need an explicit way to leave on their own
+            // (or be collected by the bus) before the day can finish.
+            const returnObjects = plans.filter((p) => p.visited || p.here.length > 0 || p.sessions.length > 0);
+            const anyPending = plans.some((p) => p.here.length > 0);
             return (
               <>
                 <div className="step-badge">ПОВЕРНЕННЯ НА БАЗУ</div>
@@ -3550,7 +3618,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                 <div className="hint" style={{ textAlign: "center" }}>лише час у дорозі — на об'єктах не рахується</div>
                 <div className="section-title">Обʼєкти</div>
                 <div className="list">
-                  {visited.map((p) => {
+                  {returnObjects.map((p) => {
                     const expanded = expandedReturnPickupObjectId === p.objectId;
                     const peopleHere = p.here.length;
                     const peopleActive = p.sessions.filter((s) => !s.endedAt).length;
@@ -3564,7 +3632,7 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                           </span>
                           <span style={{ display: "flex", gap: 6 }}>
                             {peopleHere === 0 ? (
-                              <span className="badge ok">✅ забрано</span>
+                              <span className="badge ok">✅ усі виїхали</span>
                             ) : (
                               <span className={`badge ${peopleActive === 0 ? "danger" : "warn"}`}>👤 {peopleHere} тут</span>
                             )}
@@ -3576,24 +3644,20 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                           </span>
                         </button>
                         {expanded && (
-                          <div style={{ padding: "4px 16px 8px" }}>
-                            <div className="hint" style={{ fontWeight: 600 }}>👥 Люди</div>
-                            <div className="hint" style={{ marginBottom: 8 }}>{peopleHere ? p.here.map(employeeName).join(", ") : "усіх забрано"}</div>
-                            <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
-                            <div className="hint">
-                              {p.works.length
-                                ? p.works.map((w) => `${w.workName}${w.volume && w.volume !== "?" ? ` (${w.volume} ${w.unit})` : ""}`).join(", ")
-                                : "без робіт"}
+                          <div style={{ paddingBottom: 8 }}>
+                            {peopleHere > 0 && renderDepartureChoices(p, { allowBus: true, pauseForBus: true })}
+                            <div style={{ padding: "4px 16px 0" }}>
+                              <div className="hint" style={{ fontWeight: 600 }}>🛠 Роботи</div>
+                              <div className="hint">
+                                {p.works.length
+                                  ? p.works.map((w) => `${w.workName}${w.volume && w.volume !== "?" ? ` (${w.volume} ${w.unit})` : ""}`).join(", ")
+                                  : "без робіт"}
+                              </div>
                             </div>
                           </div>
                         )}
                         {(peopleHere > 0 || worksTotal > 0) && (
                           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "0 16px 10px" }}>
-                            {peopleHere > 0 && (
-                              <button className="chip selected" onClick={() => returnPickupObject(p.objectId)}>
-                                🔼 Забрати усіх ({peopleHere})
-                              </button>
-                            )}
                             {worksTotal > 0 && (
                               <button className="chip" onClick={() => openVolumesForObject(p.objectId, "RETURN_PICKUP")}>
                                 📏 Ввести обсяги{worksFilled < worksTotal ? ` (${worksTotal - worksFilled})` : ""}
@@ -3630,10 +3694,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
         <>
           <div className="step-badge">ПОВЕРНЕННЯ</div>
           <div className="section-title">Обʼєкти</div>
-          <div className="hint" style={{ padding: "0 16px 8px" }}>Завершіть роботу і заберіть людей з обʼєктів</div>
+          <div className="hint" style={{ padding: "0 16px 8px" }}>Завершіть роботу й оберіть, як кожен їде з обʼєкта</div>
           <div className="list">
             {plans
-              .filter((p) => p.visited)
+              .filter((p) => p.visited || p.here.length > 0 || p.sessions.length > 0)
               .map((p) => {
                 const unfilled = p.works.filter((w) => !w.volume || w.volume === "?").length;
                 const expanded = expandedReturnObjectId === p.objectId;
@@ -3673,15 +3737,10 @@ export function RoadTimesheet({ onBack, onSaved }: { onBack: () => void; onSaved
                             ? p.works.map((w) => `${w.workName}: ${w.volume && w.volume !== "?" ? `${w.volume} ${w.unit}` : "не введено"}`).join(", ")
                             : "без робіт"}
                         </div>
-                        {p.here.length > 0 && <div className="hint">👥 Ще тут: {p.here.map(employeeName).join(", ")}</div>}
+                        {p.here.length > 0 && renderDepartureChoices(p, { allowBus: true, pauseForBus: false })}
                       </div>
                     )}
                     <div style={{ display: "flex", gap: 8, padding: "0 16px 10px", flexWrap: "wrap" }}>
-                      {p.here.length > 0 && (
-                        <button className="chip" onClick={() => pickUpHere(p.objectId)}>
-                          Забрати ({p.here.map(employeeName).join(", ")})
-                        </button>
-                      )}
                       {unfilled > 0 && (
                         <button className="chip" onClick={() => openVolumesForObject(p.objectId, "RETURN")}>
                           🟡 Ввести обсяги ({unfilled})
