@@ -1498,6 +1498,11 @@ roadTimesheetRouter.get("/admin/overview", async (req, res) => {
         trips: trips.sort((a, b) => a.tripSeq - b.tripSeq),
         km: Math.round(trips.reduce((a, t) => a + t.km, 0) * 100) / 100,
         allApproved: trips.length > 0 && trips.every((t) => t.status === "ЗАТВЕРДЖЕНО"),
+        // Та сама стрічка, що й у «в дорозі»: день не має уриватись на
+        // півслові, коли його здали. Доти картка переїжджала в «Здані» й
+        // залишався тільки підсумок -- о котрій виїхали, коли прибули й що
+        // робили, ставало невидимим рівно тоді, коли день закінчився.
+        timeline: timelineByForeman.get(f.tgId) ?? [],
       };
     })
     .sort((a, b) => a.foremanName.localeCompare(b.foremanName));

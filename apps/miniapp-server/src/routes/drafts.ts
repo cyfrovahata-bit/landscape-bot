@@ -92,6 +92,34 @@ draftsRouter.delete("/", async (req, res) => {
 });
 
 /**
+ * DELETE /api/drafts/:foremanTgId — прибрати чужий незавершений день. Адмін.
+ *
+ * Розділ «Почали, але не здали» показує все, що висить, і не має власного
+ * терміну придатності: тестові прогони, кинуті чернетки, день, який бригадир
+ * почав і забув. Вони лишаються там назавжди, і чим їх більше, тим менше
+ * видно ті, що справді потребують уваги.
+ *
+ * Чіпає ТІЛЬКИ дзеркало (`day_drafts`). Зданий день живе в подіях і сюди не
+ * входить: прибрати незавершений день неможливо переплутати зі знесенням
+ * робочого — того, що не здано, у звітності немає взагалі.
+ */
+draftsRouter.delete("/:foremanTgId", async (req, res) => {
+  if (req.user!.role !== "ADMIN") {
+    res.status(403).json({ error: "Тільки для адміністратора" });
+    return;
+  }
+  let tgId: bigint;
+  try {
+    tgId = BigInt(req.params.foremanTgId);
+  } catch {
+    res.status(400).json({ error: "foremanTgId має бути числом" });
+    return;
+  }
+  await db.delete(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, tgId));
+  res.json({ ok: true });
+});
+
+/**
  * GET /api/drafts/all — усі незавершені дні, тільки адмін.
  *
  * Це те, чого бракувало: бригада, яка працює, але ще не здала день, більше не
