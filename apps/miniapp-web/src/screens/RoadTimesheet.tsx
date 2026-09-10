@@ -615,6 +615,8 @@ export function RoadTimesheet({
   // замовчуванням: обидві відповіді правдоподібні, і кожна прямо міняє гроші.
   // Дефолт «як бригада» вже коштував дня 08.09 -- бригадир додав пʼятьох, які
   // щойно приїхали, і всім підтягнулись його 39 хвилин.
+  /** Чи змінювали день після останньої вдалої відправки (див. logChange). */
+  const [changedSinceSave, setChangedSinceSave] = useState(false);
   const [addPersonStart, setAddPersonStart] = useState<"crew" | "now" | null>(null);
   const [addPersonStartHint, setAddPersonStartHint] = useState(false);
   const [addPersonSearch, setAddPersonSearch] = useState("");
@@ -1177,6 +1179,10 @@ export function RoadTimesheet({
   }
 
   function logChange(label: string) {
+    // Кожна змістовна зміна дня проходить тут, тож це і є найточніший сигнал
+    // «у конструкторі є щось, чого немає в базі» -- ним користується
+    // startNewTrip, щоб питати підтвердження лише коли є що втрачати.
+    setChangedSinceSave(true);
     setChangeLog((prev) => [{ ts: Date.now(), label }, ...prev].slice(0, 100));
     // Той самий запис — і в журнал дій. Це найцінніші рядки в ньому: підпис
     // кнопки каже, що натиснули, а це — що з дня від того сталося.
@@ -1913,14 +1919,32 @@ export function RoadTimesheet({
   // already-submitted trips exactly as they are -- e.g. came back to base at
   // lunch, swapped crew, and is heading out to a different object.
   async function startNewTrip() {
-    // The builder holds ONE trip. Blanking it while an unsent trip is in there
-    // is not "starting a new one", it is throwing the old one away -- which is
-    // exactly what happened to a foreman who tapped this and then went back.
-    if (carId || employeeIds.length || plans.length) {
+    // Конструктор тримає ОДНУ поїздку, і чистити його наосліп не можна:
+    // для неЗДАНОЇ поїздки це не «почати нову», а викинути стару -- рівно те,
+    // що сталося з бригадиром, який тапнув сюди й пішов назад.
+    //
+    // Але після здачі все навпаки. Поїздка вже в базі (`editingTripSeq` ставить
+    // сама save), і та сама перевірка блокувала другий виїзд за день: бригадир
+    // повертався з обіду, тиснув «➕ Розпочати нову поїздку» просто на екрані
+    // зданого дня -- і читав «продовжте або скиньте» про день, який щойно
+    // здав. Скидати його він, звісно, не хотів.
+    const submittedAlready = editingTripSeq !== null;
+    if (!submittedAlready && (carId || employeeIds.length || plans.length)) {
       setError("У конструкторі вже є незавершена поїздка. Продовжте її або скиньте (🗑 угорі), і тоді створюйте нову.");
       haptic("error");
       return;
     }
+    // Питаємо лише тоді, коли є що втратити: у зданій поїздці щось правили й
+    // не натиснули «Оновити звіт». Без правок це звичайний хід дня, і зайвий
+    // діалог тут лише привчав би тиснути «Так» не читаючи.
+    if (submittedAlready && changedSinceSave) {
+      const ok = await confirmDialog(
+        "У поїздці, яку вже здано, є незбережені правки.\n\n" +
+          "Почати нову поїздку? Ці правки зникнуть — сам зданий звіт залишиться на місці.",
+      );
+      if (!ok) return;
+    }
+    setChangedSinceSave(false);
     setEditingTripSeq(null);
     setCarId("");
     setOdoStart("");
@@ -3498,6 +3522,9 @@ export function RoadTimesheet({
       clearMirroredDraft();
       setDayStatus((prev) => (prev ? { ...prev, hasSubmission: true, eventId: res.eventId } : prev));
       logChange("Звіт відправлено");
+      // Саме тут, ПІСЛЯ logChange: він щойно підняв прапорець, а день у базі
+      // рівно такий, як на екрані.
+      setChangedSinceSave(false);
       haptic("success");
       if (fixingReturnedDate) {
         // Виправлений день уже в базі. Затримувати бригадира на екрані
