@@ -686,6 +686,14 @@ export function RoadTimesheet({
   useClearErrorOnSuccess(setError);
   const [preview, setPreview] = useState<PayrollPreview | null>(null);
   const [submittedTrips, setSubmittedTrips] = useState<SubmittedTrip[]>([]);
+  /**
+   * Чи можна показувати бригадиру гроші.
+   *
+   * Відсоток від робітничої частини — це теж гроші: разом із фондом обʼєкта він
+   * прямо дає суму, а фонд у звіті видно. Тому «12.26 год · 50%» на підсумку
+   * ховається за тим самим правилом, що й самі суми.
+   */
+  const dayApproved = submittedTrips.length > 0 && submittedTrips.every((t) => t.status === "ЗАТВЕРДЖЕНО");
   const [dayCombined, setDayCombined] = useState<DayCombined | null>(null);
   const [editingTripSeq, setEditingTripSeq] = useState<number | null>(null);
   const [inProgressResumeStep, setInProgressResumeStep] = useState<Step | null>(null);
@@ -7442,7 +7450,9 @@ export function RoadTimesheet({
                                     {hoursAtObject(p, id) < MIN_PAID_HOURS ? (
                                       <span style={{ color: "#d70015" }}> · не оплачується</span>
                                     ) : (
-                                      objectHours > 0 && ` · ${Math.round((hoursAtObject(p, id) / objectHours) * 100)}%`
+                                      objectHours > 0 &&
+                                      dayApproved &&
+                                      ` · ${Math.round((hoursAtObject(p, id) / objectHours) * 100)}%`
                                     )}
                                     {c.disciplineCoef !== 1 || c.productivityCoef !== 1 ? ` · ${c.disciplineCoef}/${c.productivityCoef}` : ""}
                                   </span>
