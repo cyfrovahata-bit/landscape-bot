@@ -3253,9 +3253,19 @@ export function RoadTimesheet({
       return;
     }
     setEmployeeIds(mergedEmployeeIds);
-    setSelfTransportIds((prev) =>
-      addPersonArrival === "own" ? [...new Set([...prev, ...ids])] : prev.filter((x) => !ids.includes(x)),
-    );
+    // Транспорт визначається ОДИН раз на день: людина приїхала бусом або своїм
+    // ходом, і від того, що її додають на другий обʼєкт, це не міняється.
+    // Тому прапорець чіпаємо лише для тих, кого в поїздці ще не було —
+    // інакше «додати себе на Косино після Рікки» тихо переписувало б доплату
+    // за виїзд за весь день.
+    const newcomers = ids.filter((id) => !employeeIds.includes(id));
+    if (newcomers.length) {
+      setSelfTransportIds((prev) =>
+        addPersonArrival === "own"
+          ? [...new Set([...prev, ...newcomers])]
+          : prev.filter((x) => !newcomers.includes(x)),
+      );
+    }
     moveEmployeesTo(ids, { kind: "object", objectId: atObjectId });
     setPlans((prev) =>
       prev.map((p) => {
@@ -6295,6 +6305,11 @@ export function RoadTimesheet({
                         </>
                       );
                     })()}
+                    {/* Транспорт питаємо лише про тих, кого в поїздці ще не
+                        було. Для свого, якого додають на другий обʼєкт, це
+                        питання вже вирішене зранку. */}
+                    {addPersonSelected.some((id) => !employeeIds.includes(id)) && (
+                    <>
                     <div className="section-title">Як вона тут опинилась</div>
                     <div className="chip-row split">
                       <button
@@ -6315,7 +6330,15 @@ export function RoadTimesheet({
                         ? "Іде в поділ доплати за виїзд нарівні з рештою бригади."
                         : "Доплату за виїзд не отримує — зарплату за роботу отримує як усі."}
                     </div>
+                    </>
+                    )}
                     <div className="section-title">Кого додати</div>
+                    {reviewFixMode && (
+                      <div className="hint" style={{ padding: "0 16px 6px" }}>
+                        Тут і ті, хто вже в поїздці, але ще не на цьому обʼєкті — щоб внести переїзд бригади
+                        («відпрацювали на одному, поїхали на другий»).
+                      </div>
+                    )}
                     <input
                       className="search-box"
                       placeholder="Пошук людини…"
@@ -6324,12 +6347,27 @@ export function RoadTimesheet({
                     />
                     <div className="list">
                       {groupByBrigade(
-                        employees.filter(
-                          (e) =>
-                            !employeeIds.includes(e.id) &&
-                            !busyEmployees.has(e.id) &&
-                            e.name.toLowerCase().includes(addPersonSearch.toLowerCase()),
-                        ),
+                        employees.filter((e) => {
+                          if (busyEmployees.has(e.id)) return false;
+                          if (!e.name.toLowerCase().includes(addPersonSearch.toLowerCase())) return false;
+                          if (!employeeIds.includes(e.id)) return true;
+                          // Хто вже в поїздці, тут зайвий -- ЗАЗВИЧАЙ. У живому
+                          // дні його додають «🚐 Висадити людей»: бригада
+                          // переїхала, люди в бусі, список їх знає.
+                          //
+                          // А в дні, який дійшов до підсумку, буса немає, і
+                          // єдиний шлях внести себе на ДРУГИЙ обʼєкт зникав:
+                          // «Додати» не показувала тих, хто в поїздці, а
+                          // «Висадити» -- порожня. Тобто «відпрацювали на Ріці,
+                          // переїхали на Косино» внести було нічим.
+                          //
+                          // Пускаємо лише тих, кого на цьому обʼєкті ще немає:
+                          // ні сесій, ні присутності.
+                          if (!reviewFixMode) return false;
+                          const alreadyHere =
+                            plan.here.includes(e.id) || plan.sessions.some((x) => x.employeeId === e.id);
+                          return !alreadyHere;
+                        }),
                         employees,
                       ).map((g) => {
                         const expanded = expandedAddBrigadeId === g.id || !!addPersonSearch;
