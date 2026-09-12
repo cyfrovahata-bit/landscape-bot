@@ -564,6 +564,16 @@ export function RoadTimesheet({
   // Які групи людей на обʼєкті розгорнуті («окремі роботи» / «роботи бригади»).
   const [openPeopleGroups, setOpenPeopleGroups] = useState<Record<string, boolean>>({});
   const [atObjectReturnStep, setAtObjectReturnStep] = useState<Step>("DRIVE");
+  /**
+   * Правимо день, який уже дійшов до підсумку (зокрема повернений адміном).
+   *
+   * Сюди потрапляють через «👥 Змінити людей» / «🕒 Змінити години» на екрані
+   * підсумку — вони й ставлять `atObjectReturnStep = "REVIEW"`. Відрізняти це
+   * від живого дня обовʼязково: на обʼєкті вже нікого не «стоїть», людей
+   * забрали, сесії закриті, тож перевірки на кшталт «чи є хтось тут» тут
+   * означають зовсім не те, для чого їх писали.
+   */
+  const reviewFixMode = atObjectReturnStep === "REVIEW";
   const [atObjectDetailsExpanded, setAtObjectDetailsExpanded] = useState(false);
   const [volumesReturnStep, setVolumesReturnStep] = useState<Step>("AT_OBJECT");
   /**
@@ -5864,7 +5874,7 @@ export function RoadTimesheet({
                     {/* Перехід пішки -- звичайний хід дня, а не виправлення:
                         дві точки на одній території, частина бригади лишається
                         на другій. Тому окремою кнопкою, над меню правок. */}
-                    {plans.length > 1 && (
+                    {plans.length > 1 && !reviewFixMode && (
                       <div className="list">
                         <button
                           className="cell"
@@ -5915,7 +5925,20 @@ export function RoadTimesheet({
                                 setMoveMode("fix");
                                 setShowMovePicker(true);
                               }}
-                              disabled={!plan.here.length && !(carPresent && onboard.length)}
+                              /* `here`/`onboard` — це ЖИВИЙ день: хто стоїть тут
+                                 і хто в машині, що тут. У дні, який уже дійшов
+                                 до підсумку (а тим паче в поверненому на
+                                 виправлення), на обʼєкті не стоїть ніхто:
+                                 людей забрали, сесії закриті. Умова гасила
+                                 кнопку саме тоді, коли вона й потрібна —
+                                 виправити, кого куди висадили, стало нічим.
+                                 Тут рахуємо тих, чиї ГОДИНИ лежать на цьому
+                                 обʼєкті: саме їх і переносять. */
+                              disabled={
+                                reviewFixMode
+                                  ? !plan.sessions.length && !plan.here.length
+                                  : !plan.here.length && !(carPresent && onboard.length)
+                              }
                             >
                               <span className="cell-title">🔄 Не той обʼєкт — виправити</span>
                             </button>
@@ -6380,13 +6403,27 @@ export function RoadTimesheet({
                         точку, і поки її не було в списку, єдиним шляхом було
                         «прибули самі» -- а це знімає доплату за виїзд. */}
                     {(() => {
-                      const movable = [...plan.here, ...(carPresent ? onboard.filter((id) => !plan.here.includes(id)) : [])];
-                      const stateOf = (id: string) =>
-                        onboard.includes(id)
-                          ? "🚐 в бусі"
-                          : plan.sessions.some((x) => x.employeeId === id && !x.endedAt)
-                            ? "⏱ працює"
-                            : "⏸ не працює";
+                      // У режимі правки дня беремо ще й тих, чиї сесії стоять
+                      // на цьому обʼєкті: вони вже нікуди не «стоять», але саме
+                      // їхні години й треба перенести на інший обʼєкт.
+                      const withSessions = reviewFixMode ? [...new Set(plan.sessions.map((x) => x.employeeId))] : [];
+                      const movable = [
+                        ...new Set([
+                          ...plan.here,
+                          ...withSessions,
+                          ...(carPresent ? onboard.filter((id) => !plan.here.includes(id)) : []),
+                        ]),
+                      ];
+                      const stateOf = (id: string) => {
+                        if (plan.sessions.some((x) => x.employeeId === id && !x.endedAt)) return "⏱ працює";
+                        if (onboard.includes(id)) return "🚐 в бусі";
+                        // Закриті сесії — це вже не «стан», а години. Саме їх і
+                        // переносять, коли виправляють обʼєкт у зданому дні.
+                        const ms = plan.sessions
+                          .filter((x) => x.employeeId === id && x.endedAt)
+                          .reduce((a, x) => a + (new Date(x.endedAt as string).getTime() - new Date(x.startedAt).getTime()), 0);
+                        return ms > 0 ? `⏱ ${fmtHours(ms / 3_600_000)}` : "⏸ не працює";
+                      };
                       return (
                         <>
                           <div className="section-title row">
