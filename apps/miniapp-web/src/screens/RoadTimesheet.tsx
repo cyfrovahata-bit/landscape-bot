@@ -6579,7 +6579,7 @@ export function RoadTimesheet({
                             setManualHoursEmployeeId(null);
                           }}
                         >
-                          Зберегти
+                          💾 Зберегти
                         </button>
                       </div>
                     </>
@@ -6710,13 +6710,49 @@ export function RoadTimesheet({
                   </>
                 )}
 
-                {/* Дивимось не на той обʼєкт, де машина: виїжджати звідси
+                {/* Поки відкрита якась панель обʼєкта (пікери, години,
+                    роз'їзд), головна кнопка НЕ веде маршрут. Вона стоїть
+                    унизу екрана, виглядає головною і читалась як «готово»
+                    для того, що людина щойно набрала, -- а насправді йшла
+                    далі по маршруту й викидала набране.
+
+                    На клавіатурі годин вона тепер і є «Зберегти»: саме тут
+                    пастка й спрацювала. Бригадир набрав «4.5 год», натиснув
+                    велику синю «✅ Готово» замість дрібного чипа «Зберегти»
+                    під клавіатурою -- і години зникли без жодного слова
+                    (`setManualHours` викликався лише з чипа). У списку людей
+                    і в пікерах вона просто закриває панель: свою дію вони
+                    підтверджують власними кнопками, але піти з обʼєкта
+                    посеред вибору вона більше не може. */}
+                {showManualHours ? (
+                  manualHoursEmployeeId ? (
+                    <MainButton
+                      text="💾 Зберегти години"
+                      onClick={() => {
+                        setManualHours(atObjectId, manualHoursEmployeeId, Number(manualHoursBuffer) || 0);
+                        setManualHoursEmployeeId(null);
+                      }}
+                    />
+                  ) : (
+                    <MainButton text="✅ Готово" onClick={() => setShowManualHours(false)} />
+                  )
+                ) : showDropPicker || showMovePicker || showAddPersonPicker || errandMode ? (
+                  <MainButton
+                    text="‹ Назад до обʼєкта"
+                    onClick={() => {
+                      setShowDropPicker(false);
+                      setShowMovePicker(false);
+                      setShowAddPersonPicker(false);
+                      setErrandMode(null);
+                    }}
+                  />
+                ) : /* Дивимось не на той обʼєкт, де машина: виїжджати звідси
                     нема чим і нема звідки. Замість «Продовжити маршрут» --
                     дорога назад до машини, і вже звідти звичайний порядок:
                     продовжити маршрут → обрати, куди їхати → «Прибув».
                     Так попередження «нікого не висаджено» більше не може
-                    вилізти на обʼєкті, який просто відкрили подивитись. */}
-                {viewingElsewhere ? (
+                    вилізти на обʼєкті, який просто відкрили подивитись. */
+                viewingElsewhere ? (
                   <MainButton
                     text={carPlan ? `↩️ До «${carPlan.objectName}»` : "↩️ До маршруту"}
                     onClick={() => {
