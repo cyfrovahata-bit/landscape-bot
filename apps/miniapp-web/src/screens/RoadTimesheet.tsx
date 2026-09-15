@@ -15,6 +15,10 @@ import { MainButton } from "../components/MainButton";
 import { NumericKeypad } from "../components/NumericKeypad";
 import { PhotoButton } from "../components/PhotoButton";
 import { fmtHours, MIN_PAID_HOURS } from "../lib/hours";
+// Години дня -- чиста частина, винесена, щоб її можна було покрити тестами.
+// Це найдорожча логіка застосунку: години вирішують і хто потрапляє в поділ
+// 70%, і скільки він отримає. Див. lib/dayHours.ts + test/dayHours.test.ts.
+import { hoursAtObject, crewWindowAt, stopFinishedWorks, withManualHours } from "../lib/dayHours";
 
 // Hub-based flow: after opening the road timesheet, the foreman lands on a HUB
 // screen with editable cards -- Авто, Люди, Обʼєкти, Роботи. Each card opens
@@ -2797,29 +2801,6 @@ export function RoadTimesheet({
   // `nowhere` when a self-transport employee leaves the object on their own.
   // `pauseForBus` is used by the return route: putting someone in the bus
   // means the vehicle has really reached that object, so road time pauses.
-  /**
-   * Гасить роботи, над якими вже нікому працювати.
-   *
-   * Закріплена робота йде, поки хоч один з її людей у зміні; бригадна -- поки
-   * в зміні хоч хтось. Раніше зупинка була одна на весь обʼєкт («не лишилось
-   * нікого»), тож знята з обʼєкта людина йшла, а її персональна робота далі
-   * накручувала годинник, і бейдж бадьоро показував «йде».
-   */
-  function stopFinishedWorks(works: PlannedWork[], sessions: EmployeeSession[], atMs: number): PlannedWork[] {
-    const openIds = new Set(sessions.filter((s) => !s.endedAt).map((s) => s.employeeId));
-    return works.map((w) => {
-      if (!w.workStartedAt) return w;
-      const assigned = w.employeeIds ?? [];
-      const stillWorked = assigned.length ? assigned.some((id) => openIds.has(id)) : openIds.size > 0;
-      if (stillWorked) return w;
-      return {
-        ...w,
-        workStartedAt: null,
-        workAccumulatedMs: (w.workAccumulatedMs ?? 0) + (atMs - new Date(w.workStartedAt).getTime()),
-      };
-    });
-  }
-
   async function departObject(
     objectId: string,
     employeeIdsToMove: string[],
@@ -3034,16 +3015,6 @@ export function RoadTimesheet({
     haptic("light");
   }
 
-  // Total worked hours a person has recorded at an object (sum of every
-  // session, counting an open one up to now) -- what the payroll splits pay
-  // by. Shown next to each person on the manual-hours screen.
-  function hoursAtObject(plan: ObjPlan, employeeId: string) {
-    const now = Date.now();
-    const ms = plan.sessions
-      .filter((s) => s.employeeId === employeeId)
-      .reduce((a, s) => a + Math.max(0, (s.endedAt ? new Date(s.endedAt).getTime() : now) - new Date(s.startedAt).getTime()), 0);
-    return Math.round((ms / 3_600_000) * 10000) / 10000;
-  }
 
   // Manual override: replace a person's sessions at an object with ONE closed
   // session of exactly `hours` long. The safety net for "forgot to press
@@ -3051,15 +3022,9 @@ export function RoadTimesheet({
   // longer physically here, since payroll only cares about the recorded time,
   // not the current location. hours=0 removes their time here entirely.
   function setManualHours(objectId: string, employeeId: string, hours: number) {
-    const end = new Date();
-    const start = new Date(end.getTime() - Math.max(0, hours) * 3_600_000);
+    const endMs = Date.now();
     setPlans((prev) =>
-      prev.map((p) => {
-        if (p.objectId !== objectId) return p;
-        const others = p.sessions.filter((s) => s.employeeId !== employeeId);
-        const manual = hours > 0 ? [{ employeeId, startedAt: start.toISOString(), endedAt: end.toISOString() }] : [];
-        return { ...p, sessions: [...others, ...manual] };
-      }),
+      prev.map((p) => (p.objectId !== objectId ? p : { ...p, sessions: withManualHours(p.sessions, employeeId, hours, endMs) })),
     );
     haptic("success");
     logChange(`Години вручну: ${employeeName(employeeId)} — ${hours} год на ${planFor(objectId).objectName}`);
@@ -3179,33 +3144,6 @@ export function RoadTimesheet({
     setMoveSelected([]);
     setMoveTargetId(null);
     setShowMovePicker(false);
-  }
-
-  /**
-   * Вікно, яке отримує людина, додана в бригаду на обʼєкті вже після старту.
-   *
-   * Правило: беремо тих, хто працює ЗАРАЗ, і найраніший з їхніх стартів. Якщо
-   * бригадир запускав людей поодинці о 08:00, 08:10 і 08:20 -- новачок
-   * отримає 08:00.
-   *
-   * Чому саме відкриті сесії: раніше бралися всі поспіль, включно з давно
-   * закритими. Людина, яка відпрацювала з 06:00 до 07:00 і поїхала, тягнула
-   * початок новачка на 06:00 -- тобто на годину, коли на обʼєкті ще нікого не
-   * було. Коли ж не працює вже ніхто, день тут скінчився, і новачок отримує
-   * повний проміжок бригади: від найранішого старту до найпізнішого кінця.
-   */
-  function crewWindowAt(plan: ObjPlan, excludeIds: string[]): { startedAt: string; endedAt?: string } | null {
-    const exclude = new Set(excludeIds);
-    const crew = plan.sessions.filter((s) => !exclude.has(s.employeeId));
-    if (!crew.length) return null;
-    const open = crew.filter((s) => !s.endedAt);
-    if (open.length) {
-      return { startedAt: new Date(Math.min(...open.map((s) => new Date(s.startedAt).getTime()))).toISOString() };
-    }
-    return {
-      startedAt: new Date(Math.min(...crew.map((s) => new Date(s.startedAt).getTime()))).toISOString(),
-      endedAt: new Date(Math.max(...crew.map((s) => new Date(s.endedAt as string).getTime()))).toISOString(),
-    };
   }
 
   /**

@@ -10,7 +10,8 @@
     "start": "npm run start --workspace=apps/miniapp-server",
     "build:miniapp": "npm run build --workspace=apps/miniapp-web",
     "start:miniapp": "npm run start --workspace=apps/miniapp-server",
-    "test": "node --import tsx --test packages/core/test/*.test.ts"
+    "test": "node --import tsx --test packages/core/test/*.test.ts apps/miniapp-server/test/*.test.ts apps/miniapp-web/test/*.test.ts",
+    "check": "cd packages/core && npx tsc --noEmit && cd ../../apps/miniapp-server && npx tsc --noEmit && cd ../miniapp-web && npx tsc -b && cd ../.. && npm test"
   },
   "devDependencies": {
     "tsx": "^4.21.0"

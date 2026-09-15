@@ -26,6 +26,19 @@ import {
 } from "@landscape/core";
 import { and, eq, inArray, desc, lt, gte } from "drizzle-orm";
 import { normRole } from "../authMiddleware.js";
+// Чиста арифметика дня -- винесена в окремий модуль, бо цей файл при імпорті
+// тягне db і Google-конфіг, тож протестувати її тут було нічим.
+// Див. src/lib/dayMath.ts і test/dayMath.test.ts.
+import {
+  mergeObjects,
+  sumErrandKm,
+  normalizeName,
+  type WorkSession,
+  type WorkInput,
+  type CoefInput,
+  type ObjectInput,
+  type Errand,
+} from "../lib/dayMath.js";
 
 /** 403s and returns true if the caller isn't an admin -- lets a route bail with `if (blockNonAdmin(req, res)) return;`. */
 function blockNonAdmin(req: import("express").Request, res: Response): boolean {
@@ -89,25 +102,6 @@ roadTimesheetRouter.post("/photo", upload.single("photo"), async (req, res) => {
   }
 });
 
-// A work session: an employee was dropped at an object and (usually) later picked back up.
-type WorkSession = { employeeId: string; employeeName: string; droppedAt: string; pickedUpAt?: string };
-// employeeIds: who was specifically assigned to this work (so it's visible who did what,
-// not just that the object had some work done) -- stored in the event payload for record.
-type WorkInput = { workId: string; workName: string; volume?: string | number; employeeIds?: string[] };
-// disciplineCoef/productivityCoef default to 1.0, same as the bot -- the foreman can
-// adjust them per employee per object. They are recorded per person and reported in
-// the salary pack, but they do NOT move any money: the worker share is split equally
-// between everyone who was at the object (see buildSalaryPacksWithRoles).
-type CoefInput = { employeeId: string; disciplineCoef?: number; productivityCoef?: number };
-type ObjectInput = {
-  objectId: string;
-  objectName: string;
-  works: WorkInput[];
-  sessions: WorkSession[];
-  coefs?: CoefInput[];
-  notes?: string;
-  photoUrls?: string[];
-};
 
 /**
  * Computes trip class + payroll split for a road timesheet day, without
@@ -116,20 +110,6 @@ type ObjectInput = {
  * mockup's step 3.13) and the real POST / save (which additionally persists
  * everything). Never mutates the database.
  */
-// A "car left on errands while the crew worked" side trip: one of the
-// people at the object drives off and comes back, and that mileage
-// (odoBack - odoOut) is excluded from the trip-class / allowance km.
-type Errand = { driverId?: string; odoOut?: number; odoBack?: number | null };
-
-function sumErrandKm(errands?: Errand[]): number {
-  if (!Array.isArray(errands)) return 0;
-  return errands.reduce((acc, e) => {
-    const out = Number(e?.odoOut);
-    const back = Number(e?.odoBack);
-    if (!Number.isFinite(out) || !Number.isFinite(back)) return acc; // open (no return yet) or malformed -> ignore
-    return acc + Math.max(0, back - out);
-  }, 0);
-}
 
 /**
  * Links the Telegram user who runs a day to their row in the ПРАЦІВНИКИ
@@ -142,13 +122,6 @@ function sumErrandKm(errands?: Errand[]): number {
  * payout target, and the 20% goes to the company rather than to somebody
  * arbitrary.
  */
-function normalizeName(v: string): string {
-  return String(v ?? "")
-    .toLowerCase()
-    .replace(/[\u2019\u02BC'`]/g, "ʼ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 async function resolveForemanEmployeeId(
   foremanTgId: number,
@@ -526,59 +499,6 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
   return [...byTripSeq.values()].sort((a, b) => a.tripSeq - b.tripSeq);
 }
 
-/** Merges every leg's own object list into one day-total view: the same
- * object appearing in more than one leg gets its works' volumes summed and
- * its work sessions concatenated, so hours/volumes reported across two
- * separate trips to the same place add up instead of one trip's numbers
- * clobbering the other's -- reports/timesheet/day-status are keyed by
- * date+object(+work/employee) with no notion of "trip" at all, so whatever
- * this merge produces is exactly what ends up written there. */
-function mergeObjects(objectsByLeg: ObjectInput[][]): ObjectInput[] {
-  const byObjectId = new Map<string, ObjectInput>();
-  for (const objects of objectsByLeg) {
-    for (const obj of objects) {
-      const existing = byObjectId.get(obj.objectId);
-      if (!existing) {
-        byObjectId.set(obj.objectId, {
-          objectId: obj.objectId,
-          objectName: obj.objectName,
-          works: (obj.works ?? []).map((w) => ({ ...w })),
-          sessions: [...(obj.sessions ?? [])],
-          coefs: [...(obj.coefs ?? [])],
-          notes: obj.notes,
-          photoUrls: obj.photoUrls ? [...obj.photoUrls] : [],
-        });
-        continue;
-      }
-      for (const w of obj.works ?? []) {
-        const existingWork = existing.works.find((ew) => ew.workId === w.workId);
-        if (!existingWork) {
-          existing.works.push({ ...w });
-          continue;
-        }
-        const a = Number(existingWork.volume);
-        const b = Number(w.volume);
-        if (Number.isFinite(a) && Number.isFinite(b)) existingWork.volume = a + b;
-        else if (Number.isFinite(b)) existingWork.volume = b;
-        // Same work item logged in more than one leg -- merge who's tagged
-        // on it too, not just the first leg's list, so buildAccountingRows
-        // (which tags an employee's pay to a work by employeeIds) doesn't
-        // fall back to the untagged full-pool split for someone who only
-        // did this work in a later leg.
-        if (w.employeeIds?.length) {
-          existingWork.employeeIds = [...new Set([...(existingWork.employeeIds ?? []), ...w.employeeIds])];
-        }
-      }
-      existing.sessions = [...existing.sessions, ...(obj.sessions ?? [])];
-      if (obj.coefs?.length) {
-        const coefByEmployee = new Map((existing.coefs ?? []).map((c) => [c.employeeId, c]));
-        for (const c of obj.coefs) coefByEmployee.set(c.employeeId, c);
-        existing.coefs = [...coefByEmployee.values()];
-      }
-    }
-  }
-  return [...byObjectId.values()];
-}
 
 /**
  * POST /api/road-timesheet — final save for the day, submitted once the
