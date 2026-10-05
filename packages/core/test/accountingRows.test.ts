@@ -8,7 +8,7 @@
 //   npm test
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAccountingRows, formatRoadKm, splitMoneyByShares, ACCOUNTING_HEADERS } from "../src/accountingRows.js";
+import { buildAccountingRows, formatRoadKm, splitMoneyByShares, ACCOUNTING_HEADERS, accountingCellValues } from "../src/accountingRows.js";
 
 const base = {
   date: "2026-09-14",
@@ -33,16 +33,16 @@ const base = {
 const rowsOf = (over: Partial<Parameters<typeof buildAccountingRows>[0]> = {}) =>
   buildAccountingRows({ ...base, ...over });
 
-test("порядок колонок незмінний і рівно 8 — нову можна додавати ЛИШЕ В КІНЕЦЬ", () => {
+test("порядок дев’яти колонок: обсяг, одиниця, нарахування", () => {
   // Вставлена посередині зсуває кожен наступний стовпець, а старі рядки в
   // аркуші лишаються зі старим порядком.
   assert.deepEqual(
     [...ACCOUNTING_HEADERS],
-    ["№", "Дата", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Нарахування", "Примітки"],
+    ["№", "Дата", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Одиниця виміру", "Нарахування", "Примітки"],
   );
 });
 
-test("грошовий рядок: людина × робота, з одиницею виміру в обсязі", () => {
+test("грошовий рядок: людина × робота, з числовим обсягом і окремою одиницею", () => {
   const rows = rowsOf();
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0], {
@@ -50,7 +50,8 @@ test("грошовий рядок: людина × робота, з одиниц
     employeeName: "Іванов І.",
     objectName: "Рікка",
     workName: "Стрижка газону",
-    volume: "10 м²",
+    volume: 10,
+    unit: "м²",
     amount: 700,
     foremanName: "Дуб Василь Михайлович",
   });
@@ -117,7 +118,7 @@ test("години: окремий РЯДОК на людину за день, �
   assert.equal(hours.length, 1, "один рядок на ДЕНЬ, а не на обʼєкт");
   assert.equal(hours[0].employeeName, "Іванов І.");
   assert.equal(hours[0].objectName, "—");
-  assert.equal(hours[0].volume, "7.96", "число без «год», інакше колонка не сумується");
+  assert.equal(hours[0].volume, 7.96, "число без «год», інакше колонка не сумується");
   assert.equal(hours[0].amount, 0);
   assert.ok(!Number.isNaN(Number(hours[0].volume)), "обсяг мусить бути числом");
 });
@@ -131,7 +132,7 @@ test("години: той, хто не дотягнув до MIN_PAID_HOURS, у
   });
   const hours = rows.filter((r) => r.workName === "Відпрацьовано годин");
   assert.deepEqual(hours.map((r) => r.employeeName).sort(), ["Іванов І.", "Петров П."]);
-  assert.equal(hours.find((r) => r.employeeName === "Петров П.")?.volume, "0.05");
+  assert.equal(hours.find((r) => r.employeeName === "Петров П.")?.volume, 0.05);
 });
 
 test("доплата за виїзд: рядок пишеться навіть при НУЛЬОВІЙ сумі, якщо є км/клас", () => {
@@ -141,7 +142,9 @@ test("доплата за виїзд: рядок пишеться навіть �
   const allowance = rows.filter((r) => r.workName === "Доплата за виїзд");
   assert.equal(allowance.length, 1);
   assert.equal(allowance[0].amount, 0);
-  assert.equal(allowance[0].volume, "190 км · клас L");
+  assert.equal(allowance[0].volume, 190);
+  assert.equal(allowance[0].unit, "км");
+  assert.equal(allowance[0].foremanName, base.foremanName + " · 190 км · клас L");
 });
 
 test("доплата за виїзд: без км і без класу рядка немає", () => {
@@ -182,4 +185,41 @@ test("splitMoneyByShares: сума часток завжди дорівнює ц
       assert.equal(sum, Math.round(total * 100) / 100, `${total} / ${shares}`);
     }
   }
+});
+
+test("десяткові обсяги з комою або крапкою лишаються числами", () => {
+  for (const volume of [7.96, "7.96", "7,96"]) {
+    const rows = rowsOf({ objects: [{ objectId: "o1", objectName: "Рікка", works: [{ workId: "w1", workName: "Стрижка газону", volume }] }] });
+    assert.equal(rows[0].volume, 7.96);
+    assert.equal(rows[0].unit, "м²");
+    assert.equal(rows[0].amount, 700);
+  }
+});
+
+test("години мають окрему одиницю, включно з малими дробами", () => {
+  const rows = rowsOf({ hoursByObject: new Map([["o1", new Map([["e1", 0.05]])]]) });
+  const row = rows.find(r => r.workName === "Відпрацьовано годин")!;
+  assert.equal(row.volume, 0.05);
+  assert.equal(row.unit, "год");
+});
+
+test("виїзд: оплачувані км окремо, клас і роз’їзди збережено в примітках", () => {
+  const row = rowsOf({ roadKm: 190, roadBillableKm: 165, roadTripClass: "L" }).find(r => r.workName === "Доплата за виїзд")!;
+  assert.equal(row.volume, 165);
+  assert.equal(row.unit, "км");
+  assert.equal(row.foremanName, base.foremanName + " · 165 км · клас L (проїхали 190, роз'їзди −25)");
+});
+
+test("виїзд тільки з класом: обсяг порожній, клас збережено", () => {
+  const row = rowsOf({ roadTripClass: "S" }).find(r => r.workName === "Доплата за виїзд")!;
+  assert.equal(row.volume, "");
+  assert.equal(row.unit, "");
+  assert.equal(row.foremanName, base.foremanName + " · клас S");
+});
+
+test("A:I: числова дата, обсяг у F, одиниця у G, гроші у H", () => {
+  const row = rowsOf({ objects: [{ objectId: "o1", objectName: "Рікка", works: [{ workId: "w1", workName: "Стрижка газону", volume: "7,96" }] }] })[0];
+  const values = accountingCellValues(row, 42);
+  assert.deepEqual(values, [42, 46279, "Іванов І.", "Рікка", "Стрижка газону", 7.96, "м²", 700, base.foremanName]);
+  assert.throws(() => accountingCellValues({ ...row, date: "2026-02-30" }, 1), /Некоректна дата/);
 });
