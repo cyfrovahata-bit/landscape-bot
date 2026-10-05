@@ -105,6 +105,7 @@ async function appendAccountingReportRows(rows: AccountingRow[]) {
   await appendAccountingValues(
     ACCOUNTING_SHEET,
     rows.map((row) => accountingCellValues(row, nextNo++)),
+    sh.all.length,
   );
 }
 

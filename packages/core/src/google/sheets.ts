@@ -332,7 +332,7 @@ export async function updateCells(
 
 /** Accounting numbers are native numeric values, never USER_ENTERED strings.
  * Ukrainian locale renders decimal commas; RAW prevents hours becoming dates. */
-export async function appendAccountingValues(sheetName: string, rows: any[][]) {
+export async function appendAccountingValues(sheetName: string, rows: any[][], startRowIndex: number) {
   if (!rows.length) return;
   const sheets = getSheetsClient();
   const meta = await withSheetsRetry("accounting metadata", () =>
@@ -349,13 +349,16 @@ export async function appendAccountingValues(sheetName: string, rows: any[][]) {
       spreadsheetId: config.sheetId,
       requestBody: { requests: [
         { column: 1, type: "DATE", pattern: "dd.mm.yyyy" },
-        { column: 5, type: "NUMBER", pattern: "0.##" },
         { column: 7, type: "NUMBER", pattern: "#,##0.00" },
       ].map(({ column, type, pattern }) => ({ repeatCell: {
         range: { sheetId, startRowIndex: 1, startColumnIndex: column, endColumnIndex: column + 1 },
         cell: { userEnteredFormat: { numberFormat: { type, pattern } } },
         fields: "userEnteredFormat.numberFormat",
-      } })) },
+      } })).concat(rows.map((row, i) => ({ repeatCell: {
+        range: { sheetId, startRowIndex: startRowIndex + i, endRowIndex: startRowIndex + i + 1, startColumnIndex: 5, endColumnIndex: 6 },
+        cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: Number.isInteger(row[5]) ? "0" : "0.##########" } } },
+        fields: "userEnteredFormat.numberFormat",
+      } }))) },
     }),
   );
   await withSheetsRetry(`${sheetName} accounting append`, () =>
