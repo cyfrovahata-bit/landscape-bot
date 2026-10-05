@@ -1,4 +1,4 @@
-import { ensureSheet, loadSheet, appendRows, sheetExists } from "./google/sheets.js";
+import { ensureSheet, loadSheet, appendAccountingValues, sheetExists } from "./google/sheets.js";
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "./db.js";
 
@@ -27,11 +27,11 @@ export {
   type AccountingSalaryPack,
   type AccountingRow,
 } from "./accountingRows.js";
-import { ACCOUNTING_HEADERS, type AccountingRow } from "./accountingRows.js";
+import { ACCOUNTING_HEADERS, accountingCellValues, type AccountingRow } from "./accountingRows.js";
 
 async function loadAccountingSheet() {
   await ensureSheet(ACCOUNTING_SHEET, ACCOUNTING_HEADERS);
-  return loadSheet(ACCOUNTING_SHEET, "A:H");
+  return loadSheet(ACCOUNTING_SHEET, "A:I");
 }
 
 async function hasAccountingRowsForKey(key: string) {
@@ -94,13 +94,17 @@ export async function importAccountingKeysFromSheet(): Promise<{ imported: numbe
 async function appendAccountingReportRows(rows: AccountingRow[]) {
   if (!rows.length) return;
   const sh = await loadAccountingSheet();
+  const actualHeaders = (sh.all[0] ?? []).map((v) => String(v ?? "").trim());
+  if (ACCOUNTING_HEADERS.some((header, i) => actualHeaders[i] !== header)) {
+    throw new Error('БУХЗВІТ: потрібні колонки №, Дата, Працівник, Об\'єкт, Роботи, Обсяг робіт, Одиниця виміру, Нарахування, Примітки. Додайте G «Одиниця виміру» перед експортом.');
+  }
   const hasHeader = String(sh.all?.[0]?.[0] ?? "").trim() === ACCOUNTING_HEADERS[0];
   const existingDataRows = hasHeader ? Math.max(0, sh.all.length - 1) : sh.all.length;
   let nextNo = existingDataRows + 1;
 
-  await appendRows(
+  await appendAccountingValues(
     ACCOUNTING_SHEET,
-    rows.map((row) => [nextNo++, row.date, row.employeeName, row.objectName, row.workName, row.volume, row.amount, row.foremanName]),
+    rows.map((row) => accountingCellValues(row, nextNo++)),
   );
 }
 

@@ -10,12 +10,8 @@
  * Покрито: `packages/core/test/accountingRows.test.ts`.
  */
 
-// Порядок КОЛОНОК тут позиційний, а не по заголовках: appendAccountingReportRows
-// складає масив значень і кладе його в A:Z. Тому нову колонку можна додавати
-// ЛИШЕ В КІНЕЦЬ -- вставлена посередині зсунула б кожен наступний стовпець,
-// а старі рядки в аркуші лишились би зі старим порядком. Саме тому години
-// приходять окремим РЯДКОМ, а не дев'ятою колонкою.
-export const ACCOUNTING_HEADERS = ["№", "Дата", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Нарахування", "Примітки"] as const;
+// Дев’ять позиційних колонок. Перед експортом accounting.ts перевіряє шапку.
+export const ACCOUNTING_HEADERS = ["№", "Дата", "Працівник", "Об'єкт", "Роботи", "Обсяг робіт", "Одиниця виміру", "Нарахування", "Примітки"] as const;
 
 export function money(n: number) {
   return Math.round(Number(n || 0) * 100) / 100;
@@ -87,7 +83,8 @@ export type AccountingRow = {
   employeeName: string;
   objectName: string;
   workName: string;
-  volume: string;
+  volume: number | "";
+  unit: string;
   amount: number;
   foremanName: string;
 };
@@ -131,14 +128,16 @@ export function buildAccountingRows(params: {
   const out: AccountingRow[] = [];
 
   const workValue = (w: AccountingWork) => {
-    const vol = Number(w.volume);
+    const vol = Number(String(w.volume ?? "").replace(/\s/g, "").replace(",", "."));
     const tariff = tariffByWorkId.get(w.workId) ?? 0;
     return (Number.isFinite(vol) ? vol : 0) * tariff;
   };
-  const formatVolume = (w: AccountingWork) => {
-    const vol = Number(w.volume);
-    const unit = unitByWorkId.get(w.workId) ?? "";
-    return [Number.isFinite(vol) ? vol : w.volume, unit].filter((x) => x !== undefined && x !== "").join(" ");
+  const numericVolume = (w: AccountingWork) => {
+    const text = String(w.volume ?? "").trim().replace(/\s/g, "").replace(",", ".");
+    if (!text) return "" as const;
+    const vol = Number(text);
+    if (!Number.isFinite(vol)) throw new Error(`Некоректний обсяг роботи ${w.workName}: ${w.volume}`);
+    return vol;
   };
 
   for (const pack of salaryPacks) {
@@ -164,7 +163,8 @@ export function buildAccountingRows(params: {
           employeeName: row.employeeName,
           objectName: pack.objectName,
           workName: w.workName,
-          volume: formatVolume(w),
+          volume: numericVolume(w),
+          unit: unitByWorkId.get(w.workId) ?? "",
           amount,
           foremanName,
         });
@@ -172,7 +172,8 @@ export function buildAccountingRows(params: {
     }
   }
 
-  // Кілометри й клас у колонці «Обсяг робіт»: для рядка доплати обсяг — це і є
+  // Кілометри й клас для примітки: числовий обсяг зберігається окремо.
+  // Раніше для рядка доплати обсяг — це і є
   // пробіг, і без нього сума ні з чого не виводиться.
   //
   // Коли були роз'їзди, показуємо ОБИДВА числа: платять за меншу цифру, а
@@ -214,7 +215,8 @@ export function buildAccountingRows(params: {
         // Число, а не «7.96 год»: відфільтрувавши колонку «Роботи» по цій
         // назві, бухгалтер має змогу просто просумувати обсяг. Текст із
         // одиницею читався б краще і не сумувався б зовсім.
-        volume: String(Math.round(hours * 100) / 100),
+        volume: Math.round(hours * 100) / 100,
+        unit: "год",
         amount: 0,
         foremanName,
       });
@@ -228,12 +230,27 @@ export function buildAccountingRows(params: {
         employeeName: employeeNameById.get(empId) ?? empId,
         objectName: "—",
         workName: "Доплата за виїзд",
-        volume,
+        volume: Number.isFinite(roadKm as number) && Number(roadKm) > 0
+          ? Math.round(Number.isFinite(roadBillableKm as number) ? Number(roadBillableKm) : Number(roadKm))
+          : "",
+        unit: Number.isFinite(roadKm as number) && Number(roadKm) > 0 ? "км" : "",
         amount: money(roadAllowancePerPerson),
-        foremanName,
+        foremanName: volume ? `${foremanName} · ${volume}` : foremanName,
       });
     }
   }
 
   return out;
+}
+
+/** RAW cell values in A:I order; dates use Sheets serials, not parsed strings. */
+export function accountingCellValues(row: AccountingRow, no: number): (string | number)[] {
+  const date = row.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Некоректна дата: ${date}`);
+  const timestamp = Date.parse(`${date}T00:00:00Z`);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== date) {
+    throw new Error(`Некоректна дата: ${date}`);
+  }
+  return [no, timestamp / 86400000 + 25569, row.employeeName, row.objectName,
+    row.workName, row.volume, row.unit, row.amount, row.foremanName];
 }

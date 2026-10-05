@@ -329,3 +329,41 @@ export async function updateCells(
     }),
   );
 }
+
+/** Accounting numbers are native numeric values, never USER_ENTERED strings.
+ * Ukrainian locale renders decimal commas; RAW prevents hours becoming dates. */
+export async function appendAccountingValues(sheetName: string, rows: any[][]) {
+  if (!rows.length) return;
+  const sheets = getSheetsClient();
+  const meta = await withSheetsRetry("accounting metadata", () =>
+    sheets.spreadsheets.get({ spreadsheetId: config.sheetId, fields: "properties.locale,sheets.properties(sheetId,title)" }),
+  );
+  if (meta.data.properties?.locale !== "uk_UA") {
+    throw new Error("Для десяткової коми встановіть локаль таблиці «Україна».");
+  }
+  const sheetId = meta.data.sheets?.find((s) => s.properties?.title === sheetName)?.properties?.sheetId;
+  if (sheetId == null) throw new Error(`Не знайдено ${sheetName}`);
+  // Format before appending: a failed format request cannot leave exported rows behind.
+  await withSheetsRetry("accounting numeric formats", () =>
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId: config.sheetId,
+      requestBody: { requests: [
+        { column: 1, type: "DATE", pattern: "dd.mm.yyyy" },
+        { column: 5, type: "NUMBER", pattern: "0.##" },
+        { column: 7, type: "NUMBER", pattern: "#,##0.00" },
+      ].map(({ column, type, pattern }) => ({ repeatCell: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: column, endColumnIndex: column + 1 },
+        cell: { userEnteredFormat: { numberFormat: { type, pattern } } },
+        fields: "userEnteredFormat.numberFormat",
+      } })) },
+    }),
+  );
+  await withSheetsRetry(`${sheetName} accounting append`, () =>
+    sheets.spreadsheets.values.append({
+      spreadsheetId: config.sheetId,
+      range: `${sheetRef(sheetName)}!A:I`,
+      valueInputOption: "RAW",
+      requestBody: { values: rows },
+    }),
+  );
+}
