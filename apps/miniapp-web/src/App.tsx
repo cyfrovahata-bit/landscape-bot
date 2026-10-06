@@ -1,3 +1,4 @@
+import { BACKDATED_ENTRY_ENABLED } from "./lib/features";
 import { useEffect, useState } from "react";
 import { initTelegramApp, getInitDataUser } from "./lib/telegram";
 import { api, type Me } from "./lib/api";
@@ -86,12 +87,12 @@ export default function App() {
         <RoadTimesheet
           onBack={goMenu}
           onSaved={showSavedToast}
-          onOpenRetro={() => setScreen("roadTimesheetRetro")}
+          onOpenRetro={() => { if (BACKDATED_ENTRY_ENABLED) setScreen("roadTimesheetRetro"); }}
           isAdmin={me?.role === "ADMIN"}
           myPib={me?.pib ?? ""}
         />
       )}
-      {screen === "roadTimesheetRetro" && <RetroEntry onBack={() => setScreen("roadTimesheet")} onSaved={showSavedToast} />}
+      {BACKDATED_ENTRY_ENABLED && screen === "roadTimesheetRetro" && <RetroEntry onBack={() => setScreen("roadTimesheet")} onSaved={showSavedToast} />}
       {screen === "stats" && <Stats onBack={goMenu} isAdmin={me?.role === "ADMIN"} />}
       {screen === "adminOverview" && <AdminOverview onBack={goMenu} />}
       {screen === "actionLog" && <ActionLog onBack={goMenu} />}

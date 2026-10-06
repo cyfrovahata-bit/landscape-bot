@@ -1,3 +1,4 @@
+import { BACKDATED_ENTRY_ENABLED } from "../lib/features";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
@@ -3884,7 +3885,7 @@ export function RoadTimesheet({
           </button>
         </div>
 
-        <div className="list">
+        {BACKDATED_ENTRY_ENABLED && <div className="list">
           <button className="cell" onClick={onOpenRetro}>
             <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <span className="setup-icon accent-teal">🗓</span>
@@ -3892,7 +3893,7 @@ export function RoadTimesheet({
             </span>
             <span className="cell-sub">без таймерів ›</span>
           </button>
-        </div>
+        </div>}
 
         <MainButton text="🏠 До меню" onClick={onBack} />
       </div>
@@ -4144,7 +4145,7 @@ export function RoadTimesheet({
               already been worked can't be re-lived with timers, so it gets a
               flat form where hours are typed in instead of measured. Not while
               planning -- a plan has no day to enter after the fact. */}
-          {!planEditing && (
+          {BACKDATED_ENTRY_ENABLED && !planEditing && (
             <div className="list">
               <button className="cell" onClick={onOpenRetro}>
                 <span style={{ display: "flex", alignItems: "center", gap: 12 }}>

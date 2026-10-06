@@ -1,3 +1,6 @@
+// Тимчасовий перемикач: збережені звіти можна виправляти, нові минулі дні — ні.
+const BACKDATED_ENTRY_ENABLED = false;
+
 import { asyncRouter } from "../asyncRouter.js";
 import { type Response } from "express";
 import multer from "multer";
@@ -870,6 +873,10 @@ roadTimesheetRouter.post("/", async (req, res) => {
       effectiveTripSeq =
         tripSeq ?? existingForKey?.tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
       const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
+
+      if (!BACKDATED_ENTRY_ENABLED && date < todayKyivISO() && !legPrevious) {
+        throw new ReservationConflictError("Внесення нових звітів заднім числом тимчасово вимкнено");
+      }
 
       // An already-approved (and possibly already exported to БУХЗВІТ) leg
       // must not be silently overwritten by a resubmit -- the UI's "day is
