@@ -57,7 +57,10 @@ function messageForStatus(status: number): string {
   if (status === 502 || status === 503 || status === 504) {
     return "Сервер перезапускається. Зачекайте кілька секунд і спробуйте ще раз — дані не втрачено.";
   }
-  if (status === 401 || status === 403) return "Немає доступу. Закрийте застосунок повністю і відкрийте знову.";
+  if (status === 401) {
+    return "Не вдалося підтвердити вхід через Telegram. Закрийте всі вкладки MINI-APP кнопкою × біля їхньої назви, потім відкрийте додаток заново через кнопку в чаті з ботом. Стрілка лише згортає вкладку. Якщо помилка повториться, повідомте адміністратора.";
+  }
+  if (status === 403) return "Немає доступу. Закрийте застосунок повністю і відкрийте знову.";
   if (status === 413) return "Файл завеликий.";
   return `Помилка сервера (${status}). Спробуйте ще раз.`;
 }
@@ -88,7 +91,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || messageForStatus(res.status));
+          // Auth middleware returns technical English text; show actionable
+          // instructions even when that response contains an error message.
+          throw new Error(res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status));
         }
 
         const data = (await res.json()) as T;
@@ -125,7 +130,7 @@ async function upload<T>(path: string, file: File | Blob, fieldName: string): Pr
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || messageForStatus(res.status));
+      throw new Error(res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status));
     }
 
     const data = await res.json();
