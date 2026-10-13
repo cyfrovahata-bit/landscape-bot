@@ -8,3 +8,8 @@ export function initialCarRiders(employeeIds: readonly string[], selfTransportId
   const own = new Set(selfTransportIds);
   return employeeIds.filter(id => !own.has(id));
 }
+
+/** Explicit destinations include visited/no-work objects and never fall back. */
+export function selectedDestination<T extends { objectId: string }>(plans: readonly T[], objectId: string): T | null {
+  return plans.find(plan => plan.objectId === objectId) ?? null;
+}

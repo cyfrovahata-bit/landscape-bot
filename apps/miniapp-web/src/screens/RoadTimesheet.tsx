@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
-import { carMovementError, initialCarRiders } from "../lib/driving";
+import { carMovementError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
 import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft } from "../lib/draftMirror";
@@ -2670,18 +2670,9 @@ export function RoadTimesheet({
   // drive screen.
   const headingTo = plans.find((p) => p.objectId === headingToObjectId) ?? null;
 
-  /**
-   * Пункт призначення для екрана ВИЇЗДУ — дійсний, лише поки на обʼєкті ще є
-   * що робити.
-   *
-   * `headingTo` сам по собі цього не перевіряє, хоч коментар вище саме це й
-   * обіцяв. Через це бригадир, який завершив роботи й поїхав далі, бачив
-   * «Прямуємо до 📍 Апартель Косино» і кнопку «📍 Прибув: Апартель Косино» —
-   * назад на обʼєкт, з якого щойно виїхав, поки насправді їхав до Ужгорода.
-   * На екрані ПОВЕРНЕННЯ фільтр не потрібен і шкідливий: там якраз
-   * повертаються по відпрацьовані обʼєкти, тож він користується `headingTo`.
-   */
-  const driveHeadingTo = headingTo && objectUnfinished(headingTo) ? headingTo : null;
+  // An explicitly selected destination remains valid for repeat visits.
+  // arriveAt() clears the selection; completion of work does not cancel it.
+  const driveHeadingTo = selectedDestination(plans, headingToObjectId);
 
   // Where "↩️ Повернутися до поїздки" on HUB should actually land. Follows
   // the LIVE trip's state first (objects still to visit -> people to pick up
@@ -5162,14 +5153,14 @@ export function RoadTimesheet({
               })()}
             </div>
           )}
-          {nextUnvisited && driveHeadingTo && (
+          {driveHeadingTo && (
             <div className="hint drive-destination">Прямуємо до 📍 {driveHeadingTo.objectName}</div>
           )}
           {/* Дві дії поїздки -- обидві рідкісні, тож маленькі, приглушені й
               під пунктом призначення, а не окремою секцією над маршрутом,
               де вони важили більше за сам маршрут. */}
           <div className="drive-actions">
-            {nextUnvisited && driveHeadingTo && (
+            {driveHeadingTo && (
               <button
                 className="chip chip-sm chip-ghost"
                 onClick={() => {
@@ -5340,7 +5331,7 @@ export function RoadTimesheet({
             <span>🚶 приїхав сам</span>
           </div>
 
-          {nextUnvisited && driveHeadingTo ? (
+          {driveHeadingTo ? (
             <MainButton text={`📍 Прибув: ${driveHeadingTo.objectName}`} onClick={() => arriveAt(driveHeadingTo.objectId)} />
           ) : (
             <MainButton
