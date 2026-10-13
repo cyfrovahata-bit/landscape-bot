@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
+import { carMovementError, initialCarRiders } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
 import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft } from "../lib/draftMirror";
@@ -2605,9 +2606,11 @@ export function RoadTimesheet({
 
   // ---------- depart ----------
   function startDrive() {
+    const riders = initialCarRiders(employeeIds, selfTransportIds);
+    if (!checkCarMovement(riders)) return;
     setHeadingToObjectId("");
     setCarAtObjectId("");
-    setOnboard(employeeIds);
+    setOnboard(riders);
     setTripStartedAt(new Date().toISOString());
     setDrivingAccumulatedMs(0);
     // The clock does NOT start here. Leaving base is a tap; the wheels turn
@@ -2640,8 +2643,18 @@ export function RoadTimesheet({
     setDrivingSegmentStartedAt((segStart) => segStart ?? new Date().toISOString());
   }
 
+  function checkCarMovement(riders: readonly string[] = onboard): boolean {
+    const message = carMovementError(riders);
+    if (!message) return true;
+    setError(message);
+    void alertDialog(message);
+    haptic("error");
+    return false;
+  }
+
   /** Бус рушив: годинник іде, машина більше не стоїть на обʼєкті. */
   function departFromObject() {
+    if (!checkCarMovement()) return;
     resumeDrivingSegment();
     setCarAtObjectId("");
   }
@@ -5093,6 +5106,7 @@ export function RoadTimesheet({
                 key={p.objectId}
                 className="cell"
                 onClick={() => {
+                  if (!checkCarMovement()) return;
                   setHeadingToObjectId(p.objectId);
                   departFromObject();
                   haptic("selection");
@@ -6916,6 +6930,7 @@ export function RoadTimesheet({
                         className="chip selected"
                         style={{ width: "100%", marginTop: 6, textAlign: "left" }}
                         onClick={() => {
+                          if (!checkCarMovement()) return;
                           setHeadingToObjectId(p.objectId);
                           departFromObject();
                           haptic("selection");
