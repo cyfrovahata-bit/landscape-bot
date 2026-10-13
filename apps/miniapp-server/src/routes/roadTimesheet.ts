@@ -29,6 +29,7 @@ import {
 } from "@landscape/core";
 import { and, eq, inArray, desc, lt, gte } from "drizzle-orm";
 import { normRole } from "../authMiddleware.js";
+import { removedHeldEmployees } from "../lib/reservationRoster.js";
 // Чиста арифметика дня -- винесена в окремий модуль, бо цей файл при імпорті
 // тягне db і Google-конфіг, тож протестувати її тут було нічим.
 // Див. src/lib/dayMath.ts і test/dayMath.test.ts.
@@ -1028,12 +1029,34 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
         );
       }
 
-      if (employeeIds?.length) {
+      // An explicit roster (including []) replaces this foreman's current
+      // roster. A car-only request with no employeeIds must leave it alone.
+      if (Array.isArray(employeeIds)) {
         const employeeConflicts = await findEmployeeConflicts(tx, date, employeeIds, foremanTgId);
         if (employeeConflicts.length) {
           throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
         }
-        await writeEvent(
+        const ownReservations = await tx.select().from(schema.events).where(and(
+          eq(schema.events.date, date),
+          eq(schema.events.foremanTgId, BigInt(foremanTgId)),
+          eq(schema.events.type, "RTS_RESERVE_PEOPLE"),
+        ));
+        const candidateIds = new Set<string>();
+        for (const event of ownReservations) {
+          try {
+            for (const id of JSON.parse(event.employeeIds ?? "[]")) candidateIds.add(id);
+          } catch { /* Ignore malformed historical events. */ }
+        }
+        const held = await employeesHeldByCaller(tx, date, [...candidateIds], foremanTgId);
+        const removed = removedHeldEmployees(held, employeeIds);
+        if (removed.length) {
+          await writeEvent({
+            eventId: makeEventId("RTSRSV"), status: "АКТИВНА", date,
+            foremanTgId, type: "RTS_RESERVE_CANCEL",
+            employeeIds: JSON.stringify(removed),
+          }, tx);
+        }
+        if (employeeIds.length) await writeEvent(
           {
             eventId: makeEventId("RTSRSV"),
             status: "АКТИВНА",

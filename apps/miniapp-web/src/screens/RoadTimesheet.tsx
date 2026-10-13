@@ -719,6 +719,14 @@ export function RoadTimesheet({
   }
 
   useEffect(() => {
+    if (!showAddPersonPicker && step !== "PICK_PEOPLE") return;
+    fetchPeopleStatus();
+    const timer = window.setInterval(fetchPeopleStatus, 10000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, showAddPersonPicker, step]);
+
+  useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));
     api.get<Employee[]>("/api/dictionaries/employees").then(setEmployees).catch((e) => setError(e.message));
     api.get<Work[]>("/api/dictionaries/works").then(setWorks).catch((e) => setError(e.message));
@@ -2093,8 +2101,18 @@ export function RoadTimesheet({
   // snapshotting and replacing the whole `plans`/`onboard` state, which would
   // otherwise both fail to restore `onboard` (never captured) and clobber any
   // unrelated route edits made in the few seconds before the undo is tapped.
-  function removeEmployeesFromTrip(ids: string[], undoLabel: string) {
+  async function removeEmployeesFromTrip(ids: string[], undoLabel: string) {
     if (!ids.length) return;
+    const liveReservation = !planEditing && date === todayISO();
+    if (liveReservation) {
+      try {
+        await api.post("/api/road-timesheet/reserve/release", { date, employeeIds: ids });
+      } catch (e) {
+        setError((e as Error).message);
+        haptic("error");
+        return;
+      }
+    }
     const removedSelfTransportIds = ids.filter((id) => selfTransportIds.includes(id));
     if (tripStartedAt) {
       const priorLocationById = new Map<string, Location>(
@@ -2107,7 +2125,17 @@ export function RoadTimesheet({
       const removedSessionsByObject = plans
         .filter((p) => p.sessions.some((s) => ids.includes(s.employeeId)))
         .map((p) => ({ objectId: p.objectId, sessions: p.sessions.filter((s) => ids.includes(s.employeeId)) }));
-      pushUndo(undoLabel, () => {
+      pushUndo(undoLabel, async () => {
+        if (liveReservation) {
+          try {
+            await api.post("/api/road-timesheet/reserve", { date, employeeIds });
+          } catch (e) {
+            setError((e as Error).message);
+            haptic("error");
+            fetchPeopleStatus();
+            return;
+          }
+        }
         setEmployeeIds((prev) => [...new Set([...prev, ...ids])]);
         if (removedSelfTransportIds.length) setSelfTransportIds((prev) => [...new Set([...prev, ...removedSelfTransportIds])]);
         for (const [id, loc] of priorLocationById) moveEmployeesTo([id], loc);
@@ -3172,6 +3200,12 @@ export function RoadTimesheet({
   async function confirmAddPeople() {
     if (!atObjectId || !addPersonSelected.length) return;
     const ids = [...addPersonSelected];
+    const busy = ids.filter(id => busyEmployees.has(id));
+    if (busy.length) {
+      setError(busy.map(id => `${employeeName(id)} — у бригадира ${busyEmployees.get(id)}`).join("; "));
+      haptic("error");
+      return;
+    }
     const atPlan = currentAtPlan();
     const objectName = atPlan?.objectName ?? "";
     const crewWindow = atPlan ? crewWindowAt(atPlan, ids) : null;
@@ -6287,7 +6321,6 @@ export function RoadTimesheet({
                     <div className="list">
                       {groupByBrigade(
                         employees.filter((e) => {
-                          if (busyEmployees.has(e.id)) return false;
                           if (!e.name.toLowerCase().includes(addPersonSearch.toLowerCase())) return false;
                           if (!employeeIds.includes(e.id)) return true;
                           // Хто вже в поїздці, тут зайвий -- ЗАЗВИЧАЙ. У живому
@@ -6325,10 +6358,13 @@ export function RoadTimesheet({
                               <div style={{ paddingLeft: 12 }}>
                                 {g.members.map((emp) => {
                                   const checked = addPersonSelected.includes(emp.id);
+                                  const busyBy = busyEmployees.get(emp.id);
                                   return (
                                     <button
                                       key={emp.id}
                                       className={`cell ${checked ? "selected" : ""}`}
+                                      disabled={!!busyBy}
+                                      style={busyBy ? { opacity: 0.5 } : undefined}
                                       onClick={() =>
                                         setAddPersonSelected((prev) =>
                                           prev.includes(emp.id) ? prev.filter((x) => x !== emp.id) : [...prev, emp.id],
@@ -6339,7 +6375,9 @@ export function RoadTimesheet({
                                         <span className={`checkbox ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
                                         {shortName(emp.name)}
                                       </span>
-                                      <span className={roleTagClass(employeeRole(emp))}>{employeeRole(emp)}</span>
+                                      {busyBy
+                                        ? <span className="badge warn">🔒 У бригадира {busyBy}</span>
+                                        : <span className={roleTagClass(employeeRole(emp))}>{employeeRole(emp)}</span>}
                                     </button>
                                   );
                                 })}
