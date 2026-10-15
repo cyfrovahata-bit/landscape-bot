@@ -1,6 +1,7 @@
 import { asyncRouter } from "../asyncRouter.js";
-import { db, schema } from "@landscape/core";
+import { db, schema, withLock } from "@landscape/core";
 import { desc, eq } from "drizzle-orm";
+import { draftWriteConflict, draftClearConflict, parkedDraft } from "../lib/draftProtection.js";
 
 /**
  * Дзеркало незданого дня.
@@ -13,13 +14,15 @@ import { desc, eq } from "drizzle-orm";
  */
 export const draftsRouter = asyncRouter();
 
+const snapshotJson = (value: unknown) => JSON.stringify(value, (_key, v) => typeof v === "bigint" ? String(v) : v);
+
 const trim = (v: unknown, max: number) => String(v ?? "").slice(0, max);
 
 /**
  * PUT /api/drafts — знімок чернетки. Викликається фоном, після кожної зміни.
  *
- * Останній запис виграє, і це навмисно: конфлікту тут бути не може, бо в
- * одного бригадира один конструктор. Чия версія свіжіша — та й правильна.
+ * Version-aware writers compare the revision under a per-foreman lock.
+ * Previous and rejected snapshots remain in append-only recovery history.
  */
 draftsRouter.put("/", async (req, res) => {
   const body = (req.body ?? {}) as {
@@ -30,9 +33,15 @@ draftsRouter.put("/", async (req, res) => {
     objectNames?: string[];
     tripStartedAt?: string | null;
     payload?: unknown;
+    baseRevision?: number;
   };
   if (body.payload === undefined) {
     res.status(400).json({ error: "payload is required" });
+    return;
+  }
+  if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)
+      || JSON.stringify(body.payload).length > 400_000) {
+    res.status(400).json({ error: "Некоректна або завелика чернетка. Дані не змінено." });
     return;
   }
   const foremanTgId = BigInt(req.user!.tgId);
@@ -48,16 +57,30 @@ draftsRouter.put("/", async (req, res) => {
     tripStartedAt: started && !Number.isNaN(started.getTime()) ? started : null,
     // Обрізаємо з великим запасом: чернетка дня — це кілька кілобайт, а все
     // помітно більше означає, що щось пішло не так, і краще не класти це в базу.
-    payload: JSON.stringify(body.payload).slice(0, 400_000),
+    payload: JSON.stringify(body.payload),
     updatedAt: new Date(),
   };
 
-  await db
-    .insert(schema.dayDrafts)
-    .values(row)
-    .onConflictDoUpdate({ target: schema.dayDrafts.foremanTgId, set: row });
-
-  res.json({ ok: true });
+  const result = await withLock(`draft:${foremanTgId}`, async tx => {
+    const [head] = await tx.select().from(schema.draftHeads).where(eq(schema.draftHeads.foremanTgId, foremanTgId));
+    const revision = head?.revision ?? 0;
+    const [current] = await tx.select().from(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, foremanTgId));
+    // A retry after a lost response is safe and doesn't create a second version.
+    if (current?.payload === row.payload) return { ok: true, revision };
+    const conflict = draftWriteConflict(current ? JSON.parse(current.payload) : null,
+      body.payload as Record<string, unknown>, revision, body.baseRevision, !!head?.managed);
+    await tx.insert(schema.draftHistory).values({ foremanTgId, revision,
+      action: conflict ? `rejected:${conflict}` : "before_write", snapshot: snapshotJson(current ?? null) });
+    await tx.insert(schema.draftHistory).values({ foremanTgId, revision: conflict ? revision : revision + 1,
+      action: conflict ? "rejected_incoming" : "write", snapshot: snapshotJson(row) });
+    if (conflict) return { ok: false, revision };
+    await tx.insert(schema.dayDrafts).values(row).onConflictDoUpdate({ target: schema.dayDrafts.foremanTgId, set: row });
+    await tx.insert(schema.draftHeads).values({ foremanTgId, revision: revision + 1, managed: body.baseRevision !== undefined })
+      .onConflictDoUpdate({ target: schema.draftHeads.foremanTgId, set: { revision: revision + 1, managed: head?.managed || body.baseRevision !== undefined } });
+    return { ok: true, revision: revision + 1 };
+  });
+  res.status(result.ok ? 200 : 409).json(result.ok ? result : { ...result,
+    error: "Захист чернетки: сервер зберіг іншу версію. Ваші зміни залишилися на телефоні та в історії. Не скидайте поїздку; повідомте адміністратора." });
 });
 
 /**
@@ -67,13 +90,15 @@ draftsRouter.put("/", async (req, res) => {
  * телефон, почищений кеш, перевстановлений Telegram.
  */
 draftsRouter.get("/mine", async (req, res) => {
-  const [row] = await db
-    .select()
-    .from(schema.dayDrafts)
-    .where(eq(schema.dayDrafts.foremanTgId, BigInt(req.user!.tgId)))
-    .limit(1);
+  const { row, revision } = await withLock(`draft:${req.user!.tgId}`, async tx => {
+    const id = BigInt(req.user!.tgId);
+    const [row] = await tx.select().from(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, id)).limit(1);
+    const [head] = await tx.select().from(schema.draftHeads).where(eq(schema.draftHeads.foremanTgId, id));
+    return { row, revision: head?.revision ?? 0 };
+  });
+  res.set("Cache-Control", "no-store");
   if (!row) {
-    res.json({ found: false });
+    res.json({ found: false, revision });
     return;
   }
   let payload: unknown = null;
@@ -82,13 +107,41 @@ draftsRouter.get("/mine", async (req, res) => {
   } catch {
     payload = null;
   }
-  res.json({ found: !!payload, date: row.date, updatedAt: row.updatedAt, payload });
+  res.json({ found: !!payload, date: row.date, updatedAt: row.updatedAt, payload, revision });
 });
 
-/** DELETE /api/drafts — день скинули або здали, дзеркалу тут більше нічого робити. */
+// Keep a copy and revision even after clearing: late writes must not resurrect it.
+async function clearStoredDraft(id: bigint, base: unknown, admin = false) {
+  return withLock(`draft:${id}`, async tx => {
+    const [current] = await tx.select().from(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, id));
+    const [head] = await tx.select().from(schema.draftHeads).where(eq(schema.draftHeads.foremanTgId, id));
+    const revision = head?.revision ?? 0;
+    if (draftClearConflict(revision, base, !!head?.managed, admin)) {
+      await tx.insert(schema.draftHistory).values({ foremanTgId: id, revision,
+        action: "rejected_clear", snapshot: snapshotJson(current ?? null) });
+      return { ok: false, revision };
+    }
+    await tx.insert(schema.draftHistory).values({ foremanTgId: id, revision,
+      action: admin ? "admin_before_clear" : "before_clear", snapshot: snapshotJson(current ?? null) });
+    const stash = !admin && current ? parkedDraft(JSON.parse(current.payload)) : null;
+    if (stash) {
+      const restored = { date: String(stash.date ?? current!.date), step: String(stash.step ?? "INDEX"),
+        carId: String(stash.carId ?? ""), employeeIds: JSON.stringify(stash.employeeIds ?? []),
+        objectNames: (stash.plans ?? []).map((p: { objectName: string }) => p.objectName).join(", "),
+        tripStartedAt: stash.tripStartedAt ? new Date(stash.tripStartedAt) : null,
+        payload: JSON.stringify(stash), updatedAt: new Date() };
+      await tx.update(schema.dayDrafts).set(restored).where(eq(schema.dayDrafts.foremanTgId, id));
+    } else await tx.delete(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, id));
+    await tx.insert(schema.draftHeads).values({ foremanTgId: id, revision: revision + 1 })
+      .onConflictDoUpdate({ target: schema.draftHeads.foremanTgId, set: { revision: revision + 1 } });
+    return { ok: true, revision: revision + 1 };
+  });
+}
 draftsRouter.delete("/", async (req, res) => {
-  await db.delete(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, BigInt(req.user!.tgId)));
-  res.json({ ok: true });
+  const base = req.query.baseRevision === undefined ? undefined : Number(req.query.baseRevision);
+  const result = await clearStoredDraft(BigInt(req.user!.tgId), base);
+  res.status(result.ok ? 200 : 409).json(result.ok ? result : { ...result,
+    error: "Захист чернетки: новішу серверну версію не очищено." });
 });
 
 /**
@@ -115,8 +168,8 @@ draftsRouter.delete("/:foremanTgId", async (req, res) => {
     res.status(400).json({ error: "foremanTgId має бути числом" });
     return;
   }
-  await db.delete(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, tgId));
-  res.json({ ok: true });
+  const result = await clearStoredDraft(tgId, undefined, true);
+  res.json(result);
 });
 
 /**

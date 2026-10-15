@@ -120,6 +120,13 @@
       "when": 1788455577467,
       "tag": "0016_day_drafts",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792091400000,
+      "tag": "0017_draft_history",
+      "breakpoints": true
     }
   ]
 }

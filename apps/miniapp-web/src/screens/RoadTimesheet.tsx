@@ -1,3 +1,4 @@
+import { recoverParkedDraft } from "../lib/draftRecovery";
 import { BACKDATED_ENTRY_ENABLED } from "../lib/features";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
@@ -674,6 +675,8 @@ export function RoadTimesheet({
   // --- undo / change log / draft / submitted-lock / copy-yesterday ---
   const undoTimeoutRef = useRef<number | null>(null);
   const draftRestoredRef = useRef(false);
+  const [draftReady, setDraftReady] = useState(false);
+  const returnedDayStashRef = useRef<BuilderSnapshot | null>(null);
   const [undo, setUndo] = useState<{ label: string; restore: () => void } | null>(null);
   const [changeLog, setChangeLog] = useState<{ ts: number; label: string }[]>([]);
   const [showChangeLog, setShowChangeLog] = useState(false);
@@ -791,6 +794,7 @@ export function RoadTimesheet({
         (stash?.plans.length ?? 0) > 0 ||
         !!stash?.tripStartedAt);
     if (draft && hasContent && draft.step !== "DONE") {
+      setDraftReady(true);
       // The draft keeps its own date ONLY once the trip has actually departed.
       // That is the night-shift case this was written for: left at 23:00, app
       // reopened at 01:30, still the same unfinished day.
@@ -907,7 +911,7 @@ export function RoadTimesheet({
       // пристроєм.
       fetchMirroredDraft<DraftShape>().then(async (mirrored) => {
         if (!mirrored || draftRestoredRef.current) return;
-        const d = mirrored.payload;
+        const d = recoverParkedDraft(mirrored.payload);
         const hasWork = !!d.carId || d.employeeIds.length > 0 || d.plans.length > 0;
         if (!hasWork) return;
         // Другий рубіж проти задвоєної поїздки. Дзеркало може пережити здачу
@@ -958,7 +962,7 @@ export function RoadTimesheet({
         setStep(d.tripStartedAt ? d.step : "INDEX");
         draftRestoredRef.current = true;
         logChange("День відновлено з сервера");
-      });
+      }).finally(() => setDraftReady(true));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1077,13 +1081,16 @@ export function RoadTimesheet({
   // so the two don't conflict; the in-progress trip just shows as its own
   // card in the list (see the DONE screen render) instead of taking over.
   useEffect(() => {
+    if (!draftReady) return;
+    let cancelled = false;
     api
       .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
       .then(async (status) => {
+        if (cancelled) return;
         setDayStatus(status);
         if (!status.hasSubmission) return;
         const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
-        if (!res.found) return;
+        if (cancelled || !res.found) return;
         setSubmittedTrips(res.trips);
         setDayCombined(res.combined);
 
@@ -1107,12 +1114,13 @@ export function RoadTimesheet({
         // day summary here would skip past the planned trips and the "new
         // trip" button the foreman came for.
       })
-      .catch(() => setDayStatus({ hasSubmission: false, approved: false, returned: false, returnReason: null, eventId: null, editRequested: false }));
+      .catch(() => { if (!cancelled) setDayStatus({ hasSubmission: false, approved: false, returned: false, returnReason: null, eventId: null, editRequested: false }); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date]);
+    return () => { cancelled = true; };
+  }, [date, draftReady]);
 
   useEffect(() => {
-    if (step === "DONE") return;
+    if (!draftReady || step === "DONE") return;
     const snapshot: DraftShape = {
       date,
       step,
@@ -1159,6 +1167,7 @@ export function RoadTimesheet({
       payload: snapshot,
     });
   }, [
+    draftReady,
     date,
     step,
     carId,
@@ -1566,7 +1575,11 @@ export function RoadTimesheet({
    */
   function openReturnedDay(target: string) {
     setFixedDayNotice(null);
-    if (!fixingReturnedDate) setDayStash(snapshotBuilder());
+    if (!fixingReturnedDate && !returnedDayStashRef.current) {
+      const savedDay = snapshotBuilder();
+      returnedDayStashRef.current = savedDay;
+      setDayStash(savedDay);
+    }
     blankBuilder();
     setFixingReturnedDate(target);
     setDate(target);
@@ -1576,13 +1589,15 @@ export function RoadTimesheet({
 
   /** Повернутись до свого дня: віддати конструктор назад тому, хто його ждав. */
   function exitReturnedDay() {
-    if (dayStash) restoreBuilder(dayStash);
+    const savedDay = returnedDayStashRef.current ?? dayStash;
+    if (savedDay) restoreBuilder(savedDay);
     else {
       blankBuilder();
       setDate(todayISO());
     }
     setDayStash(null);
     setFixingReturnedDate(null);
+    returnedDayStashRef.current = null;
     setStep("INDEX");
     haptic("selection");
   }
@@ -3523,8 +3538,10 @@ export function RoadTimesheet({
       };
       setSubmittedTrips((prev) => [...prev.filter((t) => t.tripSeq !== res.tripSeq), savedTrip].sort((a, b) => a.tripSeq - b.tripSeq));
       clearDraft();
-      // День уже в базі як RTS_SAVE -- дзеркало більше нічого не додає.
-      clearMirroredDraft();
+      // A returned report borrows this slot: clearing it would also clear
+      // today's trip, especially when submission beats the 5-second mirror.
+      // exitReturnedDay below restores and mirrors the parked day instead.
+      if (!fixingReturnedDate) clearMirroredDraft();
       setDayStatus((prev) => (prev ? { ...prev, hasSubmission: true, eventId: res.eventId } : prev));
       logChange("Звіт відправлено");
       // Саме тут, ПІСЛЯ logChange: він щойно підняв прапорець, а день у базі

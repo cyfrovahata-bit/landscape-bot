@@ -1,4 +1,6 @@
 import { api } from "./api";
+import { alertDialog, getInitDataUser } from "./telegram";
+import { DraftWriteQueue } from "./draftWriteQueue";
 
 /**
  * Дзеркало чернетки на сервері.
@@ -20,6 +22,34 @@ const PUSH_DELAY_MS = 5000;
 let timer: number | null = null;
 let pending: Record<string, unknown> | null = null;
 let lastSent = "";
+const writes = new DraftWriteQueue();
+let blocked = false;
+let revision: number | undefined;
+const revisionKey = () => `draftServerRevision:v1:${getInitDataUser()?.id ?? "anon"}`;
+function rememberRevision(value: number) {
+  revision = value;
+  try { localStorage.setItem(revisionKey(), String(value)); } catch { /* local draft still works */ }
+}
+async function ensureRevision() {
+  if (revision !== undefined) return revision;
+  try {
+    const saved = localStorage.getItem(revisionKey());
+    if (saved !== null && Number.isSafeInteger(Number(saved))) revision = Number(saved);
+  } catch { /* obtain revision from server below */ }
+  if (revision === undefined) {
+    const remote = await api.get<{ revision: number }>("/api/drafts/mine");
+    rememberRevision(remote.revision);
+  }
+  return revision;
+}
+function handleSyncError(error: unknown) {
+  lastSent = "";
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith("Захист чернетки:") && !blocked) {
+    blocked = true;
+    void alertDialog(message);
+  }
+}
 
 /** Надіслати знімок. Кілька змін підряд згортаються в одну відправку. */
 export function mirrorDraft(snapshot: {
@@ -31,6 +61,7 @@ export function mirrorDraft(snapshot: {
   tripStartedAt: string | null;
   payload: unknown;
 }) {
+  if (blocked) return;
   pending = snapshot;
   if (timer !== null) return;
   timer = window.setTimeout(() => {
@@ -42,11 +73,13 @@ export function mirrorDraft(snapshot: {
     // щосекунди, і без цього ми б лупили в сервер на кожен тік.
     const fingerprint = JSON.stringify(body);
     if (fingerprint === lastSent) return;
-    lastSent = fingerprint;
-    api.put("/api/drafts", body).catch(() => {
-      // Не вийшло -- нехай: локальна чернетка ціла, наступна зміна надішле знову.
-      lastSent = "";
-    });
+    void writes.enqueue(async () => {
+      if (blocked) return;
+      const baseRevision = await ensureRevision();
+      const result = await api.put<{ revision: number }>("/api/drafts", { ...body, baseRevision });
+      rememberRevision(result.revision);
+      lastSent = fingerprint;
+    }).catch(handleSyncError);
   }, PUSH_DELAY_MS);
 }
 
@@ -69,14 +102,26 @@ export function clearMirroredDraft() {
   }
   pending = null;
   lastSent = "";
-  api.del("/api/drafts").catch(() => {});
+  writes.invalidate();
+  void writes.enqueue(async () => {
+    if (blocked) return;
+    const baseRevision = await ensureRevision();
+    const result = await api.del<{ revision: number }>(`/api/drafts?baseRevision=${baseRevision}`);
+    rememberRevision(result.revision);
+  }, true).catch(handleSyncError);
 }
 
 /** Чернетка з сервера. Потрібна, коли на телефоні порожньо, а день був. */
-export async function fetchMirroredDraft<T>(): Promise<{ payload: T; updatedAt: string } | null> {
+export async function fetchMirroredDraft<T>(): Promise<{ payload: T; updatedAt: string; revision: number } | null> {
   try {
-    const res = await api.get<{ found: boolean; payload: T; updatedAt: string }>("/api/drafts/mine");
-    return res.found && res.payload ? { payload: res.payload, updatedAt: res.updatedAt } : null;
+    const res = await api.get<{ found: boolean; payload: T; updatedAt: string; revision: number }>("/api/drafts/mine");
+    if (res.found && res.payload) {
+      // The caller is about to offer THIS version for restoration.
+      rememberRevision(res.revision);
+      return { payload: res.payload, updatedAt: res.updatedAt, revision: res.revision };
+    }
+    rememberRevision(res.revision);
+    return null;
   } catch {
     return null;
   }

@@ -460,3 +460,19 @@ export const dayDrafts = pgTable("day_drafts", {
   payload: text("payload").notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
 });
+
+// Revision survives deletion: an old tab cannot recreate a cleared version.
+export const draftHeads = pgTable("draft_heads", {
+  managed: boolean("managed").notNull().default(false),
+  foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).primaryKey(),
+  revision: integer("revision").notNull().default(0),
+});
+// Append-only recovery history, including rejected snapshots and pre-delete copies.
+export const draftHistory = pgTable("draft_history", {
+  id: serial("id").primaryKey(),
+  foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).notNull(),
+  revision: integer("revision").notNull(),
+  action: text("action").notNull(),
+  snapshot: text("snapshot").notNull(),
+  createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+}, t => [index("draft_history_foreman_created_idx").on(t.foremanTgId, t.createdAt)]);
