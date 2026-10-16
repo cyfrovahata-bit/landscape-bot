@@ -1,3 +1,4 @@
+import { canFinishRecordedTrip } from "../lib/lateTripSubmission.js";
 // Тимчасовий перемикач: збережені звіти можна виправляти, нові минулі дні — ні.
 const BACKDATED_ENTRY_ENABLED = false;
 
@@ -876,7 +877,18 @@ roadTimesheetRouter.post("/", async (req, res) => {
       const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
 
       if (!BACKDATED_ENTRY_ENABLED && date < todayKyivISO() && !legPrevious) {
-        throw new ReservationConflictError("Внесення нових звітів заднім числом тимчасово вимкнено");
+        // Only a trip recorded while that day was current may be finished later.
+        // Client-supplied dates/backdated flags are not evidence of a real trip.
+        const lifecycle = await tx.select().from(schema.events).where(and(
+          eq(schema.events.date, date), eq(schema.events.foremanTgId, BigInt(foremanTgId)),
+          inArray(schema.events.type, ["RTS_RESERVE_CAR", "RTS_SAVE", "RTS_RESERVE_CANCEL"])
+        )).orderBy(desc(schema.events.ts));
+        const progress = await tx.select().from(schema.tripProgress).where(and(
+          eq(schema.tripProgress.date, date), eq(schema.tripProgress.foremanTgId, BigInt(foremanTgId))
+        ));
+        if (!canFinishRecordedTrip(date, carId, lifecycle, progress)) {
+          throw new ReservationConflictError("Внесення нових звітів заднім числом тимчасово вимкнено");
+        }
       }
 
       // An already-approved (and possibly already exported to БУХЗВІТ) leg
