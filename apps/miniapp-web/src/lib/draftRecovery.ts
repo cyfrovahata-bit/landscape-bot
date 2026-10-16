@@ -7,3 +7,11 @@ export function recoverParkedDraft<T extends { dayStash?: unknown; fixingReturne
   }
   return draft;
 }
+
+/** An unfinished trip does not expire merely because the app stayed closed. */
+export function shouldRestoreDraft(savedAt: number, data: unknown, now: number): boolean {
+  const d = data as Record<string, unknown> | null;
+  const meaningful = d && (d.carId || d.tripStartedAt || d.dayStash
+    || (Array.isArray(d.plans) && d.plans.length) || (Array.isArray(d.employeeIds) && d.employeeIds.length));
+  return !!meaningful || now - savedAt <= 20 * 60 * 60 * 1000;
+}

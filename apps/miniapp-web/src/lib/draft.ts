@@ -7,7 +7,7 @@
 // keystroke to Google Sheets, which isn't practical).
 import { getInitDataUser } from "./telegram";
 
-const MAX_AGE_MS = 20 * 60 * 60 * 1000; // stale after ~20h, so it never resurrects a truly old, abandoned day
+import { shouldRestoreDraft } from "./draftRecovery";
 
 // Keyed by Telegram user id -- localStorage is scoped to this origin, not to
 // whoever's logged into Telegram, so two different accounts opening the Mini
@@ -31,7 +31,7 @@ export function loadDraft<T>(): T | null {
     const raw = localStorage.getItem(draftKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { savedAt: number; data: T };
-    if (Date.now() - parsed.savedAt > MAX_AGE_MS) return null;
+    if (!shouldRestoreDraft(parsed.savedAt, parsed.data, Date.now())) return null;
     return parsed.data;
   } catch {
     return null;

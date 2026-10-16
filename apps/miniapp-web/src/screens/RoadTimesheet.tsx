@@ -217,6 +217,9 @@ type BuilderSnapshot = {
   planObjectId: string | null;
   coefs: Record<string, CoefPair>;
   editingTripSeq: number | null;
+  volumesReturnStep?: Step;
+  worksBeforePicker?: PlannedWork[] | null;
+  goingHomeWithoutThem?: boolean;
   changeLog: { ts: number; label: string }[];
 };
 
@@ -775,7 +778,8 @@ export function RoadTimesheet({
   // fetch (car/people status, day-status, submitted-today) naturally re-runs
   // against the corrected date once it changes.
   useEffect(() => {
-    const draft = loadDraft<DraftShape>();
+    const storedDraft = loadDraft<DraftShape>();
+    const draft = storedDraft ? recoverParkedDraft(storedDraft) : null;
     // A draft only counts as "in-progress work to resume" if something was
     // actually entered -- "Розпочати нову поїздку" itself autosaves a blank
     // HUB draft the moment it's tapped, and that blank leftover must not
@@ -925,9 +929,13 @@ export function RoadTimesheet({
         // Повернений день -- виняток: його для того й повернули, щоб правити.
         try {
           const st = await api.get<DayStatus>(`/api/road-timesheet/day-status?date=${d.date}`);
-          if (st.hasSubmission && !st.returned) {
-            clearMirroredDraft();
-            return;
+          if (st.hasSubmission && !st.returned && d.editingTripSeq == null && d.odoEnd) {
+            // Match the actual trip, not merely its date: a second unfinished
+            // departure must survive an earlier submitted trip on the same day.
+            const submitted = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${d.date}`);
+            const matching = submitted.trips?.find(t => t.carId === d.carId
+              && Number(d.odoStart) === t.odoStart && Number(d.odoEnd) === t.odoEnd);
+            if (matching) d.editingTripSeq = matching.tripSeq;
           }
         } catch {
           // Статус не дістали -- нехай вирішує людина, як і до цього.
@@ -1369,6 +1377,9 @@ export function RoadTimesheet({
       planObjectId,
       coefs,
       editingTripSeq,
+      volumesReturnStep,
+      worksBeforePicker,
+      goingHomeWithoutThem,
       changeLog,
     };
   }
@@ -1430,7 +1441,10 @@ export function RoadTimesheet({
     setPlanObjectId(snap.planObjectId);
     setCoefs(snap.coefs);
     setEditingTripSeq(snap.editingTripSeq);
-    setChangeLog(snap.changeLog);
+    setChangeLog(snap.changeLog ?? []);
+    setVolumesReturnStep(snap.volumesReturnStep ?? "AT_OBJECT");
+    setWorksBeforePicker(snap.worksBeforePicker ?? null);
+    setGoingHomeWithoutThem(!!snap.goingHomeWithoutThem);
     setInProgressResumeStep(snap.step === "HUB" || snap.step === "INDEX" || snap.step === "DONE" ? null : snap.step);
   }
 
@@ -1579,6 +1593,9 @@ export function RoadTimesheet({
       const savedDay = snapshotBuilder();
       returnedDayStashRef.current = savedDay;
       setDayStash(savedDay);
+      // Persist before borrowing the builder, even if the WebView closes
+      // before React's autosave effect runs.
+      saveDraft({ ...savedDay, dayStash: savedDay, fixingReturnedDate: target, planEditing: false });
     }
     blankBuilder();
     setFixingReturnedDate(target);
@@ -1924,6 +1941,15 @@ export function RoadTimesheet({
   // (carId/plans/etc) so the existing REVIEW screen -- built for editing a
   // single trip -- can edit it, without touching any other leg of the day.
   function editTrip(trip: SubmittedTrip) {
+    // Same-date reports borrow the builder too; never replace a new trip.
+    if (!fixingReturnedDate && !returnedDayStashRef.current && editingTripSeq === null
+        && (carId || employeeIds.length || plans.length || tripStartedAt)) {
+      const savedDay = snapshotBuilder();
+      returnedDayStashRef.current = savedDay;
+      setDayStash(savedDay);
+      setFixingReturnedDate(date);
+      saveDraft({ ...savedDay, dayStash: savedDay, fixingReturnedDate: date, planEditing: false });
+    }
     setEditingTripSeq(trip.tripSeq);
     setCarId(trip.carId ?? "");
     setOdoStart(trip.odoStart !== null ? String(trip.odoStart) : "");

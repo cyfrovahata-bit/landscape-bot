@@ -37,3 +37,17 @@ test('stale and legacy clears are rejected, explicit admin clear is retained', (
   assert.equal(draftClearConflict(5, undefined, true, true), false);
   assert.equal(draftClearConflict(0, undefined, false, false), false);
 });
+
+test('prepared trip is protected before departure, including a same-date report', () => {
+  const prepared = { ...running, tripStartedAt: null };
+  const old = { date: '2026-10-14', carId: 'CAR_2', editingTripSeq: 0 };
+  assert.equal(draftWriteConflict(prepared, old, 3, 3), 'unparked_day');
+  assert.equal(draftWriteConflict(prepared, { ...old, date: prepared.date }, 3, 3), 'unparked_day');
+  assert.equal(draftWriteConflict(prepared, { ...old, dayStash: prepared }, 3, 3), null);
+});
+test('same-date edit cannot drop the parked trip; returning to the real trip is allowed', () => {
+  const borrowed = { ...running, editingTripSeq: 0, dayStash: running };
+  assert.equal(draftWriteConflict(borrowed, { ...borrowed, dayStash: null }, 4, 4), 'lost_stash');
+  assert.equal(draftWriteConflict(borrowed, running, 4, 4), null);
+  assert.equal(draftWriteConflict(borrowed, { ...running, carId: 'OTHER' }, 4, 4), 'lost_stash');
+});
