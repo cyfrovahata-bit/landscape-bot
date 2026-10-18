@@ -1,3 +1,4 @@
+import { usesLiveReservations } from "../../../../packages/core/src/reservationPolicy";
 
 import { BACKDATED_ENTRY_ENABLED } from "../lib/features";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -417,8 +418,8 @@ export function RoadTimesheet({
   const [works, setWorks] = useState<Work[]>([]);
   const [objects, setObjects] = useState<WorkObject[]>([]);
   const [lastOdometer, setLastOdometer] = useState<Record<string, number>>({});
-  const [takenCars, setTakenCars] = useState<Map<string, string>>(new Map());
-  const [busyEmployees, setBusyEmployees] = useState<Map<string, string>>(new Map());
+  const [reservedCars, setTakenCars] = useState<Map<string, string>>(new Map());
+  const [reservedEmployees, setBusyEmployees] = useState<Map<string, string>>(new Map());
 
   // --- car / odometer ---
   const [carId, setCarId] = useState("");
@@ -722,7 +723,12 @@ export function RoadTimesheet({
   const [inProgressResumeStep, setInProgressResumeStep] = useState<Step | null>(null);
   const [expandedTripSeq, setExpandedTripSeq] = useState<number | null>(null);
 
+  const liveReservations = usesLiveReservations({date,today:todayISO(),editingTripSeq,planEditing,recordId});
+  const takenCars = liveReservations ? reservedCars : new Map<string,string>();
+  const busyEmployees = liveReservations ? reservedEmployees : new Map<string,string>();
+
   function fetchCarStatus() {
+    if (!liveReservations) {setTakenCars(new Map());return;}
     api
       .get<{ taken: { carId: string; foremanName: string }[] }>(`/api/road-timesheet/car-status?date=${date}`)
       .then((res) => setTakenCars(new Map(res.taken.map((t) => [t.carId, t.foremanName]))))
@@ -730,6 +736,7 @@ export function RoadTimesheet({
   }
 
   function fetchPeopleStatus() {
+    if (!liveReservations) {setBusyEmployees(new Map());return;}
     api
       .get<{ taken: { employeeId: string; foremanName: string }[] }>(`/api/road-timesheet/people-status?date=${date}`)
       .then((res) => setBusyEmployees(new Map(res.taken.map((t) => [t.employeeId, t.foremanName]))))
@@ -778,7 +785,7 @@ export function RoadTimesheet({
       fetchPeopleStatus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [step, liveReservations]);
 
   async function refreshServerRecords() {
     const r=await listTripDrafts();
@@ -1157,7 +1164,7 @@ export function RoadTimesheet({
   async function reserveIfPossible(): Promise<boolean> {
     // A plan is an intention, not a claim (see lib/tripPlan.ts). Editing one
     // must not hold today's bus or crew for a trip that has not started.
-    if (planEditing) return true;
+    if (!liveReservations) return true;
     if (!carId && !employeeIds.length) return true;
     try {
       await flushTripDrafts(recordId);
@@ -1174,7 +1181,7 @@ export function RoadTimesheet({
   // otherwise it stayed "reserved" until the whole day gets submitted, even
   // though nobody's driving it anymore right after this point.
   async function markCarReturned() {
-    if (!carId || !odoEnd) return;
+    if (!liveReservations || !carId || !odoEnd) return;
     try {
       await api.post("/api/road-timesheet/car-return", {
         draftId:recordId,
@@ -1310,7 +1317,7 @@ export function RoadTimesheet({
 
   async function releaseAndClearDay() {
     try {await flushTripDrafts(recordId);} catch(e){setError((e as Error).message);return;}
-    if (carId || employeeIds.length) {
+    if (liveReservations && (carId || employeeIds.length)) {
       try {
         await api.post("/api/road-timesheet/reserve/release", {
           draftId:recordId,releaseTrip:true,
@@ -1973,7 +1980,7 @@ export function RoadTimesheet({
   }
 
   async function removeEmployeesFromTripUnchecked(ids: string[], undoLabel: string) {
-    const liveReservation = !planEditing && date === todayISO();
+    const liveReservation = liveReservations;
     if (liveReservation) {
       try {
         await api.post("/api/road-timesheet/reserve/release", { draftId:recordId, date, employeeIds: ids });
@@ -2975,8 +2982,10 @@ export function RoadTimesheet({
     if (addArrivedSelected.length) {
       const mergedEmployeeIds = [...new Set([...employeeIds, ...addArrivedSelected])];
       try {
-        await flushTripDrafts(recordId);
-      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
+        if (liveReservations) {
+          await flushTripDrafts(recordId);
+          await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
+        }
       } catch (e) {
         setError((e as Error).message);
         haptic("error");
@@ -3100,8 +3109,10 @@ export function RoadTimesheet({
     const window = crewWindow && addPersonStart === "now" ? { startedAt: new Date().toISOString() } : crewWindow;
     const mergedEmployeeIds = [...new Set([...employeeIds, ...ids])];
     try {
-      await flushTripDrafts(recordId);
-      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
+      if (liveReservations) {
+        await flushTripDrafts(recordId);
+        await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
+      }
     } catch (e) {
       setError((e as Error).message);
       haptic("error");

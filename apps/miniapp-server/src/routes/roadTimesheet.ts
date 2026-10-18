@@ -1,3 +1,4 @@
+import { usesLiveReservations, affectsReservations, submissionReservationEffect } from "@landscape/core";
 import { submissionDraftConflict, submissionSequence } from "../lib/tripDraftSubmission.js";
 import { validTripId } from "../lib/tripDraftIdentity.js";
 import { canFinishRecordedTrip } from "../lib/lateTripSubmission.js";
@@ -58,6 +59,20 @@ async function guardWorkingTrip(tx:LockedTx,owner:number,id:unknown,claim=false)
     if(!record||record.state!=="open")throw new ReservationConflictError("Спочатку дочекайтеся серверного збереження поїздки та повторіть дію.");
   }
   if(claim)await tx.update(schema.tripDraftOwners).set({activeTripId:id}).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(owner)));
+}
+
+// Verify the server-owned record, rather than trusting a client edit-mode flag.
+export async function reservationRequestIsLive(tx:LockedTx,owner:number,id:unknown,date:string) {
+  if(date !== todayKyivISO())return false;
+  if(validTripId(id)) {
+    const [row]=await tx.select().from(schema.tripDrafts).where(and(eq(schema.tripDrafts.id,id as string),eq(schema.tripDrafts.foremanTgId,BigInt(owner))));
+    if(!row)throw new ReservationConflictError("Поїздку не знайдено або немає доступу.");
+    if(row.state !== "open")return false;
+    const p=JSON.parse(row.payload);
+    if(p.date !== date)throw new ReservationConflictError("Дата поїздки не відповідає запиту.");
+    return usesLiveReservations({date,today:todayKyivISO(),recordId:row.id,editingTripSeq:p.editingTripSeq,planEditing:p.planEditing});
+  }
+  return true; // guardWorkingTrip handles legacy/unadopted clients.
 }
 
 /** 403s and returns true if the caller isn't an admin -- lets a route bail with `if (blockNonAdmin(req, res)) return;`. */
@@ -336,6 +351,7 @@ async function findEmployeeConflicts(tx: LockedTx, date: string, employeeIds: st
 
   const latestByEmployee = new Map<string, { type: string; ts: Date }>();
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     if (Number(e.foremanTgId) === myForemanTgId) continue;
     let ids: string[] = [];
     try {
@@ -380,6 +396,7 @@ async function findCarConflict(tx: LockedTx, date: string, carId: string, myFore
 
   let latest: { type: string; ts: Date } | null = null;
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     if (Number(e.foremanTgId) === myForemanTgId) continue;
     if (!latest || e.ts > latest.ts) latest = { type: e.type, ts: e.ts };
   }
@@ -409,6 +426,7 @@ async function callerHoldsCar(tx: LockedTx, date: string, carId: string, myForem
 
   let latest: { type: string; ts: Date; foremanTgId: number } | null = null;
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     if (!latest || e.ts > latest.ts) latest = { type: e.type, ts: e.ts, foremanTgId: Number(e.foremanTgId) };
   }
   return !!latest && latest.foremanTgId === myForemanTgId && !CAR_RELEASE_TYPES.includes(latest.type);
@@ -428,6 +446,7 @@ async function employeesHeldByCaller(tx: LockedTx, date: string, employeeIds: st
 
   const latestByEmployee = new Map<string, { type: string; ts: Date; foremanTgId: number }>();
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     let ids: string[] = [];
     try {
       ids = JSON.parse(e.employeeIds ?? "[]");
@@ -454,6 +473,7 @@ type StoredTrip = {
   tripSeq: number;
   eventId: string;
   draftId?: string;
+  reservationEffect?: string;
   status: string;
   carId: string | null;
   employeeIds: string[];
@@ -482,6 +502,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
     let payload: {
       tripSeq?: number;
       draftId?: string;
+      reservationEffect?: string;
       objects?: ObjectInput[];
       odoStart?: number;
       odoEnd?: number;
@@ -507,6 +528,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
       tripSeq,
       eventId: row.eventId,
       draftId: payload.draftId,
+      reservationEffect: payload.reservationEffect,
       status: row.status,
       carId: row.carId,
       employeeIds,
@@ -872,19 +894,23 @@ roadTimesheetRouter.post("/", async (req, res) => {
       // Enforce the car reservation server-side too, not just as a UI hint --
       // and do the check-then-write atomically under the lock, so two
       // concurrent requests can't both pass the check before either commits.
-      if (!skipReservationChecks && (await findCarConflict(tx, date, carId, foremanTgId))) {
+      const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
+      const previousForDraft = draftId ? allTripsBefore.find(t => t.draftId === draftId) : undefined;
+      const previousAttempt = safeKey ? allTripsBefore.find(t => t.eventId === eventId) : undefined;
+      const existingReport = tripSeq != null ? allTripsBefore.find(t => t.tripSeq === tripSeq) : previousForDraft;
+      const reportEdit = !!existingReport;
+      const checkLiveReservations = !skipReservationChecks && date === todayKyivISO() && !reportEdit;
+      if (checkLiveReservations && (await findCarConflict(tx, date, carId, foremanTgId))) {
         throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
       }
 
-      const employeeConflicts = skipReservationChecks ? [] : await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
+      const employeeConflicts = !checkLiveReservations ? [] : await findEmployeeConflicts(tx, date, employeeIds ?? [], foremanTgId);
       if (employeeConflicts.length) {
         throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
       }
 
       const [adoptedOwner]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(foremanTgId)));
       if(adoptedOwner&&!draftId)throw new ReservationConflictError("Оновіть MINI-APP перед здачею звіту: потрібен ID поїздки.");
-      const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
-      const previousForDraft = draftId ? allTripsBefore.find(t => t.draftId === draftId) : undefined;
       // Lock the exact working record. Submission and its archive commit together.
       const [workingDraft] = draftId && validTripId(draftId) ? await tx.select().from(schema.tripDrafts)
         .where(and(eq(schema.tripDrafts.id,draftId),eq(schema.tripDrafts.foremanTgId,BigInt(foremanTgId)))).for('update') : [];
@@ -981,6 +1007,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
           payload: JSON.stringify({
             tripSeq: effectiveTripSeq,
             draftId,
+            reservationEffect: submissionReservationEffect(reportEdit || date !== todayKyivISO(), previousAttempt),
             odoStart,
             odoEnd,
             km: legResult.km,
@@ -1063,6 +1090,7 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
 
   try {
     await withLock(`reserve:${date}`, async (tx) => {
+      if (!(await reservationRequestIsLive(tx,foremanTgId,req.body.draftId,date))) return;
       await guardWorkingTrip(tx,foremanTgId,req.body.draftId,true);
       if (carId) {
         if (await findCarConflict(tx, date, carId, foremanTgId)) {
@@ -1157,6 +1185,7 @@ roadTimesheetRouter.post("/reserve/release", async (req, res) => {
   const foremanTgId = req.user!.tgId;
 
   await withLock(`reserve:${date}`, async (tx) => {
+    if (!(await reservationRequestIsLive(tx,foremanTgId,req.body.draftId,date))) return;
     await guardWorkingTrip(tx,foremanTgId,req.body.draftId);
     if(req.body.releaseTrip===true)await tx.update(schema.tripDraftOwners).set({activeTripId:null}).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(foremanTgId)));
     if (carId && (await callerHoldsCar(tx, date, carId, foremanTgId))) {
@@ -1224,6 +1253,8 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
     return;
   }
 
+  if (date !== todayKyivISO()) {res.json({taken:[]});return;}
+
   const [events, users] = await Promise.all([
     db
       .select()
@@ -1236,6 +1267,7 @@ roadTimesheetRouter.get("/car-status", async (req, res) => {
 
   const latestByCarId = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     if (Number(e.foremanTgId) === myTgId || !e.carId) continue;
     const cur = latestByCarId.get(e.carId);
     if (!cur || e.ts > cur.ts) latestByCarId.set(e.carId, { type: e.type, ts: e.ts, foremanTgId: String(e.foremanTgId) });
@@ -1276,6 +1308,7 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
   const foremanTgId = req.user!.tgId;
 
   await withLock(`reserve:${date}`,async tx=>{
+  if (!(await reservationRequestIsLive(tx,foremanTgId,req.body.draftId,date))) return;
   await guardWorkingTrip(tx,foremanTgId,req.body.draftId);
   await writeOdometerDay({ date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto },tx);
   await writeEvent({
@@ -1304,6 +1337,8 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
     return;
   }
 
+  if (date !== todayKyivISO()) {res.json({taken:[]});return;}
+
   const [events, users] = await Promise.all([
     db
       .select()
@@ -1316,6 +1351,7 @@ roadTimesheetRouter.get("/people-status", async (req, res) => {
 
   const latestByEmployee = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
   for (const e of events) {
+    if (!affectsReservations(e)) continue;
     if (Number(e.foremanTgId) === myTgId) continue;
     let ids: string[] = [];
     try {
@@ -1425,12 +1461,14 @@ roadTimesheetRouter.get("/admin/overview", async (req, res) => {
   // car-status, minus the "skip my own" filter -- an admin wants all of them).
   const latestByCar = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
   for (const e of dayEvents) {
+    if (!affectsReservations(e)) continue;
     if (!e.carId || !["RTS_RESERVE_CAR", ...CAR_RELEASE_TYPES].includes(e.type)) continue;
     const cur = latestByCar.get(e.carId);
     if (!cur || e.ts > cur.ts) latestByCar.set(e.carId, { type: e.type, ts: e.ts, foremanTgId: String(e.foremanTgId) });
   }
   const latestByEmployee = new Map<string, { type: string; ts: Date; foremanTgId: string }>();
   for (const e of dayEvents) {
+    if (!affectsReservations(e)) continue;
     if (!["RTS_RESERVE_PEOPLE", ...PEOPLE_RELEASE_TYPES].includes(e.type)) continue;
     let ids: string[] = [];
     try {
