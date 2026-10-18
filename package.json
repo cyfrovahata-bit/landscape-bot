@@ -14,6 +14,7 @@
     "check": "cd packages/core && npx tsc --noEmit && cd ../../apps/miniapp-server && npx tsc --noEmit && cd ../miniapp-web && npx tsc -b && cd ../.. && npm test"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.10",
     "tsx": "^4.21.0"
   }
 }

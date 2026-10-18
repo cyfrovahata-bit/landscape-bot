@@ -1,4 +1,4 @@
-import { recoverParkedDraft } from "../lib/draftRecovery";
+
 import { BACKDATED_ENTRY_ENABLED } from "../lib/features";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
@@ -7,12 +7,12 @@ import { todayISO } from "../lib/date";
 import { carMovementError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
-import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft } from "../lib/draftMirror";
+import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft, flushTripDrafts, archiveTripDraft, listTripDrafts, readTripDraft, subscribeDraftSave, retryTripDraft, acceptServerTrip, draftServerRevision, type TripDraftSummary } from "../lib/draftMirror";
 import { alertDialog, ask3Dialog, askDialog, confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade, shortName, surnameInitial, roleTagClass, roleRank, findMyEmployeeId, type EmployeeRole } from "../lib/employee";
 import { groupWorks } from "../lib/works";
 import { works as nWorks, people as nPeople, objects as nObjects, plural } from "../lib/plural";
-import { saveDraft, loadDraft, clearDraft } from "../lib/draft";
+import { saveDraft, clearDraft } from "../lib/draft";
 import { BackRow } from "../components/BackRow";
 import { MainButton } from "../components/MainButton";
 import { NumericKeypad } from "../components/NumericKeypad";
@@ -193,6 +193,7 @@ type LastTripSuggestion = {
  * empty day: the two never occupy the builder at the same time.
  */
 type BuilderSnapshot = {
+  recordId?: string;
   /** Дата дня, який відклали. Без неї відкладений день повертався на ту дату,
       яка стояла на екрані в момент повернення -- тобто на чужу. */
   date?: string;
@@ -224,6 +225,7 @@ type BuilderSnapshot = {
 };
 
 type DraftShape = {
+  recordId?: string;
   date: string;
   step: Step;
   carId: string;
@@ -370,7 +372,7 @@ function hhmmOf(iso: string) {
 }
 
 export function RoadTimesheet({
-  onBack,
+  onBack: leaveScreen,
   onSaved,
   onOpenRetro,
   isAdmin = false,
@@ -385,6 +387,18 @@ export function RoadTimesheet({
 }) {
   // INDEX, not HUB: the hub is the builder for ONE trip, and landing straight
   // in it hid both the day's other trips and the planned ones.
+  const recordGenerationRef=useRef(0);
+  async function onBack(){try{await flushTripDrafts(recordId);leaveScreen();}catch(e){setError((e as Error).message);}}
+  const [recordId,setRecordId] = useState(() => crypto.randomUUID() as string);
+  const [serverRecords,setServerRecords] = useState<TripDraftSummary[]>([]);
+  const [reportSelectionVersion,setReportSelectionVersion]=useState(0);
+  const [reportRecords,setReportRecords]=useState<Array<{date:string;tripSeq:number;status:string;carId:string}>>([]);
+  const [reportOffset,setReportOffset]=useState<number|null>(null);
+  const [recordOffset,setRecordOffset] = useState<number|null>(null);
+  const [recordSave,setRecordSave] = useState({pending:0,error:""});
+  const [serverLoadError,setServerLoadError] = useState("");
+  const [showRecordList,setShowRecordList] = useState(false);
+  useEffect(() => subscribeDraftSave(setRecordSave),[]);
   const [step, setStep] = useState<Step>("INDEX");
   const [now, setNow] = useState(Date.now());
 
@@ -636,7 +650,7 @@ export function RoadTimesheet({
   // Дефолт «як бригада» вже коштував дня 08.09 -- бригадир додав пʼятьох, які
   // щойно приїхали, і всім підтягнулись його 39 хвилин.
   /** Чи змінювали день після останньої вдалої відправки (див. logChange). */
-  const [changedSinceSave, setChangedSinceSave] = useState(false);
+  const [, setChangedSinceSave] = useState(false);
   const [addPersonStart, setAddPersonStart] = useState<"crew" | "now" | null>(null);
   const [addPersonStartHint, setAddPersonStartHint] = useState(false);
   const [addPersonSearch, setAddPersonSearch] = useState("");
@@ -769,211 +783,43 @@ export function RoadTimesheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
-  // Restore an autosaved draft once on mount (survives the mini-app being
-  // killed/reopened on the same device). Deliberately does NOT require
-  // draft.date === today: a night shift started at 23:00 and reopened after
-  // an app crash at 01:30 is a different calendar date by then, but it's
-  // still the same unfinished day and must not silently vanish. Instead the
-  // draft's own date is adopted (`setDate` below), and every date-scoped
-  // fetch (car/people status, day-status, submitted-today) naturally re-runs
-  // against the corrected date once it changes.
-  useEffect(() => {
-    const storedDraft = loadDraft<DraftShape>();
-    const draft = storedDraft ? recoverParkedDraft(storedDraft) : null;
-    // A draft only counts as "in-progress work to resume" if something was
-    // actually entered -- "Розпочати нову поїздку" itself autosaves a blank
-    // HUB draft the moment it's tapped, and that blank leftover must not
-    // masquerade as real work and block the submitted-trips list below.
-    // A stashed day counts as content on its own: the builder may be holding a
-    // half-written plan (or nothing) while the real trip sits in the stash.
-    const stash = draft?.dayStash ?? null;
-    const hasContent =
-      !!draft &&
-      (!!draft.carId ||
-        draft.employeeIds.length > 0 ||
-        draft.plans.length > 0 ||
-        !!draft.tripStartedAt ||
-        !!stash?.carId ||
-        (stash?.employeeIds.length ?? 0) > 0 ||
-        (stash?.plans.length ?? 0) > 0 ||
-        !!stash?.tripStartedAt);
-    if (draft && hasContent && draft.step !== "DONE") {
+  async function refreshServerRecords() {
+    const [r,reports]=await Promise.all([listTripDrafts(),api.get<{records:typeof reportRecords;nextOffset:number|null}>("/api/trip-drafts/reports")]);
+    setServerRecords(r.records);setRecordOffset(r.nextOffset);setReportRecords(reports.records);setReportOffset(reports.nextOffset);
+  }
+  function applyServerRecord(d:DraftShape) {
+    restoreBuilder({...d,recordId:d.recordId,plans:(d.plans??[]).map(normalizeDraftPlan),
+      headingToObjectId:d.headingToObjectId??"",carAtObjectId:d.carAtObjectId??"",changeLog:[]});
+    setPlanEditing(!!d.planEditing);setEditingPlanId(d.editingPlanId??null);
+    setPlanForemanTgId(d.planForemanTgId??null);
+    setDayStash(null);setFixingReturnedDate(null);returnedDayStashRef.current=null;
+    const parked=(d.plans??[]).find(p=>p.objectId===d.carAtObjectId);
+    const workingHere=parked&&!d.headingToObjectId&&parked.here?.length&&parked.sessions?.some(x=>!x.endedAt);
+    const resume=workingHere&&["DRIVE","RETURN_PICKUP","RETURN"].includes(d.step)?"AT_OBJECT":d.step;
+    if(resume==="AT_OBJECT"&&workingHere){setAtObjectId(parked!.objectId);setAtObjectReturnStep("DRIVE");}
+    setInProgressResumeStep(["INDEX","HUB","DONE"].includes(resume)?null:resume);
+    if(!d.tripStartedAt&&d.editingTripSeq==null&&!d.planEditing)setDate(todayISO());
+    setReviewReturnStep(d.editingTripSeq!=null?"INDEX":"RETURN");
+    setStep(resume);draftRestoredRef.current=true;setRestoredBanner(true);
+  }
+  async function openServerRecord(id:string) {
+    try {
+      await flushTripDrafts(recordId);
+      const r=await readTripDraft<DraftShape>(id);
+      if(r.state!=="open") {setError("Це архівна копія. Зданий звіт відкривайте через його картку.");return;}
+      applyServerRecord(r.payload);setShowRecordList(false);
+    } catch(e) {setError((e as Error).message);}
+  }
+  async function loadServerState() {
+    setServerLoadError("");
+    try {
+      const r=await fetchMirroredDraft<DraftShape>();
+      await refreshServerRecords();
+      if(r) {applyServerRecord(r.payload);setStep("INDEX");}
       setDraftReady(true);
-      // The draft keeps its own date ONLY once the trip has actually departed.
-      // That is the night-shift case this was written for: left at 23:00, app
-      // reopened at 01:30, still the same unfinished day.
-      //
-      // A draft that never departed has no day of its own. It used to take its
-      // date anyway, and that is how an evening spent picking a car and people
-      // (or opening a plan an admin had just made) put the WHOLE of the next
-      // day's work onto yesterday: the draft lives ~20h, so an 18:00 draft is
-      // still there at 08:00, and everything from then on was stamped with
-      // yesterday. Nothing on screen said so.
-      if (draft.tripStartedAt && draft.date !== date) setDate(draft.date);
-      setCarId(draft.carId);
-      setOdoStart(draft.odoStart);
-      setOdoStartPhoto(draft.odoStartPhoto);
-      setOdoEnd(draft.odoEnd);
-      setOdoEndPhoto(draft.odoEndPhoto);
-      setEmployeeIds(draft.employeeIds);
-      setSelfTransportIds(draft.selfTransportIds ?? []);
-      setErrands(draft.errands ?? []);
-      setPlans((draft.plans ?? []).map(normalizeDraftPlan));
-      setOnboard(draft.onboard);
-      setTripStartedAt(draft.tripStartedAt);
-      setDrivingAccumulatedMs(draft.drivingAccumulatedMs ?? 0);
-      setDrivingSegmentStartedAt(draft.drivingSegmentStartedAt ?? null);
-      setAtObjectId(draft.atObjectId);
-      setHeadingToObjectId(draft.headingToObjectId ?? "");
-      setCarAtObjectId(draft.carAtObjectId ?? "");
-      setAtObjectReturnStep(draft.atObjectReturnStep ?? "DRIVE");
-      setPlanObjectId(draft.planObjectId ?? null);
-      setVolumesReturnStep(draft.volumesReturnStep ?? "AT_OBJECT");
-      setWorksBeforePicker(draft.worksBeforePicker ?? null);
-      setGoingHomeWithoutThem(!!draft.goingHomeWithoutThem);
-      setCoefs(draft.coefs ?? {});
-      setEditingTripSeq(draft.editingTripSeq ?? null);
-      if (draft.fixingReturnedDate && stash) {
-        // Застосунок помер під час правки поверненого дня. Той день лежить на
-        // сервері й нікуди не дінеться -- а день, що йшов, живе тільки тут.
-        // Тож повертаємо його, а виправлення бригадир відкриє заново.
-        restoreBuilder(stash);
-        setDayStash(null);
-        setFixingReturnedDate(null);
-        setStep(stash.tripStartedAt ? stash.step : "INDEX");
-        setRestoredBanner(true);
-        draftRestoredRef.current = true;
-        return;
-      }
-      setFixingReturnedDate(draft.fixingReturnedDate ?? null);
-      if (draft.planEditing) {
-        // The app died with the planner open. A half-written plan is five
-        // minutes of re-picking; the trip underneath it is a day's work, so
-        // the stash wins and plan mode is dropped.
-        if (stash) restoreBuilder(stash);
-        else blankBuilder();
-        setPlanEditing(false);
-        setEditingPlanId(null);
-        setPlanForemanTgId(null);
-        setDayStash(null);
-        setStep(stash?.tripStartedAt ? stash.step : "INDEX");
-        setRestoredBanner(true);
-        draftRestoredRef.current = true;
-        return;
-      }
-      // Only a real trip step is worth resuming to. INDEX/HUB/DONE are the
-      // screens the resume button lives on, so storing one of them turns that
-      // button into a no-op.
-      setInProgressResumeStep(draft.step === "INDEX" || draft.step === "HUB" ? null : draft.step);
-      // A trip that has DEPARTED resumes exactly where it was -- the foreman
-      // reopening the app between two objects wants the object screen, not a
-      // menu. A setup that never left the yard goes to the index instead, so
-      // the day's other trips and the planned ones are not hidden behind it;
-      // "▶️ Продовжити" there returns to this very step.
-      // A draft saved mid-planning reopens INSIDE the planner. Dropping it on
-      // the index instead left plan mode switched on with no planner on
-      // screen: "створити нову" then refused because the builder held the
-      // plan, and the card that would have led back into it hid itself for
-      // exactly the same reason. Closing the app while planning is enough to
-      // get there -- no handler runs, so nothing turns plan mode off.
-      // Бригада працює, а екран каже «повертаємось». Так буває, бо обʼєкт
-      // вважається відвіданим щойно там висадили людей, і застосунок вирішує,
-      // що маршрут пройдено. Бригадир при цьому нікуди не їде: бус стоїть на
-      // тому ж обʼєкті, де йдуть роботи.
-      //
-      // d56275d виправив це для кнопки «↩️ Повернутися до поїздки», але
-      // перезавантаження відновлює збережений крок як є, тож той самий екран
-      // повертався знову — і виходило, що фікс нічого не змінив.
-      //
-      // Умови навмисно вузькі: бус стоїть на обʼєкті, нікуди не прямує, там
-      // є люди І відкрита робоча сесія. Без сесії це збирання людей по дорозі
-      // на базу — туди повертати не можна.
-      const parkedPlan = draft.carAtObjectId
-        ? (draft.plans ?? []).map(normalizeDraftPlan).find((p) => p.objectId === draft.carAtObjectId)
-        : undefined;
-      const crewWorkingAtCar =
-        !!parkedPlan &&
-        !draft.headingToObjectId &&
-        parkedPlan.here.length > 0 &&
-        parkedPlan.sessions.some((s) => !s.endedAt);
-      const isReturnStep = draft.step === "DRIVE" || draft.step === "RETURN_PICKUP" || draft.step === "RETURN";
-      if (crewWorkingAtCar && isReturnStep) {
-        setAtObjectId(parkedPlan!.objectId);
-        setAtObjectReturnStep("DRIVE");
-        setInProgressResumeStep("AT_OBJECT");
-        setStep("AT_OBJECT");
-      } else {
-        setStep(draft.planEditing || draft.tripStartedAt ? draft.step : "INDEX");
-      }
-      setRestoredBanner(true);
-      draftRestoredRef.current = true;
-    } else {
-      if (draft) clearDraft();
-      // На телефоні порожньо. Якщо сервер тримає дзеркало -- пропонуємо
-      // підняти: новий телефон, почищений кеш, перевстановлений Telegram. До
-      // цього такий день не відновлювався нізвідки, бо не існував поза одним
-      // пристроєм.
-      fetchMirroredDraft<DraftShape>().then(async (mirrored) => {
-        if (!mirrored || draftRestoredRef.current) return;
-        const d = recoverParkedDraft(mirrored.payload);
-        const hasWork = !!d.carId || d.employeeIds.length > 0 || d.plans.length > 0;
-        if (!hasWork) return;
-        // Другий рубіж проти задвоєної поїздки. Дзеркало може пережити здачу
-        // (гонка з відкладеним знімком -- див. clearMirroredDraft), і тоді
-        // воно описує день, який УЖЕ в базі. Підняти його означає отримати
-        // конструктор без editingTripSeq, тобто кнопку «Відправити на
-        // підтвердження» замість «Оновити звіт»: один тап -- і в дні дві
-        // поїздки з тими самими сесіями, а mergeObjects складе їхні години й
-        // обсяги. Саме так 08.09 у звіті вийшло по 15.91 год на людину.
-        //
-        // Повернений день -- виняток: його для того й повернули, щоб правити.
-        try {
-          const st = await api.get<DayStatus>(`/api/road-timesheet/day-status?date=${d.date}`);
-          if (st.hasSubmission && !st.returned && d.editingTripSeq == null && d.odoEnd) {
-            // Match the actual trip, not merely its date: a second unfinished
-            // departure must survive an earlier submitted trip on the same day.
-            const submitted = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${d.date}`);
-            const matching = submitted.trips?.find(t => t.carId === d.carId
-              && Number(d.odoStart) === t.odoStart && Number(d.odoEnd) === t.odoEnd);
-            if (matching) d.editingTripSeq = matching.tripSeq;
-          }
-        } catch {
-          // Статус не дістали -- нехай вирішує людина, як і до цього.
-        }
-        const when = new Date(mirrored.updatedAt).toLocaleString("uk-UA", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
-        if (!(await confirmDialog(`На цьому телефоні незавершеного дня немає, але на сервері є — від ${when} (${d.date}).\n\nВідновити його?`))) return;
-        restoreBuilder({
-          carId: d.carId,
-          odoStart: d.odoStart,
-          odoStartPhoto: d.odoStartPhoto,
-          odoEnd: d.odoEnd,
-          odoEndPhoto: d.odoEndPhoto,
-          employeeIds: d.employeeIds,
-          selfTransportIds: d.selfTransportIds ?? [],
-          errands: d.errands ?? [],
-          plans: d.plans,
-          onboard: d.onboard,
-          tripStartedAt: d.tripStartedAt,
-          drivingAccumulatedMs: d.drivingAccumulatedMs,
-          drivingSegmentStartedAt: d.drivingSegmentStartedAt,
-          atObjectId: d.atObjectId,
-          headingToObjectId: d.headingToObjectId ?? "",
-          carAtObjectId: d.carAtObjectId ?? "",
-          atObjectReturnStep: d.atObjectReturnStep,
-          planObjectId: d.planObjectId,
-          coefs: d.coefs,
-          editingTripSeq: d.editingTripSeq,
-          changeLog: [],
-          step: d.step,
-        });
-        setDate(d.date);
-        setStep(d.tripStartedAt ? d.step : "INDEX");
-        draftRestoredRef.current = true;
-        logChange("День відновлено з сервера");
-      }).finally(() => setDraftReady(true));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    } catch(e) {setServerLoadError((e as Error).message);}
+  }
+  useEffect(() => {void loadServerState();},[]);
 
   // Tells the server roughly where the brigade is, so an admin can watch a day
   // that has not been submitted yet -- until RTS_SAVE the server knows only
@@ -1125,11 +971,12 @@ export function RoadTimesheet({
       .catch(() => { if (!cancelled) setDayStatus({ hasSubmission: false, approved: false, returned: false, returnReason: null, eventId: null, editRequested: false }); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => { cancelled = true; };
-  }, [date, draftReady]);
+  }, [date, draftReady, reportSelectionVersion]);
 
   useEffect(() => {
-    if (!draftReady || step === "DONE") return;
+    if (!draftReady || step === "DONE" || !(carId || employeeIds.length || plans.length)) return;
     const snapshot: DraftShape = {
+      recordId,
       date,
       step,
       carId,
@@ -1161,10 +1008,9 @@ export function RoadTimesheet({
       dayStash,
       fixingReturnedDate,
     };
-    saveDraft<DraftShape>(snapshot);
-    // Те саме -- на сервер, із затримкою і фоном. Телефон лишається робочою
-    // копією; це дзеркало, щоб незданий день не існував лише на одному
-    // пристрої, як було з днем, що поїхав учорашньою датою.
+    // Server is the working store; no persistent browser draft is written.
+    // Persist only to this record's server slot. The UI reports pending writes;
+    // navigation and submission await their acknowledgement.
     mirrorDraft({
       date,
       step,
@@ -1175,6 +1021,7 @@ export function RoadTimesheet({
       payload: snapshot,
     });
   }, [
+    recordId,
     draftReady,
     date,
     step,
@@ -1207,6 +1054,8 @@ export function RoadTimesheet({
     dayStash,
     fixingReturnedDate,
   ]);
+
+  useEffect(()=>{if(draftReady&&step==="REVIEW")void loadPreview();},[recordId,step,draftReady]);
 
   function employeeName(id: string) {
     return employees.find((e) => e.id === id)?.name ?? id;
@@ -1314,7 +1163,8 @@ export function RoadTimesheet({
     if (planEditing) return true;
     if (!carId && !employeeIds.length) return true;
     try {
-      await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds });
+      await flushTripDrafts(recordId);
+      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds });
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -1330,6 +1180,7 @@ export function RoadTimesheet({
     if (!carId || !odoEnd) return;
     try {
       await api.post("/api/road-timesheet/car-return", {
+        draftId:recordId,
         date,
         carId,
         odoStart: odoStart ? Number(odoStart) : undefined,
@@ -1355,6 +1206,7 @@ export function RoadTimesheet({
   /** Everything the builder currently holds, as one value. */
   function snapshotBuilder(): BuilderSnapshot {
     return {
+      recordId,
       date,
       step,
       carId,
@@ -1391,7 +1243,16 @@ export function RoadTimesheet({
    * trip is being thrown away and wrong when it is only being set aside for a
    * minute while the planner borrows the screen.
    */
+  function clearEditorTransient() {
+    recordGenerationRef.current++;
+    if(undoTimeoutRef.current)window.clearTimeout(undoTimeoutRef.current);
+    setUndo(null);setPreview(null);setError(null);
+    setShowDropPicker(false);setShowMovePicker(false);setShowAddPersonPicker(false);
+    setShowManualHours(false);setErrandMode(null);setRetroReplaceObjectId(null);
+  }
   function blankBuilder() {
+    clearEditorTransient();
+    setRecordId(crypto.randomUUID());
     setCarId("");
     setOdoStart("");
     setOdoStartPhoto(null);
@@ -1420,6 +1281,8 @@ export function RoadTimesheet({
   }
 
   function restoreBuilder(snap: BuilderSnapshot) {
+    clearEditorTransient();
+    setRecordId(snap.recordId ?? crypto.randomUUID());
     if (snap.date) setDate(snap.date);
     setCarId(snap.carId);
     setOdoStart(snap.odoStart);
@@ -1449,17 +1312,19 @@ export function RoadTimesheet({
   }
 
   async function releaseAndClearDay() {
+    try {await flushTripDrafts(recordId);} catch(e){setError((e as Error).message);return;}
     if (carId || employeeIds.length) {
       try {
         await api.post("/api/road-timesheet/reserve/release", {
+          draftId:recordId,releaseTrip:true,
           date,
           carId: carId || undefined,
           employeeIds: employeeIds.length ? employeeIds : undefined,
         });
-      } catch {
-        // best-effort -- clearing the local draft must not be blocked by a network hiccup
-      }
+      } catch(e) {setError((e as Error).message);return;}
     }
+    try{await archiveTripDraft(recordId);}catch(e){setError((e as Error).message);return;}
+    setRecordId(crypto.randomUUID());
     clearDraft();
     clearMirroredDraft();
     setCarId("");
@@ -1567,7 +1432,8 @@ export function RoadTimesheet({
    * point is to fill tomorrow in while there is a spare minute. The day being
    * built or driven is set aside in `dayStash` and put back on the way out.
    */
-  function openPlanner(plan: TripPlan | null) {
+  async function openPlanner(plan: TripPlan | null) {
+    try {await flushTripDrafts(recordId);} catch(e) {setError((e as Error).message);return;}
     if (!planEditing) setDayStash(snapshotBuilder());
     blankBuilder();
     setEditingPlanId(plan?.id ?? null);
@@ -1587,7 +1453,8 @@ export function RoadTimesheet({
    * чужою датою. Тому той самий прийом, що й у планувальника: сьогоднішній
    * день відкладається в `dayStash` (тепер разом зі своєю датою) і чекає.
    */
-  function openReturnedDay(target: string) {
+  async function openReturnedDay(target: string) {
+    try {await flushTripDrafts(recordId);} catch(e) {setError((e as Error).message);return;}
     setFixedDayNotice(null);
     if (!fixingReturnedDate && !returnedDayStashRef.current) {
       const savedDay = snapshotBuilder();
@@ -1605,7 +1472,8 @@ export function RoadTimesheet({
   }
 
   /** Повернутись до свого дня: віддати конструктор назад тому, хто його ждав. */
-  function exitReturnedDay() {
+  async function exitReturnedDay() {
+    try{await flushTripDrafts(recordId);}catch(e){setError((e as Error).message);return;}
     const savedDay = returnedDayStashRef.current ?? dayStash;
     if (savedDay) restoreBuilder(savedDay);
     else {
@@ -1620,7 +1488,8 @@ export function RoadTimesheet({
   }
 
   /** Puts the day back exactly as it was and leaves plan mode. */
-  function exitPlanner() {
+  async function exitPlanner() {
+    if(carId||employeeIds.length||plans.length){try{await archiveTripDraft(recordId);}catch(e){setError((e as Error).message);return;}}
     if (dayStash) restoreBuilder(dayStash);
     else blankBuilder();
     setDayStash(null);
@@ -1940,16 +1809,19 @@ export function RoadTimesheet({
   // Loads one already-submitted leg's own data into the shared working state
   // (carId/plans/etc) so the existing REVIEW screen -- built for editing a
   // single trip -- can edit it, without touching any other leg of the day.
-  function editTrip(trip: SubmittedTrip) {
-    // Same-date reports borrow the builder too; never replace a new trip.
-    if (!fixingReturnedDate && !returnedDayStashRef.current && editingTripSeq === null
-        && (carId || employeeIds.length || plans.length || tripStartedAt)) {
-      const savedDay = snapshotBuilder();
-      returnedDayStashRef.current = savedDay;
-      setDayStash(savedDay);
-      setFixingReturnedDate(date);
-      saveDraft({ ...savedDay, dayStash: savedDay, fixingReturnedDate: date, planEditing: false });
-    }
+  async function editTrip(trip: SubmittedTrip) {
+    try {
+      await flushTripDrafts(recordId);
+      const found=await api.post<{id:string;payload:DraftShape|null;revision:number}>("/api/trip-drafts/open-report",{date,tripSeq:trip.tripSeq});
+      const id=found.id;
+      // Register the revision before the first autosave of this editor.
+      if(found.revision>0) await readTripDraft<DraftShape>(id);
+      if(found.payload) {
+        await readTripDraft<DraftShape>(id);
+        applyServerRecord(found.payload);setStep("REVIEW");return;
+      }
+      blankBuilder();setRecordId(id);
+    } catch(e) {setError((e as Error).message);return;}
     setEditingTripSeq(trip.tripSeq);
     setCarId(trip.carId ?? "");
     setOdoStart(trip.odoStart !== null ? String(trip.odoStart) : "");
@@ -1965,84 +1837,18 @@ export function RoadTimesheet({
     setSubmittedEditBanner(true);
     setReviewReturnStep("DONE");
     setStep("REVIEW");
-    api
-      .post<PayrollPreview>("/api/road-timesheet/preview", {
-        odoStart: trip.odoStart ?? 0,
-        odoEnd: trip.odoEnd ?? 0,
-        employeeIds: trip.employeeIds,
-        selfTransportIds: trip.selfTransportIds ?? [],
-        errands: trip.errands ?? [],
-        objects: restoredPlans.map((p) => ({
-          objectId: p.objectId,
-          objectName: p.objectName,
-          works: p.works.map((w) => ({ workId: w.workId, workName: w.workName, volume: w.volume || "?", employeeIds: w.employeeIds ?? [] })),
-          sessions: p.sessions.map((s) => ({
-            employeeId: s.employeeId,
-            employeeName: employeeName(s.employeeId),
-            droppedAt: s.startedAt,
-            pickedUpAt: s.endedAt,
-          })),
-        })),
-      })
-      .then(setPreview)
-      .catch(() => {});
+
   }
 
   // Blanks the working state for a brand-new leg while leaving today's
   // already-submitted trips exactly as they are -- e.g. came back to base at
   // lunch, swapped crew, and is heading out to a different object.
   async function startNewTrip() {
-    // Конструктор тримає ОДНУ поїздку, і чистити його наосліп не можна:
-    // для неЗДАНОЇ поїздки це не «почати нову», а викинути стару -- рівно те,
-    // що сталося з бригадиром, який тапнув сюди й пішов назад.
-    //
-    // Але після здачі все навпаки. Поїздка вже в базі (`editingTripSeq` ставить
-    // сама save), і та сама перевірка блокувала другий виїзд за день: бригадир
-    // повертався з обіду, тиснув «➕ Розпочати нову поїздку» просто на екрані
-    // зданого дня -- і читав «продовжте або скиньте» про день, який щойно
-    // здав. Скидати його він, звісно, не хотів.
-    const submittedAlready = editingTripSeq !== null;
-    if (!submittedAlready && (carId || employeeIds.length || plans.length)) {
-      setError("У конструкторі вже є незавершена поїздка. Продовжте її або скиньте (🗑 угорі), і тоді створюйте нову.");
-      haptic("error");
-      return;
-    }
-    // Питаємо лише тоді, коли є що втратити: у зданій поїздці щось правили й
-    // не натиснули «Оновити звіт». Без правок це звичайний хід дня, і зайвий
-    // діалог тут лише привчав би тиснути «Так» не читаючи.
-    if (submittedAlready && changedSinceSave) {
-      const ok = await confirmDialog(
-        "У поїздці, яку вже здано, є незбережені правки.\n\n" +
-          "Почати нову поїздку? Ці правки зникнуть — сам зданий звіт залишиться на місці.",
-      );
-      if (!ok) return;
-    }
-    setChangedSinceSave(false);
-    setEditingTripSeq(null);
-    setCarId("");
-    setOdoStart("");
-    setOdoStartPhoto(null);
-    setOdoEnd("");
-    setOdoEndPhoto(null);
-    setEmployeeIds([]);
-    setSelfTransportIds([]);
-    setErrands([]);
-    setErrandMode(null);
-    setPlans([]);
-    setCoefs({});
-    setOnboard([]);
-    setTripStartedAt(null);
-    setDrivingAccumulatedMs(0);
-    setDrivingSegmentStartedAt(null);
-    setAtObjectId(null);
-    setChangeLog([]);
-    setSubmittedEditBanner(false);
-    setPreview(null);
-    setInProgressResumeStep(null);
-    setPlanEditing(false);
-    setDayStash(null);
-    haptic("selection");
-    setStep("HUB");
+    try{await flushTripDrafts(recordId);await refreshServerRecords();}catch(e){setError((e as Error).message);return;}
+    blankBuilder();setDate(todayISO());setChangedSinceSave(false);setSubmittedEditBanner(false);
+    setInProgressResumeStep(null);setPlanEditing(false);setEditingPlanId(null);setPlanForemanTgId(null);
+    setDayStash(null);setFixingReturnedDate(null);returnedDayStashRef.current=null;
+    haptic("selection");setStep("HUB");
   }
 
   function applyLastTrip() {
@@ -2148,7 +1954,7 @@ export function RoadTimesheet({
     const liveReservation = !planEditing && date === todayISO();
     if (liveReservation) {
       try {
-        await api.post("/api/road-timesheet/reserve/release", { date, employeeIds: ids });
+        await api.post("/api/road-timesheet/reserve/release", { draftId:recordId, date, employeeIds: ids });
       } catch (e) {
         setError((e as Error).message);
         haptic("error");
@@ -2170,7 +1976,8 @@ export function RoadTimesheet({
       pushUndo(undoLabel, async () => {
         if (liveReservation) {
           try {
-            await api.post("/api/road-timesheet/reserve", { date, employeeIds });
+            await flushTripDrafts(recordId);
+      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, employeeIds });
           } catch (e) {
             setError((e as Error).message);
             haptic("error");
@@ -3141,7 +2948,8 @@ export function RoadTimesheet({
     if (addArrivedSelected.length) {
       const mergedEmployeeIds = [...new Set([...employeeIds, ...addArrivedSelected])];
       try {
-        await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds: mergedEmployeeIds });
+        await flushTripDrafts(recordId);
+      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
       } catch (e) {
         setError((e as Error).message);
         haptic("error");
@@ -3264,7 +3072,8 @@ export function RoadTimesheet({
     const window = crewWindow && addPersonStart === "now" ? { startedAt: new Date().toISOString() } : crewWindow;
     const mergedEmployeeIds = [...new Set([...employeeIds, ...ids])];
     try {
-      await api.post("/api/road-timesheet/reserve", { date, carId, employeeIds: mergedEmployeeIds });
+      await flushTripDrafts(recordId);
+      await api.post("/api/road-timesheet/reserve", { draftId:recordId, date, carId, employeeIds: mergedEmployeeIds });
     } catch (e) {
       setError((e as Error).message);
       haptic("error");
@@ -3449,6 +3258,7 @@ export function RoadTimesheet({
   }
 
   async function loadPreview() {
+    const generation=recordGenerationRef.current;
     try {
       const res = await api.post<PayrollPreview>("/api/road-timesheet/preview", {
         odoStart: Number(odoStart),
@@ -3458,7 +3268,7 @@ export function RoadTimesheet({
         errands,
         objects: buildObjectsPayload(),
       });
-      setPreview(res);
+      if(generation===recordGenerationRef.current)setPreview(res);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -3524,9 +3334,12 @@ export function RoadTimesheet({
       // treats it as the same submission attempt instead of logging a
       // second, phantom one. A later tap (a genuinely new edit/resubmit)
       // gets a fresh key from a fresh call to save().
+      await flushTripDrafts(recordId);
       const idempotencyKey = crypto.randomUUID();
       const res = await api.post<SaveResponse>("/api/road-timesheet", {
         date,
+        draftId: recordId,
+        draftRevision: draftServerRevision(recordId),
         carId,
         odoStart: Number(odoStart),
         odoStartPhoto,
@@ -3574,17 +3387,8 @@ export function RoadTimesheet({
       // рівно такий, як на екрані.
       setChangedSinceSave(false);
       haptic("success");
-      if (fixingReturnedDate) {
-        // Виправлений день уже в базі. Затримувати бригадира на екрані
-        // підсумку не можна: автозбереження на кроці DONE не працює, а
-        // сьогоднішній день лежить лише в `dayStash` -- закритий застосунок
-        // забрав би його разом з пам'яттю вкладки. Тож віддаємо конструктор
-        // назад одразу, і чернетка сьогоднішнього дня пишеться знову.
-        setFixedDayNotice(date);
-        exitReturnedDay();
-      } else {
-        setStep("DONE");
-      }
+      blankBuilder();setFixingReturnedDate(null);setDayStash(null);returnedDayStashRef.current=null;
+      setDate(todayISO());setStep("INDEX");await refreshServerRecords();
     } catch (e) {
       setError((e as Error).message);
       haptic("error");
@@ -3728,6 +3532,36 @@ export function RoadTimesheet({
   // already-sent trip is not a trip in progress, so it does not get one either
   // (that report is the admin's to delete).
   const hasTripInProgress = editingTripSeq === null && (!!carId || employeeIds.length > 0 || plans.length > 0);
+
+  if(!draftReady) return <div className="empty-state">
+    {serverLoadError ? `Не вдалося завантажити дані: ${serverLoadError}` : "Завантажуємо поїздки із сервера…"}
+    <button className="bulk-select-btn" onClick={loadServerState}>Повторити</button>
+  </div>;
+  if(recordSave.error) return <div className="empty-state">
+    <h2>Збереження не підтверджене</h2><p>{recordSave.error}</p>
+    <p>Не закривайте застосунок. Незбережений варіант поки лише у відкритому редакторі.</p>
+    <button onClick={() => {void retryTripDraft(recordId).catch(e=>setError((e as Error).message));}}>Повторити збереження</button>
+    {recordSave.error.startsWith("Захист поїздки:")&&<button onClick={async()=>{
+      if(!(await confirmDialog("Ваш відхилений варіант збережений в історії. Відкрити актуальну серверну версію?")))return;
+      const r=await acceptServerTrip<DraftShape>(recordId);applyServerRecord(r.payload);
+    }}>Відкрити серверну версію</button>}
+  </div>;
+  if(showRecordList) return <div>
+    <h2>Окремі поїздки та чернетки звітів</h2>
+    <button onClick={()=>setShowRecordList(false)}>Назад</button>
+    {serverRecords.filter(r=>r.state==="open").map(r=><button className="cell" key={r.id} onClick={()=>openServerRecord(r.id)}>
+      {r.date} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.editingTripSeq!=null?"Редагування звіту":r.planEditing?"План":"Поїздка"}
+      <small>{r.objects.join(", ")}</small>
+    </button>)}
+    {recordOffset!==null&&<button onClick={async()=>{const r=await listTripDrafts(recordOffset);setServerRecords(v=>[...v,...r.records]);setRecordOffset(r.nextOffset);}}>Завантажити ще</button>}
+    <h3>Здані звіти</h3>
+    {reportRecords.map(r=><button className="cell" key={`${r.date}:${r.tripSeq}`} onClick={async()=>{
+      try{await flushTripDrafts(recordId);blankBuilder();setDate(r.date);setReportSelectionVersion(v=>v+1);setSubmittedTrips([]);setDayStatus(null);setShowRecordList(false);setStep("INDEX");}
+      catch(e){setError((e as Error).message);}
+    }}>{r.date} · Поїздка {r.tripSeq+1} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.status}</button>)}
+    {reportOffset!==null&&<button onClick={async()=>{const r=await api.get<{records:typeof reportRecords;nextOffset:number|null}>(`/api/trip-drafts/reports?offset=${reportOffset}`);setReportRecords(v=>[...v,...r.records]);setReportOffset(r.nextOffset);}}>Ще звіти</button>}
+
+  </div>;
 
   if (step === "DONE" && submittedTrips.length) {
     const pendingTrips = submittedTrips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
@@ -3900,6 +3734,8 @@ export function RoadTimesheet({
           </>
         )}
 
+        <div className="hint">{recordSave.pending ? "Зберігаємо на сервері… Не закривайте застосунок." : "Дані завантажені із сервера"}</div>
+        <button className="bulk-select-btn" onClick={async()=>{try{await flushTripDrafts(recordId);await refreshServerRecords();setShowRecordList(true);}catch(e){setError((e as Error).message);}}}>📂 Усі збережені поїздки й чернетки звітів</button>
         <div className="section-title">Поточні поїздки</div>
         {submittedTrips.length === 0 && !hasBuilderContent && <div className="empty-state">Сьогодні поїздок ще немає.</div>}
         {submittedTrips.map((trip) => renderTripCard(trip, trip.status !== "ЗАТВЕРДЖЕНО"))}
@@ -4015,6 +3851,7 @@ export function RoadTimesheet({
         onHome={onBack}
         onReset={hasTripInProgress ? resetTrip : undefined}
       />
+      <div role="status" className="hint">{recordSave.pending ? "Зберігаємо на сервері… Не закривайте застосунок." : "Збереження на сервері підтверджене"}</div>
       {/* Заголовок і «редагувати поїздку» в один рядок: вони про одне й те
           саме, а окремим рядком кнопка з'їдала висоту екрана без потреби. */}
       <div className="header header-row">

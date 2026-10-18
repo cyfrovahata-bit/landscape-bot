@@ -127,6 +127,13 @@
       "when": 1792091400000,
       "tag": "0017_draft_history",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792329600000,
+      "tag": "0018_independent_trip_drafts",
+      "breakpoints": true
     }
   ]
 }

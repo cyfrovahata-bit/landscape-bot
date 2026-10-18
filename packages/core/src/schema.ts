@@ -476,3 +476,28 @@ export const draftHistory = pgTable("draft_history", {
   snapshot: text("snapshot").notNull(),
   createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
 }, t => [index("draft_history_foreman_created_idx").on(t.foremanTgId, t.createdAt)]);
+
+// Independent working copies. Legacy day_drafts/history remain for rollback.
+export const tripDrafts = pgTable("trip_drafts", {
+  id: text("id").primaryKey(),
+  foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).notNull(),
+  revision: integer("revision").notNull().default(0),
+  state: text("state").notNull().default("open"),
+  payload: text("payload").notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+}, t => [index("trip_drafts_owner_idx").on(t.foremanTgId, t.updatedAt)]);
+export const tripDraftHistory = pgTable("trip_draft_history", {
+  id: serial("id").primaryKey(),
+  tripId: text("trip_id").notNull(),
+  foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).notNull(),
+  revision: integer("revision").notNull(),
+  action: text("action").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+}, t => [index("trip_draft_history_trip_idx").on(t.tripId, t.id)]);
+
+export const tripDraftOwners = pgTable("trip_draft_owners", {
+  foremanTgId: bigint("foreman_tg_id", { mode: "bigint" }).primaryKey(),
+  activeTripId: text("active_trip_id"),
+  adoptedAt: timestamp("adopted_at", { mode: "date" }).notNull().defaultNow(),
+});

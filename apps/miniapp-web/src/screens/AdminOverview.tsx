@@ -1,3 +1,4 @@
+import { DraftDatabase } from "../components/DraftDatabase";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
@@ -34,6 +35,8 @@ type Overview = { date: string; active: ActiveTrip[]; submitted: SubmittedDay[] 
  * дорозі», і зі «зданих». Саме через це один день пів дня шукали.
  */
 type Draft = {
+  id?: string;
+  revision?: number;
   foremanTgId: string;
   foremanName: string;
   date: string;
@@ -150,15 +153,16 @@ export function AdminOverview({ onBack }: { onBack: () => void }) {
     if (
       !(await confirmDialog(
         `Прибрати незавершений день?\n\n${d.foremanName} · ${d.date}\n\n` +
-          `Зникне чернетка на його телефоні — те, що він увів і не здав. ` +
+          `Чернетку буде прибрано зі списку. Її серверна історія збережеться. ` +
           `Здані звіти не зачіпаються.`,
       ))
     ) {
       return;
     }
     try {
-      await api.del(`/api/drafts/${d.foremanTgId}`);
-      setDrafts((prev) => prev.filter((x) => x.foremanTgId !== d.foremanTgId));
+      if(d.id) await api.post(`/api/trip-drafts/${encodeURIComponent(d.id)}/archive`,{baseRevision:d.revision});
+      else await api.del(`/api/drafts/${d.foremanTgId}`);
+      setDrafts((prev) => prev.filter((x) => d.id ? x.id !== d.id : x.foremanTgId !== d.foremanTgId));
       haptic("success");
     } catch (e) {
       setError((e as Error).message);
@@ -181,6 +185,7 @@ export function AdminOverview({ onBack }: { onBack: () => void }) {
         <div className="hint">Що зараз роблять бригади</div>
       </div>
 
+      <DraftDatabase />
       {error && <div className="empty-state">⚠️ {error}</div>}
 
       <div className="list">
@@ -250,7 +255,7 @@ export function AdminOverview({ onBack }: { onBack: () => void }) {
             <div className="empty-state">Таких немає.</div>
           ) : (
             pendingDrafts.map((d) => (
-              <div key={d.foremanTgId} className="list" style={{ marginTop: 8 }}>
+              <div key={d.id??d.foremanTgId} className="list" style={{ marginTop: 8 }}>
                 <div className="cell" style={{ cursor: "default" }}>
                   <span className="cell-title">👤 {shortName(d.foremanName)}</span>
                   <span style={{ display: "flex", gap: 6, alignItems: "center" }}>

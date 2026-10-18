@@ -25,6 +25,7 @@ import { statsRouter } from "./routes/stats.js";
 import { roadTimesheetRouter } from "./routes/roadTimesheet.js";
 import { tripPlansRouter } from "./routes/tripPlans.js";
 import { telemetryRouter } from "./routes/telemetry.js";
+import { tripDraftsRouter } from "./routes/tripDrafts.js";
 import { draftsRouter } from "./routes/drafts.js";
 import { pruneUiLogs } from "./uiLogFile.js";
 
@@ -423,6 +424,7 @@ apiRouter.use("/road-timesheet", roadTimesheetRouter);
 apiRouter.use("/trip-plans", tripPlansRouter);
 apiRouter.use("/telemetry", telemetryRouter);
 apiRouter.use("/drafts", draftsRouter);
+apiRouter.use("/trip-drafts", tripDraftsRouter);
 app.use("/api", apiRouter);
 
 // Serve the built mini-app frontend (apps/miniapp-web/dist) from the same

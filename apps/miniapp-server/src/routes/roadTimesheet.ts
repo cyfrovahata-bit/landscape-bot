@@ -1,3 +1,5 @@
+import { submissionDraftConflict, submissionSequence } from "../lib/tripDraftSubmission.js";
+import { validTripId } from "../lib/tripDraftIdentity.js";
 import { canFinishRecordedTrip } from "../lib/lateTripSubmission.js";
 // Тимчасовий перемикач: збережені звіти можна виправляти, нові минулі дні — ні.
 const BACKDATED_ENTRY_ENABLED = false;
@@ -44,6 +46,19 @@ import {
   type ObjectInput,
   type Errand,
 } from "../lib/dayMath.js";
+
+async function guardWorkingTrip(tx:LockedTx,owner:number,id:unknown,claim=false) {
+  const [adopted]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(owner))).for("update");
+  if(!adopted)return;
+  if(!validTripId(id))throw new ReservationConflictError("Оновіть MINI-APP: для цієї дії потрібен ID поїздки.");
+  if(adopted.activeTripId && adopted.activeTripId!==id)
+    throw new ReservationConflictError("У вас є інша поїздка з бронюваннями. Відкрийте її зі списку та завершіть перед виїздом у новій. Чернетки збережені окремо.");
+  if(claim){
+    const [record]=await tx.select().from(schema.tripDrafts).where(and(eq(schema.tripDrafts.id,id),eq(schema.tripDrafts.foremanTgId,BigInt(owner))));
+    if(!record||record.state!=="open")throw new ReservationConflictError("Спочатку дочекайтеся серверного збереження поїздки та повторіть дію.");
+  }
+  if(claim)await tx.update(schema.tripDraftOwners).set({activeTripId:id}).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(owner)));
+}
 
 /** 403s and returns true if the caller isn't an admin -- lets a route bail with `if (blockNonAdmin(req, res)) return;`. */
 function blockNonAdmin(req: import("express").Request, res: Response): boolean {
@@ -438,6 +453,7 @@ async function employeesHeldByCaller(tx: LockedTx, date: string, employeeIds: st
 type StoredTrip = {
   tripSeq: number;
   eventId: string;
+  draftId?: string;
   status: string;
   carId: string | null;
   employeeIds: string[];
@@ -465,6 +481,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
   for (const row of rows) {
     let payload: {
       tripSeq?: number;
+      draftId?: string;
       objects?: ObjectInput[];
       odoStart?: number;
       odoEnd?: number;
@@ -489,6 +506,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
     byTripSeq.set(tripSeq, {
       tripSeq,
       eventId: row.eventId,
+      draftId: payload.draftId,
       status: row.status,
       carId: row.carId,
       employeeIds,
@@ -744,6 +762,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
     employeeIds,
     objects,
     idempotencyKey,
+    draftId,
+    draftRevision,
     tripSeq,
     selfTransportIds,
     errands,
@@ -758,6 +778,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
     employeeIds: string[];
     objects: ObjectInput[];
     idempotencyKey?: string;
+    draftId?: string;
+    draftRevision?: number;
     tripSeq?: number;
     selfTransportIds?: string[];
     errands?: Errand[];
@@ -859,7 +881,18 @@ roadTimesheetRouter.post("/", async (req, res) => {
         throw new ReservationConflictError(`Деякі люди вже зайняті іншим бригадиром сьогодні: ${employeeConflicts.join(", ")}`);
       }
 
+      const [adoptedOwner]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(foremanTgId)));
+      if(adoptedOwner&&!draftId)throw new ReservationConflictError("Оновіть MINI-APP перед здачею звіту: потрібен ID поїздки.");
       const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
+      const previousForDraft = draftId ? allTripsBefore.find(t => t.draftId === draftId) : undefined;
+      // Lock the exact working record. Submission and its archive commit together.
+      const [workingDraft] = draftId && validTripId(draftId) ? await tx.select().from(schema.tripDrafts)
+        .where(and(eq(schema.tripDrafts.id,draftId),eq(schema.tripDrafts.foremanTgId,BigInt(foremanTgId)))).for('update') : [];
+      if (draftId) {
+        if (!workingDraft) throw new ReservationConflictError("Не знайдено серверну поїздку. Дані звіту не змінено.");
+        const conflict=submissionDraftConflict(workingDraft,date,tripSeq,draftRevision,previousForDraft?.eventId,eventId);
+        if(conflict)throw new ReservationConflictError(conflict==="identity"?"Звіт не відповідає відкритій поїздці.":"Версія поїздки змінилася. Перевірте серверне збереження перед здачею.");
+      }
 
       // A lost response + the client's automatic retry resends this exact
       // same request (same idempotencyKey => same eventId), with no tripSeq
@@ -873,7 +906,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
       // поїздку" button never sends one); an explicit tripSeq means "resubmit/
       // edit that specific leg", scoped so it never touches other legs' data.
       effectiveTripSeq =
-        tripSeq ?? existingForKey?.tripSeq ?? (allTripsBefore.length ? Math.max(...allTripsBefore.map((t) => t.tripSeq)) + 1 : 0);
+        submissionSequence(tripSeq,previousForDraft?.tripSeq,existingForKey?.tripSeq,allTripsBefore.map(t=>t.tripSeq));
       const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
 
       if (!BACKDATED_ENTRY_ENABLED && date < todayKyivISO() && !legPrevious) {
@@ -947,6 +980,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
           employeeIds: JSON.stringify(employeeIds ?? []),
           payload: JSON.stringify({
             tripSeq: effectiveTripSeq,
+            draftId,
             odoStart,
             odoEnd,
             km: legResult.km,
@@ -960,6 +994,14 @@ roadTimesheetRouter.post("/", async (req, res) => {
         },
         tx,
       );
+      if(draftId)await tx.update(schema.tripDraftOwners).set({activeTripId:null})
+        .where(and(eq(schema.tripDraftOwners.foremanTgId,BigInt(foremanTgId)),eq(schema.tripDraftOwners.activeTripId,draftId)));
+      if (workingDraft && workingDraft.state!=="archived") {
+        await tx.insert(schema.tripDraftHistory).values({tripId:workingDraft.id,foremanTgId:workingDraft.foremanTgId,
+          revision:workingDraft.revision,action:"submitted",payload:workingDraft.payload});
+        await tx.update(schema.tripDrafts).set({state:"archived",revision:workingDraft.revision+1,updatedAt:new Date()})
+          .where(eq(schema.tripDrafts.id,workingDraft.id));
+      }
     });
   } catch (e) {
     if (e instanceof ReservationConflictError) {
@@ -1021,6 +1063,7 @@ roadTimesheetRouter.post("/reserve", async (req, res) => {
 
   try {
     await withLock(`reserve:${date}`, async (tx) => {
+      await guardWorkingTrip(tx,foremanTgId,req.body.draftId,true);
       if (carId) {
         if (await findCarConflict(tx, date, carId, foremanTgId)) {
           throw new ReservationConflictError("Це авто вже зарезервоване іншим бригадиром на сьогодні");
@@ -1114,6 +1157,8 @@ roadTimesheetRouter.post("/reserve/release", async (req, res) => {
   const foremanTgId = req.user!.tgId;
 
   await withLock(`reserve:${date}`, async (tx) => {
+    await guardWorkingTrip(tx,foremanTgId,req.body.draftId);
+    if(req.body.releaseTrip===true)await tx.update(schema.tripDraftOwners).set({activeTripId:null}).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(foremanTgId)));
     if (carId && (await callerHoldsCar(tx, date, carId, foremanTgId))) {
       await writeEvent(
         {
@@ -1230,7 +1275,9 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
   }
   const foremanTgId = req.user!.tgId;
 
-  await writeOdometerDay({ date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto });
+  await withLock(`reserve:${date}`,async tx=>{
+  await guardWorkingTrip(tx,foremanTgId,req.body.draftId);
+  await writeOdometerDay({ date, carId, foremanTgId, startValue: odoStart, startPhoto: odoStartPhoto, endValue: odoEnd, endPhoto: odoEndPhoto },tx);
   await writeEvent({
     eventId: makeEventId("RTSRSV"),
     status: "АКТИВНА",
@@ -1238,6 +1285,7 @@ roadTimesheetRouter.post("/car-return", async (req, res) => {
     foremanTgId,
     type: "RTS_CAR_RETURN",
     carId,
+  },tx);
   });
 
   res.json({ ok: true });

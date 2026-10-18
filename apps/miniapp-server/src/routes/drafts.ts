@@ -67,7 +67,8 @@ draftsRouter.put("/", async (req, res) => {
     const [current] = await tx.select().from(schema.dayDrafts).where(eq(schema.dayDrafts.foremanTgId, foremanTgId));
     // A retry after a lost response is safe and doesn't create a second version.
     if (current?.payload === row.payload) return { ok: true, revision };
-    const conflict = draftWriteConflict(current ? JSON.parse(current.payload) : null,
+    const [adopted] = await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,foremanTgId));
+    const conflict = adopted ? 'upgrade_required' : draftWriteConflict(current ? JSON.parse(current.payload) : null,
       body.payload as Record<string, unknown>, revision, body.baseRevision, !!head?.managed);
     await tx.insert(schema.draftHistory).values({ foremanTgId, revision,
       action: conflict ? `rejected:${conflict}` : "before_write", snapshot: snapshotJson(current ?? null) });
@@ -184,11 +185,13 @@ draftsRouter.get("/all", async (req, res) => {
     res.status(403).json({ error: "Тільки для адміністратора" });
     return;
   }
-  const [rows, users, cars, employees] = await Promise.all([
+  const [rows, users, cars, employees, independent, adopted] = await Promise.all([
     db.select().from(schema.dayDrafts).orderBy(desc(schema.dayDrafts.updatedAt)),
     db.select().from(schema.users),
     db.select().from(schema.cars),
     db.select().from(schema.employees),
+    db.select().from(schema.tripDrafts).where(eq(schema.tripDrafts.state,"open")).orderBy(desc(schema.tripDrafts.updatedAt)),
+    db.select().from(schema.tripDraftOwners),
   ]);
   const nameByTgId = new Map(users.map((u) => [String(u.tgId), u.pib]));
   const carById = new Map(cars.map((c) => [c.id, c.name]));
@@ -196,7 +199,11 @@ draftsRouter.get("/all", async (req, res) => {
 
   res.json({
     ok: true,
-    drafts: rows.map((r) => {
+    drafts: [...rows.filter(r=>!adopted.some(a=>a.foremanTgId===r.foremanTgId)),...independent.map(r=>{
+      const p=JSON.parse(r.payload);
+      return {...r,date:p.date,step:p.step,carId:p.carId??"",employeeIds:JSON.stringify(p.employeeIds??[]),
+        objectNames:(p.plans??[]).map((x:any)=>x.objectName).join(", "),tripStartedAt:p.tripStartedAt?new Date(p.tripStartedAt):null};
+    })].map((r) => {
       let ids: string[] = [];
       try {
         ids = JSON.parse(r.employeeIds);
@@ -204,6 +211,8 @@ draftsRouter.get("/all", async (req, res) => {
         ids = [];
       }
       return {
+        id: "id" in r ? r.id : undefined,
+        revision: "revision" in r ? r.revision : undefined,
         foremanTgId: String(r.foremanTgId),
         foremanName: nameByTgId.get(String(r.foremanTgId)) ?? String(r.foremanTgId),
         date: r.date,
