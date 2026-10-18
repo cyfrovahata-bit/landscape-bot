@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
+import { currentTripRecords } from "../lib/currentTripRecords";
 import { carMovementError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
@@ -391,13 +392,9 @@ export function RoadTimesheet({
   async function onBack(){try{await flushTripDrafts(recordId);leaveScreen();}catch(e){setError((e as Error).message);}}
   const [recordId,setRecordId] = useState(() => crypto.randomUUID() as string);
   const [serverRecords,setServerRecords] = useState<TripDraftSummary[]>([]);
-  const [reportSelectionVersion,setReportSelectionVersion]=useState(0);
-  const [reportRecords,setReportRecords]=useState<Array<{date:string;tripSeq:number;status:string;carId:string}>>([]);
-  const [reportOffset,setReportOffset]=useState<number|null>(null);
   const [recordOffset,setRecordOffset] = useState<number|null>(null);
   const [recordSave,setRecordSave] = useState({pending:0,error:""});
   const [serverLoadError,setServerLoadError] = useState("");
-  const [showRecordList,setShowRecordList] = useState(false);
   useEffect(() => subscribeDraftSave(setRecordSave),[]);
   const [step, setStep] = useState<Step>("INDEX");
   const [now, setNow] = useState(Date.now());
@@ -784,8 +781,8 @@ export function RoadTimesheet({
   }, [step]);
 
   async function refreshServerRecords() {
-    const [r,reports]=await Promise.all([listTripDrafts(),api.get<{records:typeof reportRecords;nextOffset:number|null}>("/api/trip-drafts/reports")]);
-    setServerRecords(r.records);setRecordOffset(r.nextOffset);setReportRecords(reports.records);setReportOffset(reports.nextOffset);
+    const r=await listTripDrafts();
+    setServerRecords(r.records);setRecordOffset(r.nextOffset);
   }
   function applyServerRecord(d:DraftShape) {
     restoreBuilder({...d,recordId:d.recordId,plans:(d.plans??[]).map(normalizeDraftPlan),
@@ -807,7 +804,7 @@ export function RoadTimesheet({
       await flushTripDrafts(recordId);
       const r=await readTripDraft<DraftShape>(id);
       if(r.state!=="open") {setError("Це архівна копія. Зданий звіт відкривайте через його картку.");return;}
-      applyServerRecord(r.payload);setShowRecordList(false);
+      applyServerRecord(r.payload);
     } catch(e) {setError((e as Error).message);}
   }
   async function loadServerState() {
@@ -971,7 +968,7 @@ export function RoadTimesheet({
       .catch(() => { if (!cancelled) setDayStatus({ hasSubmission: false, approved: false, returned: false, returnReason: null, eventId: null, editRequested: false }); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => { cancelled = true; };
-  }, [date, draftReady, reportSelectionVersion]);
+  }, [date, draftReady]);
 
   useEffect(() => {
     if (!draftReady || step === "DONE" || !(carId || employeeIds.length || plans.length)) return;
@@ -3546,23 +3543,6 @@ export function RoadTimesheet({
       const r=await acceptServerTrip<DraftShape>(recordId);applyServerRecord(r.payload);
     }}>Відкрити серверну версію</button>}
   </div>;
-  if(showRecordList) return <div>
-    <h2>Окремі поїздки та чернетки звітів</h2>
-    <button onClick={()=>setShowRecordList(false)}>Назад</button>
-    {serverRecords.filter(r=>r.state==="open").map(r=><button className="cell" key={r.id} onClick={()=>openServerRecord(r.id)}>
-      {r.id.startsWith("import:")?"Копія зі старого телефона · ":""}{r.date} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.editingTripSeq!=null?"Редагування звіту":r.planEditing?"План":"Поїздка"}
-      <small>{r.objects.join(", ")}</small>
-    </button>)}
-    {recordOffset!==null&&<button onClick={async()=>{const r=await listTripDrafts(recordOffset);setServerRecords(v=>[...v,...r.records]);setRecordOffset(r.nextOffset);}}>Завантажити ще</button>}
-    <h3>Здані звіти</h3>
-    {reportRecords.map(r=><button className="cell" key={`${r.date}:${r.tripSeq}`} onClick={async()=>{
-      try{await flushTripDrafts(recordId);blankBuilder();setDate(r.date);setReportSelectionVersion(v=>v+1);setSubmittedTrips([]);setDayStatus(null);setShowRecordList(false);setStep("INDEX");}
-      catch(e){setError((e as Error).message);}
-    }}>{r.date} · Поїздка {r.tripSeq+1} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.status}</button>)}
-    {reportOffset!==null&&<button onClick={async()=>{const r=await api.get<{records:typeof reportRecords;nextOffset:number|null}>(`/api/trip-drafts/reports?offset=${reportOffset}`);setReportRecords(v=>[...v,...r.records]);setReportOffset(r.nextOffset);}}>Ще звіти</button>}
-
-  </div>;
-
   if (step === "DONE" && submittedTrips.length) {
     const pendingTrips = submittedTrips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
     const approvedTrips = submittedTrips.filter((t) => t.status === "ЗАТВЕРДЖЕНО");
@@ -3734,11 +3714,22 @@ export function RoadTimesheet({
           </>
         )}
 
-        <div className="hint">{recordSave.pending ? "Зберігаємо на сервері… Не закривайте застосунок." : "Дані завантажені із сервера"}</div>
-        <button className="bulk-select-btn" onClick={async()=>{try{await flushTripDrafts(recordId);await refreshServerRecords();setShowRecordList(true);}catch(e){setError((e as Error).message);}}}>📂 Усі збережені поїздки й чернетки звітів</button>
         <div className="section-title">Поточні поїздки</div>
-        {submittedTrips.length === 0 && !hasBuilderContent && <div className="empty-state">Сьогодні поїздок ще немає.</div>}
+        {submittedTrips.length === 0 && !hasBuilderContent && currentTripRecords(serverRecords,recordId).length === 0 && <div className="empty-state">Сьогодні поїздок ще немає.</div>}
         {submittedTrips.map((trip) => renderTripCard(trip, trip.status !== "ЗАТВЕРДЖЕНО"))}
+        {currentTripRecords(serverRecords,recordId).map(r => (
+          <button className="cell" key={r.id} onClick={() => openServerRecord(r.id)}>
+            <span className="cell-title">🚧 {cars.find(c => c.id === r.carId)?.name || "Нова поїздка"}
+              <span className="cell-sub" style={{display:"block"}}>{r.date} · {r.objects.join(", ")}</span>
+            </span>
+            <span className="badge warn">▶️ Продовжити</span>
+          </button>
+        ))}
+        {recordOffset !== null && <button className="back-btn" onClick={async() => {
+          try {const r=await listTripDrafts(recordOffset);setServerRecords(v=>[...v,...r.records]);setRecordOffset(r.nextOffset);}
+          catch(e){setError((e as Error).message);}
+        }}>Ще поточні поїздки</button>}
+
         {/* Whatever the builder is holding, there is ALWAYS a way back into it
             from here, and always a way to drop it.
             This card used to hide while a plan or a submitted trip was being
@@ -3851,7 +3842,6 @@ export function RoadTimesheet({
         onHome={onBack}
         onReset={hasTripInProgress ? resetTrip : undefined}
       />
-      <div role="status" className="hint">{recordSave.pending ? "Зберігаємо на сервері… Не закривайте застосунок." : "Збереження на сервері підтверджене"}</div>
       {/* Заголовок і «редагувати поїздку» в один рядок: вони про одне й те
           саме, а окремим рядком кнопка з'їдала висоту екрана без потреби. */}
       <div className="header header-row">
