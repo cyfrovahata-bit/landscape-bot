@@ -5,7 +5,7 @@ import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPa
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
 import { currentTripRecords } from "../lib/currentTripRecords";
-import { carMovementError, initialCarRiders, selectedDestination } from "../lib/driving";
+import { carMovementError, carRiderRemovalError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
 import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft, flushTripDrafts, archiveTripDraft, listTripDrafts, readTripDraft, subscribeDraftSave, retryTripDraft, acceptServerTrip, draftServerRevision, type TripDraftSummary } from "../lib/draftMirror";
@@ -1875,13 +1875,25 @@ export function RoadTimesheet({
   }
 
   // ---------- people helpers ----------
+  const pendingRiderRemovals = useRef(new Set<string>());
+  function canRemoveCarRiders(ids: string[]): boolean {
+    const removing = [...new Set([...ids, ...pendingRiderRemovals.current])];
+    const message = carRiderRemovalError(onboard, removing, {tripStartedAt, carAtObjectId, odoEnd});
+    if (!message) return true;
+    setError(message);
+    void alertDialog(message);
+    haptic("error");
+    return false;
+  }
+
   // The single place an employee's physical location ever changes. Every
   // drop-off/pick-up/transfer/removal funnels through this so "an employee
   // is never in two places at once" is guaranteed by construction, not by
   // every call site remembering to clean up both `onboard` and every
   // object's `here` array by hand.
   function moveEmployeesTo(ids: string[], location: Location) {
-    if (!ids.length) return;
+    if (!ids.length) return true;
+    if (location.kind !== "onboard" && !canRemoveCarRiders(ids)) return false;
     const idSet = new Set(ids);
     setOnboard((prev) => {
       const rest = prev.filter((id) => !idSet.has(id));
@@ -1896,6 +1908,7 @@ export function RoadTimesheet({
         return { ...p, here: isTarget ? [...new Set([...rest, ...ids])] : rest };
       }),
     );
+    return true;
   }
 
   // Removes every recorded session for these employees, everywhere. Used
@@ -1948,6 +1961,18 @@ export function RoadTimesheet({
   // unrelated route edits made in the few seconds before the undo is tapped.
   async function removeEmployeesFromTrip(ids: string[], undoLabel: string) {
     if (!ids.length) return;
+    // Reject before releasing reservations or touching sessions and roster.
+    if (!canRemoveCarRiders(ids)) return;
+    if (ids.some(id => pendingRiderRemovals.current.has(id))) return;
+    ids.forEach(id => pendingRiderRemovals.current.add(id));
+    try {
+      await removeEmployeesFromTripUnchecked(ids, undoLabel);
+    } finally {
+      ids.forEach(id => pendingRiderRemovals.current.delete(id));
+    }
+  }
+
+  async function removeEmployeesFromTripUnchecked(ids: string[], undoLabel: string) {
     const liveReservation = !planEditing && date === todayISO();
     if (liveReservation) {
       try {
@@ -1971,6 +1996,8 @@ export function RoadTimesheet({
         .filter((p) => p.sessions.some((s) => ids.includes(s.employeeId)))
         .map((p) => ({ objectId: p.objectId, sessions: p.sessions.filter((s) => ids.includes(s.employeeId)) }));
       pushUndo(undoLabel, async () => {
+        const leavingCar = [...priorLocationById].filter(([,loc]) => loc.kind !== "onboard").map(([id]) => id);
+        if (!canRemoveCarRiders(leavingCar)) return;
         if (liveReservation) {
           try {
             await flushTripDrafts(recordId);
@@ -2058,6 +2085,7 @@ export function RoadTimesheet({
     if (!plan) return;
     if (plan.works.length || plan.sessions.length || plan.here.length) {
       pushUndo(`Обʼєкт "${plan.objectName}" видалено`, () => {
+        if (!canRemoveCarRiders(plan.here)) return;
         // Replace, don't just append -- if the same object was re-added
         // (fresh and blank) via PICK_OBJECTS before this undo was tapped,
         // appending the old snapshot on top would leave two plans sharing
@@ -2089,6 +2117,7 @@ export function RoadTimesheet({
     const removedPlans = plans;
     if (removedPlans.some((p) => p.works.length || p.sessions.length || p.here.length)) {
       pushUndo("Маршрут очищено", () => {
+        if (!canRemoveCarRiders(removedPlans.flatMap(p => p.here))) return;
         const removedIds = new Set(removedPlans.map((p) => p.objectId));
         setPlans((prev) => [...prev.filter((p) => !removedIds.has(p.objectId)), ...removedPlans]);
         for (const p of removedPlans) {
@@ -2625,7 +2654,7 @@ export function RoadTimesheet({
   }
 
   function roadsideDropoff(employeeId: string) {
-    moveEmployeesTo([employeeId], { kind: "nowhere" });
+    if (!moveEmployeesTo([employeeId], { kind: "nowhere" })) return;
     haptic("light");
     logChange(`Висаджено по дорозі: ${employeeName(employeeId)}`);
   }
@@ -2940,6 +2969,7 @@ export function RoadTimesheet({
   // the drop-off half silently mismatched with the server.
   async function confirmDropAndArrived() {
     if (!atObjectId || (!dropSelected.length && !addArrivedSelected.length)) return;
+    if (!canRemoveCarRiders([...dropSelected, ...addArrivedSelected])) return;
     const objectName = currentAtPlan()?.objectName ?? "";
 
     if (addArrivedSelected.length) {
@@ -3009,7 +3039,7 @@ export function RoadTimesheet({
     const moving = new Set(moveSelected);
     const now = new Date().toISOString();
     const nowMs = Date.now();
-    moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId });
+    if (!moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId })) return;
     setPlans((prev) =>
       prev.map((p) => {
         if (p.objectId === moveTargetId) return { ...p, visited: true };
@@ -3050,6 +3080,7 @@ export function RoadTimesheet({
   async function confirmAddPeople() {
     if (!atObjectId || !addPersonSelected.length) return;
     const ids = [...addPersonSelected];
+    if (!canRemoveCarRiders(ids)) return;
     const busy = ids.filter(id => busyEmployees.has(id));
     if (busy.length) {
       setError(busy.map(id => `${employeeName(id)} — у бригадира ${busyEmployees.get(id)}`).join("; "));
@@ -3130,7 +3161,7 @@ export function RoadTimesheet({
     const toName = plans.find((p) => p.objectId === moveTargetId)?.objectName ?? "";
     const count = moveSelected.length;
     const moving = new Set(moveSelected);
-    moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId });
+    if (!moveEmployeesTo(moveSelected, { kind: "object", objectId: moveTargetId })) return;
     setPlans((prev) =>
       prev.map((p) => {
         if (p.objectId === atObjectId) {
