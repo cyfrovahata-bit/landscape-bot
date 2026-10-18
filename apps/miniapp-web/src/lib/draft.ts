@@ -16,7 +16,7 @@ export async function importLegacyDraft(upload:(id:string,payload:Record<string,
     if(p.dayStash)await walk(p.dayStash,`${suffix}-stash`);
     if(!(p.carId||p.employeeIds?.length||p.plans?.length||p.tripStartedAt))return;
     const id=`import:${getInitDataUser()?.id}:${hash}:${suffix}`;
-    await upload(id,{...p,recordId:id,dayStash:null,fixingReturnedDate:null});
+    await upload(id,{...p,recordId:id,legacySavedAt:stored.savedAt??0,dayStash:null,fixingReturnedDate:null});
   };
   await walk(stored.data,'current');
   // Do not clear if an old open tab changed the source during import.

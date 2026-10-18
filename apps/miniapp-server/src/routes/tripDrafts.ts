@@ -113,13 +113,24 @@ tripDraftsRouter.put('/:id', async (req,res) => {
     if (row && row.foremanTgId!==owner) return {status:404,error:'Поїздку не знайдено.'};
     const payload=JSON.stringify({...p,dayStash:null,fixingReturnedDate:null});
     // Lost acknowledgements may be retried without creating a new revision.
-    if (row?.state==='open' && row.payload===payload) return {status:200,revision:row.revision};
+    if (row && (row.state==='open'||id.startsWith('import:')) && row.payload===payload) return {status:200,revision:row.revision};
     const conflict = row?.state==='archived' ? 'archived' : tripDraftConflict(row?JSON.parse(row.payload):null,p,row?.revision??0,req.body.baseRevision);
     await tx.insert(history).values({tripId:id,foremanTgId:owner,revision:row?.revision??0,action:conflict?`rejected:${conflict}`:'before_write',payload:row?.payload??'null'});
     await tx.insert(history).values({tripId:id,foremanTgId:owner,revision:(row?.revision??0)+(conflict?0:1),action:conflict?'rejected_incoming':'write',payload});
     if (conflict) return {status:409,error:'Захист поїздки: версія змінилася. Ваш варіант збережено в історії. Відкрийте список поїздок для перевірки.',revision:row?.revision??0};
     const revision=(row?.revision??0)+1;
-    await tx.insert(table).values({id,foremanTgId:owner,revision,payload,updatedAt:new Date()})
+    let state='open';
+    // Old completed local copies must never be offered as a new payable trip.
+    if(!row&&id.startsWith('import:')){
+      const events=await tx.select().from(schema.events).where(and(eq(schema.events.foremanTgId,owner),eq(schema.events.date,p.date),eq(schema.events.type,'RTS_SAVE')));
+      if(events.some(e=>{
+        const saved=JSON.parse(e.payload??'{}');
+        if(e.ts.getTime()<Number(p.legacySavedAt??0))return false;
+        return p.editingTripSeq!=null?(saved.tripSeq??0)===p.editingTripSeq:
+          !!p.odoEnd&&e.carId===p.carId&&Number(saved.odoStart)===Number(p.odoStart)&&Number(saved.odoEnd)===Number(p.odoEnd);
+      }))state='archived';
+    }
+    await tx.insert(table).values({id,foremanTgId:owner,revision,payload,state,updatedAt:new Date()})
       .onConflictDoUpdate({target:table.id,set:{payload,revision,updatedAt:new Date()}});
     return {status:200,revision};
   });

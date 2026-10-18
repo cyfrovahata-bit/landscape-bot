@@ -3550,7 +3550,7 @@ export function RoadTimesheet({
     <h2>Окремі поїздки та чернетки звітів</h2>
     <button onClick={()=>setShowRecordList(false)}>Назад</button>
     {serverRecords.filter(r=>r.state==="open").map(r=><button className="cell" key={r.id} onClick={()=>openServerRecord(r.id)}>
-      {r.date} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.editingTripSeq!=null?"Редагування звіту":r.planEditing?"План":"Поїздка"}
+      {r.id.startsWith("import:")?"Копія зі старого телефона · ":""}{r.date} · {cars.find(c=>c.id===r.carId)?.name??r.carId} · {r.editingTripSeq!=null?"Редагування звіту":r.planEditing?"План":"Поїздка"}
       <small>{r.objects.join(", ")}</small>
     </button>)}
     {recordOffset!==null&&<button onClick={async()=>{const r=await listTripDrafts(recordOffset);setServerRecords(v=>[...v,...r.records]);setRecordOffset(r.nextOffset);}}>Завантажити ще</button>}

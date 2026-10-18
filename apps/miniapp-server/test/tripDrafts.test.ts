@@ -80,6 +80,12 @@ test('HTTP server and real PostgreSQL engine: isolation, ownership, stale versio
   assert.equal(seen.size,1100);
   await pg.query("INSERT INTO events(event_id,status,ts,date,foreman_tg_id,type,car_id,payload) VALUES ('test-report','АКТИВНА',now(),'2026-10-15',7,'RTS_SAVE','CAR_2',$1)",[JSON.stringify({tripSeq:0})]);
   assert.equal((await request('/reports')).body.records.length,1);
+  const importedId='import:7:completed:current';
+  const oldCompleted={...payload(importedId,'2026-10-15'),editingTripSeq:0,legacySavedAt:0};
+  assert.equal((await request(`/${importedId}`,'PUT',{payload:oldCompleted,baseRevision:0})).status,200);
+  assert.equal((await request(`/${importedId}`)).body.state,'archived');
+  assert.equal((await request(`/${importedId}`,'PUT',{payload:oldCompleted,baseRevision:0})).status,200);
+
   const opened=await request('/open-report','POST',{date:'2026-10-15',tripSeq:0});
   assert.equal(opened.status,200);assert.equal(opened.body.id,'report:7:2026-10-15:0');
   assert.equal((await request('/open-report','POST',{date:'2026-10-15',tripSeq:0},8)).status,409);
