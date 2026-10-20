@@ -10,7 +10,8 @@ import { fetchDayReports, fetchReturnedReports, confirmedNoTrips, type ReportLis
 import { carMovementError, carRiderRemovalError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
-import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft, flushTripDrafts, archiveTripDraft, listTripDrafts, readTripDraft, subscribeDraftSave, retryTripDraft, acceptServerTrip, draftServerRevision, type TripDraftSummary } from "../lib/draftMirror";
+import { mirrorDraft, clearMirroredDraft, fetchMirroredDraft, flushTripDrafts, archiveTripDraft, listTripDrafts, readTripDraft, subscribeDraftSave, retryTripDraft, acceptServerTrip, draftServerRevision, retryTransientTripDrafts, refreshCleanTripDraft, adoptRefreshedTrip, type TripDraftSummary } from "../lib/draftMirror";
+import { onAppResume } from '../lib/resume';
 import { alertDialog, ask3Dialog, askDialog, confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade, shortName, surnameInitial, roleTagClass, roleRank, findMyEmployeeId, type EmployeeRole } from "../lib/employee";
 import { groupWorks } from "../lib/works";
@@ -395,7 +396,10 @@ export function RoadTimesheet({
   const [recordId,setRecordId] = useState(() => crypto.randomUUID() as string);
   const [serverRecords,setServerRecords] = useState<TripDraftSummary[]>([]);
   const [recordOffset,setRecordOffset] = useState<number|null>(null);
-  const [recordSave,setRecordSave] = useState({pending:0,error:""});
+  const [recordSave,setRecordSave] = useState({pending:0,error:"",failedId:""});
+  const [resumeRefreshing,setResumeRefreshing] = useState(false);
+  const [resumeError,setResumeError] = useState('');
+  const resumeRefreshRef=useRef<()=>void>(()=>{});
   const [serverLoadError,setServerLoadError] = useState("");
   useEffect(() => subscribeDraftSave(setRecordSave),[]);
   const [step, setStep] = useState<Step>("INDEX");
@@ -829,6 +833,49 @@ export function RoadTimesheet({
     } catch(e) {setServerLoadError((e as Error).message);}
   }
   useEffect(() => {void loadServerState();},[]);
+
+  useEffect(() => {
+    let cancelled=false,refreshing=false;
+    setResumeRefreshing(false);setResumeError('');
+    const refresh=async()=>{
+      if(!draftReady||refreshing||document.visibilityState==='hidden')return;
+      refreshing=true;setResumeRefreshing(true);setResumeError('');
+      const editorGeneration=recordGenerationRef.current;
+      try {
+        // A pending local edit must be acknowledged (or remain blocked), never replaced by a GET.
+        await retryTransientTripDrafts();
+        await flushTripDrafts(recordId);
+        const [record,records,plansResponse]=await Promise.allSettled([
+          refreshCleanTripDraft<DraftShape>(recordId),listTripDrafts(),api.get<{plans:TripPlan[];plannedResources:PlannedResources}>('/api/trip-plans'),
+        ]);
+        if(cancelled||editorGeneration!==recordGenerationRef.current||document.hidden)return;
+        if(records.status==='fulfilled'){setServerRecords(records.value.records);setRecordOffset(records.value.nextOffset);}
+        if(plansResponse.status==='fulfilled'){
+          setTripPlans(plansResponse.value.plans);
+          setPlannedResources(plansResponse.value.plannedResources??{cars:[],employees:[]});
+        }
+        if(record.status==='fulfilled'&&record.value&&adoptRefreshedTrip(record.value)) {
+          setResumeRefreshing(false);
+          if(record.value.state==='archived'){blankBuilder();setStep('INDEX');}
+          else {applyServerRecord(record.value.payload);}
+        }
+        const failed=[record,records,plansResponse].find(result=>result.status==='rejected');
+        if(failed?.status==='rejected')throw failed.reason;
+        setReportReload(value=>value+1);
+        fetchCarStatus();fetchPeopleStatus();
+      }catch(error){if(!cancelled)setResumeError((error as Error).message);}
+      finally{refreshing=false;if(!cancelled)setResumeRefreshing(false);}
+    };
+    resumeRefreshRef.current=()=>{void refresh();};
+    const stop=onAppResume(()=>{void refresh();});
+    const sessionReady=()=>{void refresh();};
+    window.addEventListener('greenhand-session-ready',sessionReady);
+    return()=>{cancelled=true;stop();window.removeEventListener('greenhand-session-ready',sessionReady);};
+    // The record identity owns cancellation; refresh reads no payroll or route fields from its closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[recordId,draftReady,date,liveReservations]);
+
+  useEffect(()=>{if(draftReady&&step==='INDEX')setReportReload(value=>value+1);},[step,draftReady]);
 
   // Tells the server roughly where the brigade is, so an admin can watch a day
   // that has not been submitted yet -- until RTS_SAVE the server knows only
@@ -3607,11 +3654,23 @@ export function RoadTimesheet({
   if(recordSave.error) return <div className="empty-state">
     <h2>Збереження не підтверджене</h2><p>{recordSave.error}</p>
     <p>Не закривайте застосунок. Незбережений варіант поки лише у відкритому редакторі.</p>
-    <button onClick={() => {void retryTripDraft(recordId).catch(e=>setError((e as Error).message));}}>Повторити збереження</button>
+    <p>Після відновлення зв’язку збереження повториться автоматично. Конфлікт версій автоматично не перезаписується.</p>
+    <button onClick={() => {void retryTripDraft(recordSave.failedId||recordId).catch(e=>setError((e as Error).message));}}>Повторити збереження</button>
     {recordSave.error.startsWith("Захист поїздки:")&&<button onClick={async()=>{
-      if(!(await confirmDialog("Ваш відхилений варіант збережений в історії. Відкрити актуальну серверну версію?")))return;
-      const r=await acceptServerTrip<DraftShape>(recordId);applyServerRecord(r.payload);
+      if(!(await confirmDialog("Відкрити актуальну серверну версію? Вона замінить відкритий редактор. Останні непідтверджені зміни можуть бути лише в цій вкладці.")))return;
+      const failedId=recordSave.failedId||recordId;
+      const r=await acceptServerTrip<DraftShape>(failedId);
+      if(failedId===recordId) {
+        if(r.state==='open')applyServerRecord(r.payload);
+        else {blankBuilder();setStep('INDEX');await refreshServerRecords();setReportReload(value=>value+1);}
+      }
     }}>Відкрити серверну версію</button>}
+  </div>;
+  if(resumeRefreshing||resumeError)return <div className="empty-state" role="status">
+    <h2>{resumeRefreshing?'Оновлюємо поїздку із сервера…':'Не вдалося оновити поїздку'}</h2>
+    {resumeError&&<p>{resumeError}</p>}
+    <p>Відкриті дані залишаються в цій вкладці.</p>
+    <button disabled={resumeRefreshing} onClick={()=>resumeRefreshRef.current()}>Повторити оновлення</button>
   </div>;
   if (step === "DONE" && submittedTrips.length) {
     const pendingTrips = submittedTrips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");

@@ -1,10 +1,16 @@
 import { getInitData } from "./telegram";
+import { ApiError, withRequestDeadline } from './requestErrors';
+
+const authListeners = new Set<(message: string) => void>();
+export function subscribeAuthFailure(callback: (message: string) => void) {
+  authListeners.add(callback); return () => { authListeners.delete(callback); };
+}
 
 // In production the API is served from the same origin as the frontend
 // (miniapp-server serves both), so an empty base means same-origin relative
 // requests. VITE_API_BASE_URL only needs to be set for local `vite dev`,
 // where the frontend and API run on different ports.
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
 // Field work means patchy signal between objects. A plain fetch failure
 // there (a TypeError -- the request never reached the server, as opposed to
@@ -58,7 +64,7 @@ function messageForStatus(status: number): string {
     return "Сервер перезапускається. Зачекайте кілька секунд і спробуйте ще раз — дані не втрачено.";
   }
   if (status === 401) {
-    return "Не вдалося підтвердити вхід через Telegram. Закрийте всі вкладки MINI-APP кнопкою × біля їхньої назви, потім відкрийте додаток заново через кнопку в чаті з ботом. Стрілка лише згортає вкладку. Якщо помилка повториться, повідомте адміністратора.";
+    return "Потрібно поновити вхід через Telegram. Не закривайте редактор із непідтвердженими змінами. Відкрийте додаток через кнопку бота в новій вкладці, потім поверніться сюди й повторіть перевірку входу.";
   }
   if (status === 403) return "Немає доступу. Закрийте застосунок повністю і відкрийте знову.";
   if (status === 413) return "Файл завеликий.";
@@ -80,23 +86,31 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     for (let i = 0; i < delays.length; i++) {
       if (delays[i]) await sleep(delays[i]);
       try {
-        const res = await fetch(`${API_BASE}${path}`, {
-          ...options,
-          headers: {
-            "Content-Type": "application/json",
-            "X-Telegram-Init-Data": getInitData(),
-            ...options.headers,
-          },
-        });
+        const perform = async (signal?: AbortSignal) => {
+          const res = await fetch(`${API_BASE}${path}`, {
+            ...options,
+            signal,
+            credentials: 'same-origin',
+            headers: {
+              "Content-Type": "application/json",
+              "X-Telegram-Init-Data": getInitData(),
+              "X-GreenHand-Client": "miniapp",
+              ...options.headers,
+            },
+          });
 
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          // Auth middleware returns technical English text; show actionable
-          // instructions even when that response contains an error message.
-          throw new Error(res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status));
-        }
-
-        const data = (await res.json()) as T;
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            const message = res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status);
+            if (res.status === 401 || res.status === 403) authListeners.forEach(listener => listener(message));
+            throw new ApiError(message, res.status);
+          }
+          return (await res.json()) as T;
+        };
+        // Bound reads and idempotent draft PUTs. Approval/export and other
+        // existing mutations keep their original duration and retry policy.
+        const data = !isMutation || (options.method === 'PUT' && path.startsWith('/api/trip-drafts/'))
+          ? await withRequestDeadline(perform) : await perform();
         notifyOk();
         return data;
       } catch (e) {
@@ -104,7 +118,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
         // A real HTTP/server error (thrown above) shouldn't be retried --
         // it'll just fail the same way again. Only network-level failures
         // (offline, DNS, connection dropped) get another attempt.
-        if (!(e instanceof TypeError)) throw e;
+        if (!(e instanceof TypeError) && !(e instanceof Error && e.name === 'AbortError')) throw e;
       }
     }
     setSyncStatus("offline");
@@ -124,13 +138,16 @@ async function upload<T>(path: string, file: File | Blob, fieldName: string): Pr
   try {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
-      headers: { "X-Telegram-Init-Data": getInitData() },
+      credentials: 'same-origin',
+      headers: { "X-Telegram-Init-Data": getInitData(), "X-GreenHand-Client": "miniapp" },
       body: form,
     });
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status));
+      const message = res.status === 401 ? messageForStatus(401) : body.error || messageForStatus(res.status);
+      if (res.status === 401 || res.status === 403) authListeners.forEach(listener => listener(message));
+      throw new ApiError(message, res.status);
     }
 
     const data = await res.json();

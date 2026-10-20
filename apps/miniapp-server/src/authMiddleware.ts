@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
-import { validateInitData, db, schema } from "@landscape/core";
+import { validateInitData, db, schema, config } from "@landscape/core";
 import { eq } from "drizzle-orm";
+import { appSessionCodec, SESSION_COOKIE, SESSION_IDLE_SECONDS, sessionCookieValue } from './lib/appSession.js';
 
 export type AuthedUser = {
   tgId: number;
@@ -45,26 +46,48 @@ export function normRole(v: string): "ADMIN" | "BRIGADIER" {
  * the user against the КОРИСТУВАЧІ dictionary (mirrored in Postgres) exactly
  * like the bot's hydrateAuth does — same access rules, same source of truth.
  */
-export async function requireTelegramAuth(req: Request, res: Response, next: NextFunction) {
-  const initData = req.header("x-telegram-init-data");
-  if (!initData) {
-    res.status(401).json({ error: "Missing X-Telegram-Init-Data header" });
-    return;
-  }
-
-  const validated = validateInitData(initData);
-  if (!validated) {
-    res.status(401).json({ error: "Invalid or expired Telegram initData" });
-    return;
-  }
-
-  const [row] = await db.select().from(schema.users).where(eq(schema.users.tgId, BigInt(validated.user.id))).limit(1);
-
-  if (!row || !row.active) {
-    res.status(403).json({ error: "Access denied: not in КОРИСТУВАЧІ or inactive" });
-    return;
-  }
-
-  req.user = { tgId: Number(row.tgId), pib: row.pib, role: normRole(row.role) };
-  next();
+export function createTelegramAuth(options: {
+  secret: string;
+  validate: typeof validateInitData;
+  findUser: (id: number) => Promise<{ tgId: bigint; pib: string; role: string; active: boolean } | undefined>;
+  now?: () => number;
+}) {
+  const sessions = appSessionCodec(options.secret);
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const now = Math.floor((options.now?.() ?? Date.now()) / 1000);
+      const validated = options.validate(req.header('x-telegram-init-data') ?? '');
+      const session = sessions.read(sessionCookieValue(req.header('cookie')), now);
+      // A freshly authenticated Telegram account takes precedence over an older account cookie.
+      const sameAccount = !validated || validated.user.id === session?.userId;
+      const usableSession = sameAccount ? session : null;
+      const userId = validated?.user.id ?? usableSession?.userId;
+      if (!userId) { res.status(401).json({ error: 'Telegram sign-in required' }); return; }
+      if (!validated && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+        const origin = req.header('origin');
+        let sameOrigin = !origin;
+        try { if (origin) sameOrigin = new URL(origin).host === req.get('host') && new URL(origin).protocol === 'https:'; } catch { sameOrigin = false; }
+        if (req.header('x-greenhand-client') !== 'miniapp' || !sameOrigin) {
+          res.status(403).json({ error: 'Invalid session request origin' }); return;
+        }
+      }
+      const row = await options.findUser(userId);
+      if (!row || !row.active) { res.status(403).json({ error: 'Access denied: not in КОРИСТУВАЧІ or inactive' }); return; }
+      req.user = { tgId: Number(row.tgId), pib: row.pib, role: normRole(row.role) };
+      // Renew at most twice daily. Absolute expiry still requires a fresh Telegram login.
+      if (!usableSession || usableSession.expiresAt - now < SESSION_IDLE_SECONDS - 12 * 3600) {
+        const token = sessions.issue(userId, now, usableSession?.startedAt);
+        const renewed = sessions.read(token, now)!;
+        // Telegram Web may embed the app: partition the cookie to that top-level site.
+        // Cookie-authenticated mutations still require our custom header and exact origin above.
+        res.cookie(SESSION_COOKIE, token, { httpOnly: true, secure: true, sameSite: 'none', partitioned: true, path: '/', maxAge: (renewed.expiresAt - now) * 1000 });
+      }
+      res.set('Cache-Control', 'no-store');
+      next();
+    } catch (error) { next(error); }
+  };
 }
+
+export const requireTelegramAuth = createTelegramAuth({ secret: config.botToken, validate: validateInitData,
+  findUser: async id => (await db.select().from(schema.users).where(eq(schema.users.tgId, BigInt(id))).limit(1))[0],
+});

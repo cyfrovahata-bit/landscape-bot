@@ -1,7 +1,9 @@
 import { BACKDATED_ENTRY_ENABLED } from "./lib/features";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { initTelegramApp, getInitDataUser } from "./lib/telegram";
-import { api, type Me } from "./lib/api";
+import { api, subscribeAuthFailure, type Me } from "./lib/api";
+import { startAutomaticDraftRetry, retryAuthenticatedTripDrafts } from './lib/draftMirror';
+import { onAppResume } from './lib/resume';
 import { Menu, type Screen } from "./screens/Menu";
 import { Logistics } from "./screens/Logistics";
 import { Materials } from "./screens/Materials";
@@ -31,13 +33,34 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("menu");
   const [toast, setToast] = useState<string | null>(null);
   const [me, setMe] = useState<Me | null>(null);
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(true);
+  const identityRefreshRef=useRef<Promise<void>|null>(null);
   const [approvalFocus, setApprovalFocus] = useState<{ date: string; foremanTgId: number } | null>(null);
 
   // Журнал дій. Тимчасово, на час обкатки: один слухач на весь застосунок
   // замість виклику в кожній кнопці.
   useEffect(() => {
     startTracking();
+    return startAutomaticDraftRetry();
   }, []);
+
+  async function refreshIdentity() {
+    if(identityRefreshRef.current)return identityRefreshRef.current;
+    const task=(async()=>{
+      setAuthLoading(true);
+      try {
+        setMe(await api.get<Me>('/api/me'));setAuthError('');
+        await retryAuthenticatedTripDrafts();
+        window.dispatchEvent(new Event('greenhand-session-ready'));
+      }catch(error){setAuthError((error as Error).message);}
+      finally{setAuthLoading(false);}
+    })();
+    identityRefreshRef.current=task;
+    try{await task;}finally{identityRefreshRef.current=null;}
+  }
+  useEffect(() => subscribeAuthFailure(setAuthError), []);
+  useEffect(() => onAppResume(() => {void refreshIdentity();}), []);
 
   useEffect(() => {
     setTrackContext({ screen });
@@ -49,6 +72,7 @@ export default function App() {
       .get<Me>("/api/me")
       .then((m) => {
         setMe(m);
+        setAuthError('');
         const deepLink = readApprovalDeepLink();
         if (deepLink && m.role === "ADMIN") {
           setApprovalFocus(deepLink);
@@ -63,7 +87,8 @@ export default function App() {
         // (or just reloading) starts at the plain, unfocused list.
         window.history.replaceState({}, "", window.location.pathname);
       })
-      .catch(() => setMe(null));
+      .catch(error => setAuthError((error as Error).message))
+      .finally(() => setAuthLoading(false));
   }, []);
 
   function showSavedToast() {
@@ -74,10 +99,20 @@ export default function App() {
 
   const user = getInitDataUser();
   const goMenu = () => setScreen("menu");
+  const authPanel = <div className="empty-state" role="alert">
+    <h2>{authLoading ? 'Перевіряємо вхід…' : 'Потрібно перевірити вхід'}</h2>
+    {authError && <p>{authError}</p>}
+    {me && <p>Відкритий редактор збережено в цій вкладці. Непідтверджені зміни не закривайте.</p>}
+    <button disabled={authLoading} onClick={() => {void refreshIdentity();}}>Повторити перевірку входу</button>
+  </div>;
+  if(!me)return authPanel;
 
   return (
     <>
       <SyncStatusPill />
+      {authError && authPanel}
+      {/* Hide, never unmount an editor with an unsaved in-memory snapshot. */}
+      <div style={authError ? {display:'none'} : undefined}>
       {toast && <div className="toast">{toast}</div>}
 
       {screen === "menu" && <Menu userName={user?.first_name} isAdmin={me?.role === "ADMIN"} onNavigate={setScreen} />}
@@ -105,6 +140,7 @@ export default function App() {
           isAdmin={me?.role === "ADMIN"}
         />
       )}
+      </div>
     </>
   );
 }
