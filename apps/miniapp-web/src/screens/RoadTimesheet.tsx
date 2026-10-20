@@ -6,6 +6,7 @@ import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPa
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
 import { currentTripRecords } from "../lib/currentTripRecords";
+import { fetchDayReports, fetchReturnedReports, confirmedNoTrips, type ReportListLoad } from "../lib/reportLoading";
 import { carMovementError, carRiderRemovalError, initialCarRiders, selectedDestination } from "../lib/driving";
 import { setTrackContext, track } from "../lib/track";
 import { tapProps } from "../lib/tap";
@@ -411,6 +412,10 @@ export function RoadTimesheet({
   // числом, не мав де показатись -- бригадир отримував повідомлення й не мав
   // куди натиснути.
   const [returnedDays, setReturnedDays] = useState<Array<{ date: string; reason: string | null; trips: number }>>([]);
+  const [returnedDaysError, setReturnedDaysError] = useState("");
+  const [reportReload, setReportReload] = useState(0);
+  const [dayReportsLoad, setDayReportsLoad] = useState<ReportListLoad>({ date: "", phase: "loading", error: "" });
+  const reportListDateRef = useRef<string | null>(null);
 
   // --- dictionaries ---
   const [cars, setCars] = useState<Car[]>([]);
@@ -833,11 +838,13 @@ export function RoadTimesheet({
   // Що востаннє реально пішло на сервер: `${state}|${object}`.
   const lastProgressRef = useRef("");
   useEffect(() => {
-    api
-      .get<{ days: Array<{ date: string; reason: string | null; trips: number }> }>("/api/road-timesheet/returned-days")
-      .then((r) => setReturnedDays(r.days ?? []))
-      .catch(() => setReturnedDays([]));
-  }, [date, dayStatus?.returned]);
+    let cancelled = false;
+    setReturnedDaysError("");
+    fetchReturnedReports<{ date: string; reason: string | null; trips: number }>(api.get)
+      .then((days) => { if (!cancelled) setReturnedDays(days); })
+      .catch((e) => { if (!cancelled) setReturnedDaysError((e as Error).message); });
+    return () => { cancelled = true; };
+  }, [date, dayStatus?.returned, reportReload]);
 
   const atObjectPlan = atObjectId ? plans.find((p) => p.objectId === atObjectId) : null;
   const headingName = headingToObjectId ? (plans.find((p) => p.objectId === headingToObjectId)?.objectName ?? "") : "";
@@ -941,16 +948,22 @@ export function RoadTimesheet({
   useEffect(() => {
     if (!draftReady) return;
     let cancelled = false;
-    api
-      .get<DayStatus>(`/api/road-timesheet/day-status?date=${date}`)
-      .then(async (status) => {
+    setDayReportsLoad({ date, phase: "loading", error: "" });
+    // Keep confirmed data on retry, but never present another date's reports.
+    if (reportListDateRef.current !== date) {
+      reportListDateRef.current = date;
+      setDayStatus(null);
+      setSubmittedTrips([]);
+      setDayCombined(null);
+    }
+    fetchDayReports<DayStatus, SubmittedTrip, DayCombined>(api.get, date)
+      .then(({ status, trips, combined }) => {
         if (cancelled) return;
         setDayStatus(status);
+        setSubmittedTrips(trips);
+        setDayCombined(combined);
+        setDayReportsLoad({ date, phase: "ready", error: "" });
         if (!status.hasSubmission) return;
-        const res = await api.get<SubmittedTodayResponse>(`/api/road-timesheet/submitted-today?date=${date}`);
-        if (cancelled || !res.found) return;
-        setSubmittedTrips(res.trips);
-        setDayCombined(res.combined);
 
         // A returned day is the one case where the foreman has been asked to
         // do something specific, so drop them straight back into the same
@@ -959,7 +972,7 @@ export function RoadTimesheet({
         // and nothing else is in flight. With several returned trips there's
         // no single right one to open, and clobbering a restored draft for a
         // NEW trip would throw away work they haven't submitted yet.
-        const returnedTrips = res.trips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
+        const returnedTrips = trips.filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
         // Виняток -- режим правки поверненого дня: конструктор там свідомо
         // порожній (сьогоднішній день лежить у `dayStash`), тож відновлена
         // чернетка нічого не боронить, і поїздку треба відкрити одразу.
@@ -972,10 +985,10 @@ export function RoadTimesheet({
         // day summary here would skip past the planned trips and the "new
         // trip" button the foreman came for.
       })
-      .catch(() => { if (!cancelled) setDayStatus({ hasSubmission: false, approved: false, returned: false, returnReason: null, eventId: null, editRequested: false }); });
+      .catch((e) => { if (!cancelled) setDayReportsLoad({ date, phase: "error", error: (e as Error).message }); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => { cancelled = true; };
-  }, [date, draftReady]);
+  }, [date, draftReady, reportReload]);
 
   useEffect(() => {
     if (!draftReady || step === "DONE" || !(carId || employeeIds.length || plans.length)) return;
@@ -3571,6 +3584,21 @@ export function RoadTimesheet({
   // already-sent trip is not a trip in progress, so it does not get one either
   // (that report is the admin's to delete).
   const hasTripInProgress = editingTripSeq === null && (!!carId || employeeIds.length > 0 || plans.length > 0);
+  const reportLoadNotice = (
+    <>
+      {(dayReportsLoad.phase === "error" || returnedDaysError) && (
+        <div className="empty-state" role="alert" style={{ textAlign: "left" }}>
+          {dayReportsLoad.phase === "error" && <p>⚠️ Не вдалося завантажити звіти за {date}. {dayReportsLoad.error}</p>}
+          {returnedDaysError && <p>⚠️ Не вдалося оновити повернені звіти. {returnedDaysError}</p>}
+          <p>Список може бути неповним або застарілим. Це не означає, що звітів немає.</p>
+          <button className="bulk-select-btn" onClick={() => setReportReload((value) => value + 1)}>Повторити завантаження звітів</button>
+        </div>
+      )}
+      {(dayReportsLoad.date !== date || dayReportsLoad.phase === "loading") && (
+        <div className="hint" role="status">Завантажуємо список звітів…</div>
+      )}
+    </>
+  );
 
   if(!draftReady) return <div className="empty-state">
     {serverLoadError ? `Не вдалося завантажити дані: ${serverLoadError}` : "Завантажуємо поїздки із сервера…"}
@@ -3596,6 +3624,7 @@ export function RoadTimesheet({
     return (
       <div>
         <BackRow onBack={goBack} onHome={onBack} onReset={hasTripInProgress ? resetTrip : undefined} />
+        {reportLoadNotice}
         <div className="header">
           <h1>
             {returned
@@ -3702,6 +3731,8 @@ export function RoadTimesheet({
 
         {error && <div className="empty-state">⚠️ {error}</div>}
 
+        {reportLoadNotice}
+
         {fixedDayNotice && !fixingReturnedDate && (
           <div className="empty-state" style={{ textAlign: "left" }}>
             ✅ <b>День {fixedDayNotice} надіслано повторно.</b> Ви знову на {date}.
@@ -3757,7 +3788,7 @@ export function RoadTimesheet({
         )}
 
         <div className="section-title">Поточні поїздки</div>
-        {submittedTrips.length === 0 && !hasBuilderContent && currentTripRecords(serverRecords,recordId).length === 0 && <div className="empty-state">Сьогодні поїздок ще немає.</div>}
+        {confirmedNoTrips(dayReportsLoad, date, submittedTrips.length > 0 || hasBuilderContent || currentTripRecords(serverRecords,recordId).length > 0) && <div className="empty-state">Сьогодні поїздок ще немає.</div>}
         {submittedTrips.map((trip) => renderTripCard(trip, trip.status !== "ЗАТВЕРДЖЕНО"))}
         {currentTripRecords(serverRecords,recordId).map(r => (
           <button className="cell" key={r.id} onClick={() => openServerRecord(r.id)}>
