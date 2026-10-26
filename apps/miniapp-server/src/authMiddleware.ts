@@ -71,6 +71,7 @@ export function createTelegramAuth(options: {
           res.status(403).json({ error: 'Invalid session request origin' }); return;
         }
       }
+      // Recheck current account access on every request, including requests with a valid session.
       const row = await options.findUser(userId);
       if (!row || !row.active) { res.status(403).json({ error: 'Access denied: not in КОРИСТУВАЧІ or inactive' }); return; }
       req.user = { tgId: Number(row.tgId), pib: row.pib, role: normRole(row.role) };
