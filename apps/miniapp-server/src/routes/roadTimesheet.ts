@@ -412,7 +412,7 @@ async function findCarConflict(tx: LockedTx, date: string, carId: string, myFore
  * active car out from under them). Unlike findCarConflict, this does NOT
  * exclude the caller's own events -- it's asking "is the latest event MINE",
  * not "does someone ELSE have it". */
-async function callerHoldsCar(tx: LockedTx, date: string, carId: string, myForemanTgId: number): Promise<boolean> {
+export async function callerHoldsCar(tx: LockedTx, date: string, carId: string, myForemanTgId: number): Promise<boolean> {
   const events = await tx
     .select()
     .from(schema.events)
@@ -437,7 +437,7 @@ async function callerHoldsCar(tx: LockedTx, date: string, carId: string, myForem
  * RTS_RESERVE_PEOPLE is the latest event for that employee, not yet
  * released). Used by POST /reserve/release so a foreman can't cancel
  * another foreman's crew reservation. */
-async function employeesHeldByCaller(tx: LockedTx, date: string, employeeIds: string[], myForemanTgId: number): Promise<string[]> {
+export async function employeesHeldByCaller(tx: LockedTx, date: string, employeeIds: string[], myForemanTgId: number): Promise<string[]> {
   if (!employeeIds.length) return [];
   const events = await tx
     .select()

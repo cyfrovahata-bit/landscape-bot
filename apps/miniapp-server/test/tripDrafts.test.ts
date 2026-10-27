@@ -62,6 +62,18 @@ test('HTTP server and real PostgreSQL engine: isolation, ownership, stale versio
   assert.ok(audit.some((r:any)=>r.action==='rejected_incoming'&&r.payload.step==='HUB'));
   assert.equal((await request('?all=true','GET',undefined,8)).body.records.length,0);
   assert.equal((await request('?all=true','GET',undefined,8,true)).body.records.length,2);
+  // An admin can archive a claimed trip; ordinary owners and stale revisions cannot.
+  await pg.query('INSERT INTO trip_draft_owners(foreman_tg_id,active_trip_id) VALUES (7,$1)',[b]);
+  await pg.query("INSERT INTO events(event_id,status,ts,date,foreman_tg_id,type,car_id,employee_ids) VALUES ('held-car','АКТИВНА',now(),'2026-10-18',7,'RTS_RESERVE_CAR','CAR_2',null),('held-person','АКТИВНА',now(),'2026-10-18',7,'RTS_RESERVE_PEOPLE',null,'[\"E1\"]')");
+  assert.equal((await request(`/${b}/archive`,'POST',{baseRevision:2})).status,409);
+  assert.equal((await request(`/${b}/archive`,'POST',{baseRevision:1},8,true)).status,409);
+  assert.equal((await request(`/${b}/archive`,'POST',{baseRevision:2},8,true)).status,200);
+  assert.equal((await request(`/${b}`)).body.state,'archived');
+  assert.equal((await pg.query('SELECT active_trip_id FROM trip_draft_owners WHERE foreman_tg_id=7')).rows[0].active_trip_id,null);
+  const cancels=(await pg.query("SELECT * FROM events WHERE type='RTS_RESERVE_CANCEL'")).rows;
+  assert.equal(cancels.length,1);assert.equal(cancels[0].foreman_tg_id,7);assert.equal(cancels[0].car_id,'CAR_2');
+  assert.equal((await request(`/${b}/archive`,'POST',{baseRevision:3},8,true)).status,200);
+  assert.equal((await pg.query("SELECT * FROM events WHERE type='RTS_RESERVE_CANCEL'")).rows.length,1);
   // Idempotent migration retains original source and separately preserves its stash.
   const old={date:'2026-10-15',carId:'CAR_2',editingTripSeq:0,plans:[],employeeIds:[],dayStash:payload(randomUUID())};
   await pg.query('INSERT INTO day_drafts(foreman_tg_id,payload,updated_at) VALUES (9,$1,now())',[JSON.stringify(old)]);

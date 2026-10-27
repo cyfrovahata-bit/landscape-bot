@@ -1,5 +1,6 @@
+import { callerHoldsCar, employeesHeldByCaller } from './roadTimesheet.js';
 import { asyncRouter } from '../asyncRouter.js';
-import { db as productionDb, schema, withLock as productionWithLock } from '@landscape/core';
+import { db as productionDb, schema, withLock as productionWithLock, writeEvent, makeEventId } from '@landscape/core';
 import { and, eq, desc, sql } from 'drizzle-orm';
 import { ownedTripId, reportDraftId, splitLegacyDraft, tripDraftConflict, validTripId } from '../lib/tripDraftIdentity.js';
 
@@ -158,14 +159,29 @@ tripDraftsRouter.post('/:id/restore',async(req,res)=>{
 // Archive only this working copy; never delete payroll events or other trips.
 tripDraftsRouter.post('/:id/archive',async(req,res)=>{
   const id=req.params.id,owner=BigInt(req.user!.tgId);
-  const result=await withLock(`trip-draft:${id}`,async tx=>{
+  const [initial]=await db.select().from(table).where(and(eq(table.id,id),req.user!.role==='ADMIN'?undefined:eq(table.foremanTgId,owner)));
+  if(!initial){res.status(404).json({error:'Поїздку не знайдено.'});return;}
+  const initialDate=JSON.parse(initial.payload).date;
+  // Same lock order as reservations: date, owner row, then draft row.
+  const result=await withLock(`reserve:${initialDate}`,async tx=>{
+    const [claim]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,initial.foremanTgId)).for("update");
     const [row]=await tx.select().from(table).where(and(eq(table.id,id),req.user!.role==='ADMIN'?undefined:eq(table.foremanTgId,owner))).for("update");
     if(!row)return {status:404,error:'Поїздку не знайдено.'};
     if(row.state==='archived')return {status:200,revision:row.revision};
     if(req.body.baseRevision!==row.revision)return {status:409,error:'Поїздка змінилася. Архівування скасовано.'};
-    const [claim]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,row.foremanTgId));
-    if(claim?.activeTripId===id)return {status:409,error:'Ця поїздка має чинні бронювання. Спочатку завершіть або скиньте її через робочий екран.'};
+    const p=JSON.parse(row.payload);
+    if(p.date!==initialDate)return {status:409,error:'Поїздка змінилася. Архівування скасовано.'};
+    if(claim?.activeTripId===id && req.user!.role!=='ADMIN')return {status:409,error:'Ця поїздка має чинні бронювання. Спочатку завершіть або скиньте її через робочий екран.'};
     await tx.insert(history).values({tripId:id,foremanTgId:row.foremanTgId,revision:row.revision,action:`before_archive:${owner}`,payload:row.payload});
+    if(claim?.activeTripId===id){
+      // Keep the entire previous claim alongside the full draft for recovery.
+      await tx.insert(history).values({tripId:id,foremanTgId:row.foremanTgId,revision:row.revision,action:`before_admin_release:${owner}`,payload:JSON.stringify({claim:{...claim,foremanTgId:String(claim.foremanTgId)}})});
+      const foreman=Number(row.foremanTgId);
+      const carId=p.carId && await callerHoldsCar(tx,p.date,p.carId,foreman) ? p.carId : undefined;
+      const employeeIds=await employeesHeldByCaller(tx,p.date,p.employeeIds??[],foreman);
+      if(carId || employeeIds.length)await writeEvent({eventId:makeEventId('RTSRSV'),status:'АКТИВНА',date:p.date,foremanTgId:foreman,type:'RTS_RESERVE_CANCEL',carId,employeeIds:JSON.stringify(employeeIds),payload:JSON.stringify({draftId:id,adminTgId:String(owner),reason:'admin_archive'})},tx);
+      await tx.update(schema.tripDraftOwners).set({activeTripId:null}).where(and(eq(schema.tripDraftOwners.foremanTgId,row.foremanTgId),eq(schema.tripDraftOwners.activeTripId,id)));
+    }
     await tx.update(table).set({state:'archived',revision:row.revision+1,updatedAt:new Date()}).where(eq(table.id,id));
     return {status:200,revision:row.revision+1};
   });
