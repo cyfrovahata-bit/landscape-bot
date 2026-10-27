@@ -1,3 +1,4 @@
+import { ReservationConflictError, reservationConflictHandler, activeTripConflictMessage } from "../lib/reservationErrors.js";
 import { usesLiveReservations, affectsReservations, submissionReservationEffect } from "@landscape/core";
 import { submissionDraftConflict, submissionSequence } from "../lib/tripDraftSubmission.js";
 import { validTripId } from "../lib/tripDraftIdentity.js";
@@ -52,8 +53,12 @@ async function guardWorkingTrip(tx:LockedTx,owner:number,id:unknown,claim=false)
   const [adopted]=await tx.select().from(schema.tripDraftOwners).where(eq(schema.tripDraftOwners.foremanTgId,BigInt(owner))).for("update");
   if(!adopted)return;
   if(!validTripId(id))throw new ReservationConflictError("Оновіть MINI-APP: для цієї дії потрібен ID поїздки.");
-  if(adopted.activeTripId && adopted.activeTripId!==id)
-    throw new ReservationConflictError("У вас є інша поїздка з бронюваннями. Відкрийте її зі списку та завершіть перед виїздом у новій. Чернетки збережені окремо.");
+  if(adopted.activeTripId && adopted.activeTripId!==id) {
+    const [active]=await tx.select().from(schema.tripDrafts).where(and(eq(schema.tripDrafts.id,adopted.activeTripId),eq(schema.tripDrafts.foremanTgId,BigInt(owner))));
+    let date:unknown;
+    try { date=JSON.parse(active?.payload??'{}').date; } catch { /* Still show a useful instruction. */ }
+    throw new ReservationConflictError(activeTripConflictMessage(date,todayKyivISO()));
+  }
   if(claim){
     const [record]=await tx.select().from(schema.tripDrafts).where(and(eq(schema.tripDrafts.id,id),eq(schema.tripDrafts.foremanTgId,BigInt(owner))));
     if(!record||record.state!=="open")throw new ReservationConflictError("Спочатку дочекайтеся серверного збереження поїздки та повторіть дію.");
@@ -85,7 +90,7 @@ function blockNonAdmin(req: import("express").Request, res: Response): boolean {
 }
 
 /** Thrown to signal a 409 (reservation conflict) from inside a withLock() callback. */
-class ReservationConflictError extends Error {}
+
 
 /** Today's date in the timezone the crews actually work in, matching the
  * client's todayISO() -- used to tell a genuinely past day from the live one. */
@@ -2430,3 +2435,6 @@ roadTimesheetRouter.get("/today", async (req, res) => {
 
   res.json({ date, odometer, reports, hours, dayStatuses });
 });
+
+// Includes reserve/release and car-return, which forward async failures.
+roadTimesheetRouter.use(reservationConflictHandler);
