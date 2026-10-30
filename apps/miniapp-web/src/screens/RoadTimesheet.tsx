@@ -5087,6 +5087,17 @@ export function RoadTimesheet({
 
       {step === "DRIVE" && nextUnvisited && !driveHeadingTo && (
         <>
+          {plans.some((p) => p.objectId === (atObjectId || carAtObjectId)) && (
+            <div className="list">
+              <button
+                className="cell"
+                onClick={() => openObjectMenu(atObjectId || carAtObjectId)}
+              >
+                <span className="cell-title">📍 До поточного обʼєкта</span>
+                <span className="cell-sub">Без виїзду автомобілем</span>
+              </button>
+            </div>
+          )}
           <div style={{ textAlign: "center" }}>
             <div className="step-badge">🚗 КУДИ ЇДЕМО?</div>
           </div>
