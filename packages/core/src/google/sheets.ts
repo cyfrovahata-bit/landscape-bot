@@ -336,18 +336,26 @@ export async function appendAccountingValues(sheetName: string, rows: any[][], s
   if (!rows.length) return;
   const sheets = getSheetsClient();
   const meta = await withSheetsRetry("accounting metadata", () =>
-    sheets.spreadsheets.get({ spreadsheetId: config.sheetId, fields: "properties.locale,sheets.properties(sheetId,title)" }),
+    sheets.spreadsheets.get({ spreadsheetId: config.sheetId, fields: "properties.locale,sheets.properties(sheetId,title,gridProperties.rowCount)" }),
   );
   if (meta.data.properties?.locale !== "uk_UA") {
     throw new Error("Для десяткової коми встановіть локаль таблиці «Україна».");
   }
-  const sheetId = meta.data.sheets?.find((s) => s.properties?.title === sheetName)?.properties?.sheetId;
+  const properties = meta.data.sheets?.find((s) => s.properties?.title === sheetName)?.properties;
+  const sheetId = properties?.sheetId;
   if (sheetId == null) throw new Error(`Не знайдено ${sheetName}`);
+  const rowCount = properties?.gridProperties?.rowCount;
+  if (rowCount == null) throw new Error(`Не вдалося визначити кількість рядків ${sheetName}`);
+  const missingRows = Math.max(0, startRowIndex + rows.length - rowCount);
   // Format before appending: a failed format request cannot leave exported rows behind.
   await withSheetsRetry("accounting numeric formats", () =>
     sheets.spreadsheets.batchUpdate({
       spreadsheetId: config.sheetId,
       requestBody: { requests: [
+        // Grow in the same atomic batch BEFORE formatting future cells.
+        // values.append can grow the grid itself, but repeatCell cannot.
+        ...(missingRows ? [{ appendDimension: { sheetId, dimension: "ROWS", length: missingRows } }] : []),
+        ...[
         { column: 1, type: "DATE", pattern: "dd.mm.yyyy" },
         { column: 7, type: "NUMBER", pattern: "#,##0.00" },
       ].map(({ column, type, pattern }) => ({ repeatCell: {
@@ -358,7 +366,7 @@ export async function appendAccountingValues(sheetName: string, rows: any[][], s
         range: { sheetId, startRowIndex: startRowIndex + i, endRowIndex: startRowIndex + i + 1, startColumnIndex: 5, endColumnIndex: 6 },
         cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: Number.isInteger(row[5]) ? "0" : "0.##########" } } },
         fields: "userEnteredFormat.numberFormat",
-      } }))) },
+      } }))) ], },
     }),
   );
   await withSheetsRetry(`${sheetName} accounting append`, () =>
