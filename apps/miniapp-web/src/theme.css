@@ -1,0 +1,73 @@
+/* The switch works independently of Telegram's theme. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --tg-bg: var(--greenhand-light-bg-color, #f2f2f7);
+  --tg-secondary-bg: var(--greenhand-light-secondary-bg-color, #ffffff);
+  --tg-text: var(--greenhand-light-text-color, #000000);
+  --tg-hint: var(--greenhand-light-hint-color, #8e8e93);
+  --tg-link: var(--greenhand-light-link-color, #007aff);
+  --tg-button: var(--greenhand-light-button-color, #007aff);
+  --tg-button-text: var(--greenhand-light-button-text-color, #ffffff);
+  --tg-border: rgba(60, 60, 67, 0.15);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --tg-bg: #111318;
+  --tg-secondary-bg: #20242c;
+  --tg-text: #f2f3f5;
+  --tg-hint: #a5adba;
+  --tg-link: #78b6ff;
+  --tg-button: #3084f4;
+  --tg-button-text: #ffffff;
+  --tg-border: rgba(210, 222, 240, 0.16);
+  --tg-destructive-text: #ff7c75;
+}
+.theme-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 16px 0;
+}
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid var(--tg-border);
+  border-radius: 24px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--tg-link);
+  outline-offset: 3px;
+}
+.theme-toggle-track {
+  display: inline-flex;
+  align-items: center;
+  width: 34px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 12px;
+  background: #8e8e93;
+}
+.theme-toggle-track > span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+}
+.theme-toggle[aria-checked="true"] .theme-toggle-track {
+  background: var(--tg-button);
+  justify-content: flex-end;
+}
+:root[data-theme="dark"] :is(.badge, .work-chip, .progress-bar) { background: rgba(255, 255, 255, 0.08); }
+:root[data-theme="dark"] :is(.cell, .menu-card):active { background: rgba(255, 255, 255, 0.06); }
+:root[data-theme="dark"] .badge.ok { color: #74df91; background: rgba(52, 199, 89, 0.15); }
+:root[data-theme="dark"] .badge.warn { color: #ffbd66; background: rgba(255, 149, 0, 0.15); }
+:root[data-theme="dark"] .badge.info { color: #86bfff; background: rgba(0, 122, 255, 0.18); }
+:root[data-theme="dark"] .badge.danger { color: #ff8a83; background: rgba(255, 59, 48, 0.15); }
+:root[data-theme="dark"] :is(.role-tag.lead, .approval-row-name .mark.lead) { color: #ffbd66; }
+:root[data-theme="dark"] :is(.role-tag.senior, .approval-row-name .mark.senior) { color: #d4a6ff; }
