@@ -501,3 +501,11 @@ export const tripDraftOwners = pgTable("trip_draft_owners", {
   activeTripId: text("active_trip_id"),
   adoptedAt: timestamp("adopted_at", { mode: "date" }).notNull().defaultNow(),
 });
+
+// Application controls are independent of the Sheets dictionary sync.
+export const appFeatures = pgTable("app_features", {
+  key: text("key").primaryKey(),
+  enabled: boolean("enabled").notNull().default(false),
+  updatedBy: bigint("updated_by", { mode: "bigint" }).notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});

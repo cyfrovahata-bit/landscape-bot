@@ -134,6 +134,13 @@
       "when": 1792329600000,
       "tag": "0018_independent_trip_drafts",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794038400000,
+      "tag": "0019_app_features",
+      "breakpoints": true
     }
   ]
 }

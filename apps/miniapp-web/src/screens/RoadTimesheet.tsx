@@ -1,6 +1,5 @@
 import { usesLiveReservations } from "../../../../packages/core/src/reservationPolicy";
 
-import { BACKDATED_ENTRY_ENABLED } from "../lib/features";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack, type TripPlan, type PlanObject, type Foreman, type PlannedResources } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
@@ -379,12 +378,14 @@ export function RoadTimesheet({
   onBack: leaveScreen,
   onSaved,
   onOpenRetro,
+  backdatedEntryEnabled = false,
   isAdmin = false,
   myPib = "",
 }: {
   onBack: () => void;
   onSaved: () => void;
   onOpenRetro: () => void;
+  backdatedEntryEnabled?: boolean;
   isAdmin?: boolean;
   /** ПІБ з аркуша КОРИСТУВАЧІ — щоб підписати власний рядок у списках. */
   myPib?: string;
@@ -3788,6 +3789,16 @@ export function RoadTimesheet({
           <div className="hint">{date}</div>
         </div>
 
+        {backdatedEntryEnabled && <div className="list">
+          <button className="cell" onClick={onOpenRetro}>
+            <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <span className="setup-icon accent-teal">🗓</span>
+              <span className="cell-title">Внести день заднім числом</span>
+            </span>
+            <span className="cell-sub">без таймерів ›</span>
+          </button>
+        </div>}
+
         {error && <div className="empty-state">⚠️ {error}</div>}
 
         {reportLoadNotice}
@@ -3925,15 +3936,7 @@ export function RoadTimesheet({
           </button>
         </div>
 
-        {BACKDATED_ENTRY_ENABLED && <div className="list">
-          <button className="cell" onClick={onOpenRetro}>
-            <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="setup-icon accent-teal">🗓</span>
-              <span className="cell-title">Внести день заднім числом</span>
-            </span>
-            <span className="cell-sub">без таймерів ›</span>
-          </button>
-        </div>}
+
 
         <MainButton text="🏠 До меню" onClick={onBack} />
       </div>
@@ -4185,7 +4188,7 @@ export function RoadTimesheet({
               already been worked can't be re-lived with timers, so it gets a
               flat form where hours are typed in instead of measured. Not while
               planning -- a plan has no day to enter after the fact. */}
-          {BACKDATED_ENTRY_ENABLED && !planEditing && (
+          {backdatedEntryEnabled && !planEditing && (
             <div className="list">
               <button className="cell" onClick={onOpenRetro}>
                 <span style={{ display: "flex", alignItems: "center", gap: 12 }}>

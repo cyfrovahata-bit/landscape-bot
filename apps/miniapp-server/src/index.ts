@@ -1,3 +1,4 @@
+import { appFeaturesRouter } from "./routes/appFeatures.js";
 import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -416,6 +417,7 @@ registerTelegramWebhook(app);
 const apiRouter = express.Router();
 apiRouter.use(requireTelegramAuth);
 apiRouter.get("/me", (req, res) => res.json(req.user));
+apiRouter.use("/app-features", appFeaturesRouter);
 apiRouter.use("/dictionaries", dictionariesRouter);
 apiRouter.use("/logistics", logisticsRouter);
 apiRouter.use("/materials", materialsRouter);

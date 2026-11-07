@@ -3,8 +3,7 @@ import { usesLiveReservations, affectsReservations, submissionReservationEffect 
 import { submissionDraftConflict, submissionSequence } from "../lib/tripDraftSubmission.js";
 import { validTripId } from "../lib/tripDraftIdentity.js";
 import { canFinishRecordedTrip } from "../lib/lateTripSubmission.js";
-// Тимчасовий перемикач: збережені звіти можна виправляти, нові минулі дні — ні.
-const BACKDATED_ENTRY_ENABLED = false;
+import { isBackdatedEntryEnabled } from "../lib/appFeatures.js";
 
 import { asyncRouter } from "../asyncRouter.js";
 import { type Response } from "express";
@@ -940,7 +939,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
         submissionSequence(tripSeq,previousForDraft?.tripSeq,existingForKey?.tripSeq,allTripsBefore.map(t=>t.tripSeq));
       const legPrevious = allTripsBefore.find((t) => t.tripSeq === effectiveTripSeq) ?? null;
 
-      if (!BACKDATED_ENTRY_ENABLED && date < todayKyivISO() && !legPrevious) {
+      if (date < todayKyivISO() && !legPrevious && !(await isBackdatedEntryEnabled(tx))) {
         // Only a trip recorded while that day was current may be finished later.
         // Client-supplied dates/backdated flags are not evidence of a real trip.
         const lifecycle = await tx.select().from(schema.events).where(and(

@@ -1,4 +1,6 @@
-import { BACKDATED_ENTRY_ENABLED } from "./lib/features";
+import { ThemeToggle } from "./components/ThemeToggle";
+import { BackdatedEntryToggle } from "./components/BackdatedEntryToggle";
+import { useAppFeatures } from "./lib/features";
 import { useEffect, useRef, useState } from "react";
 import { initTelegramApp, getInitDataUser } from "./lib/telegram";
 import { api, subscribeAuthFailure, type Me } from "./lib/api";
@@ -30,6 +32,7 @@ function readApprovalDeepLink(): { date: string; foremanTgId: number } | null {
 }
 
 export default function App() {
+  const { backdatedEntryEnabled, refreshFeatures, setBackdatedEntryEnabled } = useAppFeatures();
   const [screen, setScreen] = useState<Screen>("menu");
   const [toast, setToast] = useState<string | null>(null);
   const [me, setMe] = useState<Me | null>(null);
@@ -51,6 +54,7 @@ export default function App() {
       setAuthLoading(true);
       try {
         setMe(await api.get<Me>('/api/me'));setAuthError('');
+        void refreshFeatures();
         await retryAuthenticatedTripDrafts();
         window.dispatchEvent(new Event('greenhand-session-ready'));
       }catch(error){setAuthError((error as Error).message);}
@@ -72,6 +76,7 @@ export default function App() {
       .get<Me>("/api/me")
       .then((m) => {
         setMe(m);
+        void refreshFeatures();
         setAuthError('');
         const deepLink = readApprovalDeepLink();
         if (deepLink && m.role === "ADMIN") {
@@ -105,10 +110,12 @@ export default function App() {
     {me && <p>Відкритий редактор збережено в цій вкладці. Непідтверджені зміни не закривайте.</p>}
     <button disabled={authLoading} onClick={() => {void refreshIdentity();}}>Повторити перевірку входу</button>
   </div>;
-  if(!me)return authPanel;
+  if(!me)return <><ThemeToggle />{authPanel}</>;
 
   return (
     <>
+      {me.role === "ADMIN" && <BackdatedEntryToggle enabled={backdatedEntryEnabled} onChange={setBackdatedEntryEnabled} />}
+      <ThemeToggle />
       <SyncStatusPill />
       {authError && authPanel}
       {/* Hide, never unmount an editor with an unsaved in-memory snapshot. */}
@@ -122,12 +129,13 @@ export default function App() {
         <RoadTimesheet
           onBack={goMenu}
           onSaved={showSavedToast}
-          onOpenRetro={() => { if (BACKDATED_ENTRY_ENABLED) setScreen("roadTimesheetRetro"); }}
+          backdatedEntryEnabled={backdatedEntryEnabled}
+          onOpenRetro={() => { if (backdatedEntryEnabled) setScreen("roadTimesheetRetro"); }}
           isAdmin={me?.role === "ADMIN"}
           myPib={me?.pib ?? ""}
         />
       )}
-      {BACKDATED_ENTRY_ENABLED && screen === "roadTimesheetRetro" && <RetroEntry onBack={() => setScreen("roadTimesheet")} onSaved={showSavedToast} />}
+      {screen === "roadTimesheetRetro" && <RetroEntry onBack={() => setScreen("roadTimesheet")} onSaved={showSavedToast} />}
       {screen === "stats" && <Stats onBack={goMenu} isAdmin={me?.role === "ADMIN"} />}
       {screen === "adminOverview" && <AdminOverview onBack={goMenu} />}
       {screen === "actionLog" && <ActionLog onBack={goMenu} />}
