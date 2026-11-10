@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type Car, type Employee, type Work, type WorkObject, type SalaryPack } from "../lib/api";
-import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
 import { todayISO } from "../lib/date";
 import { confirmDialog, haptic, useTelegramBackButton } from "../lib/telegram";
 import { employeeRole, initials, roleAccent, groupByBrigade, shortName, type EmployeeRole, roleTagClass } from "../lib/employee";
@@ -103,7 +102,6 @@ export function RetroEntry({ onBack, onSaved }: { onBack: () => void; onSaved: (
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useClearErrorOnSuccess(setError);
 
   useEffect(() => {
     api.get<Car[]>("/api/dictionaries/cars").then(setCars).catch((e) => setError(e.message));

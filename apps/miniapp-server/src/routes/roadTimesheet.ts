@@ -1,3 +1,4 @@
+import { prepareRetroSubmissionDraft } from "../lib/retroSubmissionDraft.js";
 import { ReservationConflictError, reservationConflictHandler, activeTripConflictMessage } from "../lib/reservationErrors.js";
 import { usesLiveReservations, affectsReservations, submissionReservationEffect } from "@landscape/core";
 import { submissionDraftConflict, submissionSequence } from "../lib/tripDraftSubmission.js";
@@ -788,8 +789,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
     employeeIds,
     objects,
     idempotencyKey,
-    draftId,
-    draftRevision,
+    draftId: requestedDraftId,
+    draftRevision: requestedDraftRevision,
     tripSeq,
     selfTransportIds,
     errands,
@@ -827,6 +828,8 @@ roadTimesheetRouter.post("/", async (req, res) => {
   }
 
   const foremanTgId = req.user!.tgId;
+  let draftId = requestedDraftId;
+  let draftRevision = requestedDraftRevision;
 
   // Same "can't be less than the last known reading" rule as the client's
   // ODO_START screen. Only rows from STRICTLY EARLIER dates count: this
@@ -898,6 +901,10 @@ roadTimesheetRouter.post("/", async (req, res) => {
       // Enforce the car reservation server-side too, not just as a UI hint --
       // and do the check-then-write atomically under the lock, so two
       // concurrent requests can't both pass the check before either commits.
+      const retroDraft = await prepareRetroSubmissionDraft(tx, {
+        owner:foremanTgId,date,today:todayKyivISO(),backdated,draftId,key:safeKey,payload:req.body,
+      });
+      if (retroDraft) {draftId=retroDraft.id;draftRevision=retroDraft.revision;}
       const allTripsBefore = await fetchAllTrips(date, foremanTgId, tx);
       const previousForDraft = draftId ? allTripsBefore.find(t => t.draftId === draftId) : undefined;
       const previousAttempt = safeKey ? allTripsBefore.find(t => t.eventId === eventId) : undefined;
