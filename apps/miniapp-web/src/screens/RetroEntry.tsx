@@ -306,6 +306,7 @@ export function RetroEntry({ onBack, onSaved }: { onBack: () => void; onSaved: (
     setStage("review");
     try {
       const res = await api.post<PreviewResponse>("/api/road-timesheet/preview", {
+        date,
         odoStart: Number(odoStart),
         odoEnd: Number(odoEnd),
         employeeIds: allEmployeeIds,

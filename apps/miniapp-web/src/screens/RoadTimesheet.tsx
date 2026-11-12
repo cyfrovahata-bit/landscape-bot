@@ -3361,6 +3361,7 @@ export function RoadTimesheet({
     const generation=recordGenerationRef.current;
     try {
       const res = await api.post<PayrollPreview>("/api/road-timesheet/preview", {
+        date,
         odoStart: Number(odoStart),
         odoEnd: Number(odoEnd),
         employeeIds,

@@ -1,3 +1,14 @@
+import { splitMoneyByShares } from './accountingRows.js';
+
+export type PayrollVersion = 1 | 2;
+export const CREW_SENIOR_SHARE_FROM = '2026-11-12';
+/** Missing versions belong to the original formula. Keep one formula for
+ * the whole day, including later legs, edits, approval and accounting. */
+export function payrollVersionForDay(date: string, savedVersions: Array<number | undefined> = []): PayrollVersion {
+  if (savedVersions.length) return savedVersions.every(v => v === 2) ? 2 : 1;
+  return date >= CREW_SENIOR_SHARE_FROM ? 2 : 1;
+}
+
 // Mirrors apps/bot/src/bot/flows/roadTimesheet.payroll.ts + the role/points
 // logic in roadTimesheet.flow.ts / roadTimesheet.utils.ts, exactly.
 
@@ -81,8 +92,10 @@ export type ObjectSalaryPack = {
  * worked at that particular object -- those cuts pay for running the day. The remainder
  * (always 70%) is the crew share,
  * shared out between everyone with hours there, the brigadier and seniors
- * included: if they worked, they worked. With no senior on the trip the 10%
- * is not handed to the crew -- it stays with the company (companyPay).
+ * included: if they worked, they worked. In version 1, an absent senior's
+ * 10% stays with the company. Version 2 distributes that additional pot
+ * by hours to non-brigadier workers; without eligible workers it stays
+ * with the company. The original 70% and role cuts are unchanged.
  *
  * The worker remainder is split IN PROPORTION TO HOURS: two hours on an
  * object pay twice what one hour there does, and anything under MIN_PAID_HOURS
@@ -108,8 +121,11 @@ export function buildSalaryPacksWithRoles(params: {
   /** Every brigadier on the trip -- they split the 20% between them. */
   brigadierEmployeeIds: string[];
   seniorEmployeeIds: string[];
+  /** Version 1 is retained for saved reports. Version 2 gives an absent
+   * senior's 10% only to non-brigadier workers with paid hours. */
+  payrollVersion?: PayrollVersion;
 }): ObjectSalaryPack[] {
-  const { objects, brigadierEmployeeIds, seniorEmployeeIds } = params;
+  const { objects, brigadierEmployeeIds, seniorEmployeeIds, payrollVersion = 1 } = params;
   const brigadierSet = new Set(brigadierEmployeeIds.filter(Boolean).map(String));
   const seniorSet = new Set(seniorEmployeeIds.map(String));
 
@@ -152,7 +168,14 @@ export function buildSalaryPacksWithRoles(params: {
     // same rule the seniors have always had for their 10%.
     const brigadierBonusEach = hasBrigadier ? (o.objectTotal * 0.2) / brigadierRows.length : 0;
     const seniorBonusEach = hasSenior ? (o.objectTotal * 0.1) / seniorRows.length : 0;
-    const companyPercent = (hasBrigadier ? 0 : 0.2) + (hasSenior ? 0 : 0.1);
+    const extraWorkers = worked.filter(r => !isBrigadier(r.employeeId));
+    const redistributeSeniorShare = payrollVersion === 2 && !hasSenior && extraWorkers.length > 0;
+    const companyPercent = (hasBrigadier ? 0 : 0.2) + (hasSenior || redistributeSeniorShare ? 0 : 0.1);
+    const extraPayByEmployee = new Map<string, number>();
+    if (redistributeSeniorShare) {
+      const amounts = splitMoneyByShares(o.objectTotal * 0.1, extraWorkers.map(r => r.hours));
+      extraWorkers.forEach((r,i) => extraPayByEmployee.set(r.employeeId, amounts[i]));
+    }
 
     // Works assigned to specific people get their own pool each, split only
     // between those of them who were actually at the object; everything else
@@ -215,7 +238,7 @@ export function buildSalaryPacksWithRoles(params: {
         hours: Math.round(Number(r.hours || 0) * 10000) / 10000,
         coefTotal: r.coefTotal,
         points: r.points,
-        pay: Math.round((crewShare + roleBonus) * 100) / 100,
+        pay: (Math.round((crewShare + roleBonus) * 100) + Math.round((extraPayByEmployee.get(r.employeeId) ?? 0) * 100)) / 100,
       };
     });
 

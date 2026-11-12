@@ -1,3 +1,4 @@
+import { payrollVersionForDay, type PayrollVersion } from "@landscape/core";
 import { prepareRetroSubmissionDraft } from "../lib/retroSubmissionDraft.js";
 import { ReservationConflictError, reservationConflictHandler, activeTripConflictMessage } from "../lib/reservationErrors.js";
 import { usesLiveReservations, affectsReservations, submissionReservationEffect } from "@landscape/core";
@@ -175,6 +176,7 @@ async function resolveForemanEmployeeId(
 }
 
 async function computePayroll(params: {
+  payrollVersion?: PayrollVersion;
   odoStart: number;
   odoEnd: number;
   employeeIds: string[];
@@ -277,7 +279,7 @@ async function computePayroll(params: {
     });
   }
 
-  const salaryPacks = buildSalaryPacksWithRoles({ objects: payrollObjectInputs, brigadierEmployeeIds, seniorEmployeeIds });
+  const salaryPacks = buildSalaryPacksWithRoles({ objects: payrollObjectInputs, brigadierEmployeeIds, seniorEmployeeIds, payrollVersion:params.payrollVersion ?? 1 });
 
   // An EMPTY cell in НАЛАШТУВАННЯ is not a setting, it is a missing setting.
   // Number("") is 0 and passes Number.isFinite, so a blank ROAD_ALLOWANCE_*
@@ -314,6 +316,8 @@ async function computePayroll(params: {
  * (mockup step 3.13) before they commit to "Відправити на підтвердження".
  */
 roadTimesheetRouter.post("/preview", async (req, res) => {
+  const previewDate = String(req.body.date || todayKyivISO());
+  const previewTrips = await fetchAllTrips(previewDate, req.user!.tgId);
   const { odoStart, odoEnd, employeeIds, objects, selfTransportIds, errands } = req.body as {
     odoStart: number;
     odoEnd: number;
@@ -323,6 +327,7 @@ roadTimesheetRouter.post("/preview", async (req, res) => {
     errands?: Errand[];
   };
   const result = await computePayroll({
+    payrollVersion:payrollVersionForDay(previewDate,previewTrips.map(t=>t.payrollVersion)),
     odoStart,
     odoEnd,
     employeeIds,
@@ -475,6 +480,7 @@ export async function employeesHeldByCaller(tx: LockedTx, date: string, employee
 // a different car/crew/objects (e.g. before-lunch vs after-lunch) -- each of
 // those is its own tripSeq, shown and edited as its own collapsed report.
 type StoredTrip = {
+  payrollVersion?: PayrollVersion;
   tripSeq: number;
   eventId: string;
   draftId?: string;
@@ -506,6 +512,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
   for (const row of rows) {
     let payload: {
       tripSeq?: number;
+      payrollVersion?: PayrollVersion;
       draftId?: string;
       reservationEffect?: string;
       objects?: ObjectInput[];
@@ -531,6 +538,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
     }
     byTripSeq.set(tripSeq, {
       tripSeq,
+      payrollVersion:payload.payrollVersion === 2 ? 2 : 1,
       eventId: row.eventId,
       draftId: payload.draftId,
       reservationEffect: payload.reservationEffect,
@@ -574,7 +582,7 @@ async function fetchAllTrips(date: string, foremanTgId: number, executor: typeof
  */
 async function reconcileDayTotals(
   tx: LockedTx,
-  params: { date: string; foremanTgId: number; allTripsBefore: StoredTrip[]; tripsAfter: Array<Pick<StoredTrip, "employeeIds" | "selfTransportIds" | "objects" | "odoStart" | "odoEnd" | "errands">> },
+  params: { date: string; foremanTgId: number; allTripsBefore: StoredTrip[]; tripsAfter: Array<Pick<StoredTrip, "employeeIds" | "selfTransportIds" | "objects" | "odoStart" | "odoEnd" | "errands" | "payrollVersion">> },
 ) {
   const { date, foremanTgId, allTripsBefore, tripsAfter } = params;
 
@@ -593,6 +601,7 @@ async function reconcileDayTotals(
   // Day-combined totals: what actually gets written to reports/timesheet/
   // allowances below, since those tables have no per-trip dimension.
   const combined = await computePayroll({
+    payrollVersion:payrollVersionForDay(date,tripsAfter.map(t=>t.payrollVersion)),
     odoStart: 0,
     odoEnd: totalKm,
     employeeIds: unionEmployeeIds,
@@ -851,19 +860,10 @@ roadTimesheetRouter.post("/", async (req, res) => {
     return;
   }
 
-  // This leg's own estimate (its own km/tripClass/fund), shown on its own
-  // card -- separate from the day-combined totals computed below. Read-only
-  // dictionary lookups, doesn't depend on any other foreman's/leg's state,
-  // so it's fine to compute before the lock.
-  const legResult = await computePayroll({
-    odoStart,
-    odoEnd,
-    employeeIds,
-    objects,
-    selfTransportIds,
-    excludedKm: sumErrandKm(errands),
-    foremanTgId,
-  });
+  // Select the day's stored formula under the lock before calculating this
+  // leg, so a concurrent first submission cannot choose another version.
+  let legResult!: Awaited<ReturnType<typeof computePayroll>>;
+  let payrollVersion: PayrollVersion = 1;
 
   // The idempotency key (generated once per "Відправити" tap on the client,
   // reused across its own network retries) makes the eventId stable across
@@ -970,10 +970,23 @@ roadTimesheetRouter.post("/", async (req, res) => {
         throw new ReservationConflictError("Цей день уже затверджено -- редагування недоступне без запиту на редагування");
       }
 
+      payrollVersion = payrollVersionForDay(date, allTripsBefore.map(t=>t.payrollVersion));
+      legResult = await computePayroll({
+        payrollVersion,
+        odoStart,
+        odoEnd,
+        employeeIds,
+        objects,
+        selfTransportIds,
+        excludedKm: sumErrandKm(errands),
+        foremanTgId,
+      });
+
       const tripsAfter = [
         ...allTripsBefore.filter((t) => t.tripSeq !== effectiveTripSeq),
         {
           tripSeq: effectiveTripSeq,
+          payrollVersion,
           eventId: "",
           carId,
           employeeIds: employeeIds ?? [],
@@ -1017,6 +1030,7 @@ roadTimesheetRouter.post("/", async (req, res) => {
           employeeIds: JSON.stringify(employeeIds ?? []),
           payload: JSON.stringify({
             tripSeq: effectiveTripSeq,
+            payrollVersion,
             draftId,
             reservationEffect: submissionReservationEffect(reportEdit || date !== todayKyivISO(), previousAttempt),
             odoStart,
@@ -1715,6 +1729,7 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
   }, 0);
   const totalExcludedKm = trips.reduce((acc, t) => acc + sumErrandKm(t.errands), 0);
   const combined = await computePayroll({
+    payrollVersion:payrollVersionForDay(date,trips.map(t=>t.payrollVersion)),
     odoStart: 0,
     odoEnd: totalKm,
     employeeIds: unionEmployeeIds,
@@ -1956,6 +1971,7 @@ async function computeApprovedDayTotals(trips: StoredTrip[], foremanTgId?: numbe
   // shown when they submitted it.
   const totalExcludedKm = trips.reduce((acc, t) => acc + sumErrandKm(t.errands), 0);
   const combined = await computePayroll({
+    payrollVersion:payrollVersionForDay("",trips.map(t=>t.payrollVersion)),
     odoStart: 0,
     odoEnd: totalKm,
     employeeIds: unionEmployeeIds,
