@@ -122,7 +122,7 @@ export function buildSalaryPacksWithRoles(params: {
   brigadierEmployeeIds: string[];
   seniorEmployeeIds: string[];
   /** Version 1 is retained for saved reports. Version 2 gives an absent
-   * senior's 10% only to non-brigadier workers with paid hours. */
+   * senior's 10% to paid workers, or to a sole working brigadier. */
   payrollVersion?: PayrollVersion;
 }): ObjectSalaryPack[] {
   const { objects, brigadierEmployeeIds, seniorEmployeeIds, payrollVersion = 1 } = params;
@@ -168,7 +168,10 @@ export function buildSalaryPacksWithRoles(params: {
     // same rule the seniors have always had for their 10%.
     const brigadierBonusEach = hasBrigadier ? (o.objectTotal * 0.2) / brigadierRows.length : 0;
     const seniorBonusEach = hasSenior ? (o.objectTotal * 0.1) / seniorRows.length : 0;
-    const extraWorkers = worked.filter(r => !isBrigadier(r.employeeId));
+    const workersWithoutBrigadiers = worked.filter(r => !isBrigadier(r.employeeId));
+    const extraWorkers = workersWithoutBrigadiers.length > 0
+      ? workersWithoutBrigadiers
+      : worked.length === 1 && isBrigadier(worked[0].employeeId) ? worked : [];
     const redistributeSeniorShare = payrollVersion === 2 && !hasSenior && extraWorkers.length > 0;
     const companyPercent = (hasBrigadier ? 0 : 0.2) + (hasSenior || redistributeSeniorShare ? 0 : 0.1);
     const extraPayByEmployee = new Map<string, number>();

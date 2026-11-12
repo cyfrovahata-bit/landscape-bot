@@ -28,13 +28,21 @@ test('with a senior, the whole result remains identical to the old formula',()=>
   const rows=[row('b',2),row('s',0),row('w',6)];
   assert.deepEqual(calc(rows,['b'],['s'],2),calc(rows,['b'],['s'],1));
 });
-test('only brigadier worked: the 10% stays with the company',()=>{
-  assert.deepEqual(calc([row('b',8)]),calc([row('b',8)],['b'],[],1));
-  assert.equal(calc([row('b',8)]).companyPay,120);
+test('only brigadier worked: he receives the extra 10%, legacy stays unchanged',()=>{
+  const p=calc([row('b',8)]);
+  assert.equal(pay(p,'b'),1200);
+  assert.equal(p.companyPay,0);
+  assert.equal(calc([row('b',8)],['b'],[],1).companyPay,120);
+});
+test('multiple working brigadiers without workers do not trigger the sole-brigadier exception',()=>{
+  assert.equal(calc([row('b1',8),row('b2',2)],['b1','b2']).companyPay,120);
+});
+test('brigadier without paid hours does not receive the additional 10%',()=>{
+  assert.equal(calc([row('b',0)]).companyPay,120);
 });
 test('no paid worker: short sessions do not receive the 10%',()=>{
   const p=calc([row('b',8),row('w',MIN_PAID_HOURS-0.001)]);
-  assert.equal(pay(p,'w'),0);assert.equal(p.companyPay,120);
+  assert.equal(pay(p,'w'),0);assert.equal(p.companyPay,0);assert.equal(pay(p,'b'),1200);
 });
 test('exact paid-hours threshold qualifies, even when there is no brigadier',()=>{
   const p=calc([row('w',MIN_PAID_HOURS)],[]);
