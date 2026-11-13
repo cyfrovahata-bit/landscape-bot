@@ -34,7 +34,7 @@ export function buildApprovalReport(date: string, totals: ApprovalReportTotals):
   const head = [`✅ *День затверджено*`, `📅 ${date}`, ``];
   const foot = [
     `➕ Доплата за виїзд: ${money(combined.roadAllowance.perPerson)} грн/особу`,
-    `💰 *${combined.deductions.items.length ? "Фонд після відрахувань" : "Загальний фонд"}: ${money(totalFund)} грн*`,
+    `💰 *Загальний фонд: ${money(totalFund)} грн*`,
   ];
 
   const perObject = (withPeople: boolean) =>
@@ -52,9 +52,6 @@ export function buildApprovalReport(date: string, totals: ApprovalReportTotals):
   // that needs a truly enormous day, but if it ever happens the note sheds
   // the per-person lines rather than its tail -- the total fund is the whole
   // point of the message and always survives.
-  if (combined.deductions.items.length) foot.push('', '➖ *Відрахування:*',
-    ...combined.deductions.items.map(d => `• ${escapeMd(d.reason)} — −${money(d.amount)} грн`),
-    `Разом: −${money(combined.deductions.total)} грн`, 'Розподілено порівну між усіма учасниками (включно з бригадиром).');
   const LIMIT = 3900;
   const note = [`_Деталі скорочено — повний розклад у застосунку._`, ``];
   const variants = [

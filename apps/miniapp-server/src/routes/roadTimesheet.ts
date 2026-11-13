@@ -1775,7 +1775,6 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
       tripClass: combined.tripClass,
       roadAllowance: combined.roadAllowance,
       salaryPacks: adjusted.salaryPacks,
-      deductions: adjusted.deductions,
     },
   });
 });
