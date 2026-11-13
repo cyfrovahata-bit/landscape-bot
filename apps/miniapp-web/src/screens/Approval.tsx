@@ -1,3 +1,4 @@
+import { DeductionEditor, type DeductionItem } from "../components/DeductionEditor";
 import { useEffect, useState } from "react";
 import { api, type Employee, type SalaryPack } from "../lib/api";
 import { useClearErrorOnSuccess } from "../lib/useClearErrorOnSuccess";
@@ -17,6 +18,11 @@ type PendingObject = {
   photoUrls?: string[];
 };
 type PendingItem = {
+  deductions: DeductionItem[];
+  deductionsRevision: number;
+  reportRevision: string;
+  deductionError?: string;
+  deductionTotal: number;
   date: string;
   foremanTgId: number;
   foremanName: string;
@@ -57,6 +63,8 @@ export function Approval({
   const [note, setNote] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
+  const [dirtyDeductions,setDirtyDeductions]=useState<Record<string,boolean>>({});
+
   const employeeById = new Map(employees.map((e) => [e.id, e]));
 
   // Otherwise Telegram's native back gesture/button exits the whole mini app
@@ -96,11 +104,12 @@ export function Approval({
   }
 
   async function approve(it: PendingItem) {
+    if (dirtyDeductions[keyOf(it)] || it.deductionError) {setError("Збережіть відрахування перед затвердженням.");return;}
     const ok = await confirmDialog(`Затвердити день ${it.date} для ${it.foremanName}?`);
     if (!ok) return;
     setBusyKey(keyOf(it));
     try {
-      await api.post("/api/road-timesheet/pending/approve", { date: it.date, foremanTgId: it.foremanTgId });
+      await api.post("/api/road-timesheet/pending/approve", { date: it.date, foremanTgId: it.foremanTgId, deductionsRevision: it.deductionsRevision, reportRevision: it.reportRevision });
       haptic("success");
       await load();
     } catch (e) {
@@ -224,7 +233,7 @@ export function Approval({
                         </div>
                         <div className="approval-row">
                           <div className="approval-row-main">
-                            <span className="approval-row-name">💰 Фонд робіт (обсяг × тариф)</span>
+                            <span className="approval-row-name">💰 {it.deductionTotal ? "Фонд після відрахувань" : "Фонд робіт (обсяг × тариф)"}</span>
                             <span className="approval-nums">
                               <span className="badge badge-sm ok">{Math.round(fund * 100) / 100} грн</span>
                             </span>
@@ -344,6 +353,18 @@ export function Approval({
                       );
                     })}
 
+                    {it.deductionError&&<div role="alert">⚠️ {it.deductionError} Перевірте та збережіть відрахування.</div>}
+                    <DeductionEditor key={`${key}|${it.deductionsRevision}|${it.reportRevision}`} items={it.deductions ?? []} busy={busy}
+                      onDirty={dirty=>setDirtyDeductions(prev=>({...prev,[key]:dirty}))} onRefresh={()=>load()}
+                      onSave={async items=>{
+                        setBusyKey(key);
+                        try {
+                          await api.post('/api/road-timesheet/pending/deductions',{date:it.date,foremanTgId:it.foremanTgId,revision:it.deductionsRevision,reportRevision:it.reportRevision,items});
+                          const pending=await api.get<PendingResponse>('/api/road-timesheet/pending');
+                          setData(pending);setDirtyDeductions(prev=>({...prev,[key]:false}));haptic('success');
+                        } finally {setBusyKey(null);}
+                      }}/>
+
                     {returningKey === key ? (
                       <div style={{ marginTop: 12 }}>
                         <div className="hint" style={{ fontWeight: 600, marginBottom: 6 }}>
@@ -380,7 +401,7 @@ export function Approval({
                         <button
                           className="chip selected"
                           onClick={() => approve(it)}
-                          disabled={busy}
+                          disabled={busy || dirtyDeductions[key] || !!it.deductionError}
                         >
                           {busy ? "…" : "✅ Підтвердити"}
                         </button>

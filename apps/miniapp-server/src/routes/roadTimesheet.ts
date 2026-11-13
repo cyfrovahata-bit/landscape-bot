@@ -1,3 +1,7 @@
+import {buildApprovalReport,money} from "../lib/approvalReport.js";
+import { createReportDeductionsRouter } from "./reportDeductions.js";
+import { applyDeductions, deductionGroupsForTrips, type Deduction } from "@landscape/core";
+import { readReportDeductions, saveReportDeductions, reportRevision } from "../lib/reportDeductions.js";
 import { payrollVersionForDay, type PayrollVersion } from "@landscape/core";
 import { prepareRetroSubmissionDraft } from "../lib/retroSubmissionDraft.js";
 import { ReservationConflictError, reservationConflictHandler, activeTripConflictMessage } from "../lib/reservationErrors.js";
@@ -1739,6 +1743,10 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
     foremanTgId,
   });
 
+  // Pending edited drafts may temporarily exceed the saved cut; their money is masked.
+  let adjusted = { ...combined, deductions: {items:[] as Deduction[],total:0,perEmployee:[] as {employeeId:string;amount:number}[]} };
+  try { adjusted = await applyReportDeductions(combined,date,foremanTgId,trips); }
+  catch(e) { if(trips.every(t=>t.status==='ЗАТВЕРДЖЕНО')) throw e; }
   res.json({
     found: true,
     trips: trips.map((t) => {
@@ -1766,7 +1774,8 @@ roadTimesheetRouter.get("/submitted-today", async (req, res) => {
       billableKm: combined.billableKm,
       tripClass: combined.tripClass,
       roadAllowance: combined.roadAllowance,
-      salaryPacks: combined.salaryPacks,
+      salaryPacks: adjusted.salaryPacks,
+      deductions: adjusted.deductions,
     },
   });
 });
@@ -1869,23 +1878,29 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
   const pendingGroups = [...latestByGroup.values()].filter((r) => r.status === "АКТИВНА");
 
   const items = await Promise.all(
-    pendingGroups.map(async (r) => {
+    pendingGroups.map((r) => withLock(`reserve:${r.date}`, async (tx) => {
       const foremanTgId = Number(r.foremanTgId);
       // Only legs still awaiting a decision -- a leg already approved earlier
       // (possibly days ago, possibly already exported to БУХЗВІТ) must not
       // reappear bundled into a LATER, unrelated leg's pending request just
       // because it shares the same date+foreman.
-      const trips = (await fetchAllTrips(r.date, foremanTgId)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
+      const trips = (await fetchAllTrips(r.date, foremanTgId, tx)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
       // The same roll-up the approval and the БУХЗВІТ export run on, so what
       // the admin decides from is exactly what gets written. Recomputing the
       // day inline here used to omit excludedKm, quietly showing a higher
       // trip class and travel allowance than approval would then record.
-      const { mergedObjects, unionEmployeeIds, unionSelfTransportIds, totalKm, combined } = await computeApprovedDayTotals(trips, foremanTgId);
+      const { mergedObjects, unionEmployeeIds, unionSelfTransportIds, totalKm, combined, deductionError } = await computeApprovedDayTotals(trips, foremanTgId, r.date, tx);
+      const deductionDoc = await readReportDeductions(r.date, foremanTgId, tx);
+      const editableGroups = deductionDoc.groups.filter(g => !g.approved || g.eventIds.some(id=>trips.some(t=>t.eventId===id)));
+      const editableDeductions = editableGroups.flatMap(g=>g.items);
       return {
         date: r.date,
         foremanTgId,
         foremanName: nameByTgId.get(String(foremanTgId)) ?? String(foremanTgId),
         submittedAt: r.ts.toISOString(),
+        deductions: editableDeductions, deductionsRevision: deductionDoc.revision, reportRevision: reportRevision(trips),
+        deductionError: deductionError ?? (editableGroups.some(g=>g.items.length && g.sourceRevision!==reportRevision(trips)) ? "Звіт змінився. Перевірте й повторно збережіть відрахування." : undefined),
+        deductionTotal: combined.deductions.total,
         km: totalKm,
         tripClass: combined.tripClass,
         roadAllowance: combined.roadAllowance,
@@ -1909,7 +1924,7 @@ roadTimesheetRouter.get("/pending", async (req, res) => {
         employeeIds: unionEmployeeIds,
         selfTransportIds: unionSelfTransportIds,
       };
-    }),
+    })),
   );
 
   items.sort((a, b) => (a.date === b.date ? a.submittedAt.localeCompare(b.submittedAt) : b.date.localeCompare(a.date)));
@@ -1956,7 +1971,7 @@ async function setDayStatus(date: string, foremanTgId: number, status: string, t
  * payroll -- computed ONCE and shared by everything that reports on an
  * approved day, so the accountant's БУХЗВІТ rows and the summary the foreman
  * receives can never disagree about the same day's money. */
-async function computeApprovedDayTotals(trips: StoredTrip[], foremanTgId?: number) {
+async function computeApprovedDayTotals(trips: StoredTrip[], foremanTgId?: number, date?: string, executor: typeof db | LockedTx = db, strict = false) {
   const mergedObjects = mergeObjects(trips.map((t) => t.objects));
   const unionEmployeeIds = [...new Set(trips.flatMap((t) => t.employeeIds))];
   const unionSelfTransportIds = [...new Set(trips.flatMap((t) => t.selfTransportIds ?? []))];
@@ -1980,7 +1995,29 @@ async function computeApprovedDayTotals(trips: StoredTrip[], foremanTgId?: numbe
     excludedKm: totalExcludedKm,
     foremanTgId,
   });
-  return { mergedObjects, unionEmployeeIds, unionSelfTransportIds, totalKm, totalExcludedKm, combined };
+  let adjusted = { ...combined, deductions: { items: [] as Deduction[], total: 0, perEmployee: [] as {employeeId:string;amount:number}[] }, deductionsRevision: 0 };
+  let deductionError: string | undefined;
+  if (date && foremanTgId) {
+    try { adjusted = await applyReportDeductions(combined, date, foremanTgId, trips, executor); }
+    catch (e) { if (strict) throw e; deductionError = (e as Error).message; }
+  }
+  return { mergedObjects, unionEmployeeIds, unionSelfTransportIds, totalKm, totalExcludedKm, combined: adjusted, deductionError };
+}
+
+async function applyReportDeductions(combined: Awaited<ReturnType<typeof computePayroll>>, date: string, owner: number, trips: StoredTrip[], executor: typeof db | LockedTx = db) {
+  const document = await readReportDeductions(date, owner, executor);
+  const groups = deductionGroupsForTrips(document, trips.map(t => t.eventId));
+  let packs = combined.salaryPacks;
+  const perEmployee = new Map<string, number>();
+  const items: Deduction[] = [];
+  for (const group of groups) {
+    const result = applyDeductions(packs, group.employeeIds, group.items);
+    packs = result.salaryPacks;
+    items.push(...group.items);
+    result.deductions.perEmployee.forEach(r => perEmployee.set(r.employeeId, (perEmployee.get(r.employeeId) ?? 0) + Math.round(r.amount * 100)));
+  }
+  return { ...combined, salaryPacks: packs, deductions: { items, total: items.reduce((a,d) => a + Math.round(d.amount * 100), 0) / 100,
+    perEmployee: [...perEmployee].map(([employeeId,cents]) => ({employeeId, amount:cents/100})) }, deductionsRevision: document.revision };
 }
 
 type ApprovedDayTotals = Awaited<ReturnType<typeof computeApprovedDayTotals>>;
@@ -2033,6 +2070,8 @@ async function exportApprovedDayToAccounting(
       employeeNameById,
       tariffByWorkId,
       unitByWorkId,
+      deductionNoteByEmployeeId: new Map(combined.deductions.perEmployee.filter(r=>r.amount>0).map(r=>[r.employeeId,
+        `Відрахування бригади: ${combined.deductions.items.map(d=>`${d.reason}: −${money(d.amount)} грн`).join('; ')}. Частка працівника за звіт: −${money(r.amount)} грн (враховано у нарахуванні)`])),
     });
 
     // Keyed on the trips' own eventIds (not just date+foreman) so a day that
@@ -2049,69 +2088,10 @@ async function exportApprovedDayToAccounting(
   }
 }
 
-/** Telegram's legacy Markdown breaks on unescaped _ * [ ` in the text, and a
- * broken message is silently rejected by the API -- which for a payout
- * summary means the foreman just never hears about their money. Object and
- * employee names come from the office's spreadsheets, so they can contain
- * anything. */
-function escapeMd(s: string): string {
-  return s.replace(/([_*[\]`])/g, "\\$1");
-}
-
-function money(n: number): string {
-  return String(Math.round(n * 100) / 100);
-}
-
-/**
- * The short payout note a foreman gets the moment an admin approves their
- * day: which object, who earned how much there, and the day's total fund.
- * Deliberately brief -- the itemised view (hours, works, volumes, per-object
- * funds) is the ADMIN's, on the approval screen they act from. This is just
- * the outcome, for the person who has to tell the crew what they made.
- *
- * `pay` in a salary pack row is already role-adjusted (the brigadier's 20%
- * and the senior gardener's 10% come off the top, the rest splits between
- * workers by hours), so the rows as listed ARE the real per-person work pay.
- * The travel allowance is per-person and separate from the object funds, so
- * it stays its own line instead of being folded into those numbers -- drop
- * it and the amounts stop adding up to what people actually receive.
- */
-function buildApprovalReport(date: string, totals: ApprovedDayTotals): string {
-  const { combined } = totals;
-  const packs = combined.salaryPacks.filter((p) => p.objectTotal > 0 || p.rows.length > 0);
-  const totalFund = packs.reduce((acc, p) => acc + p.objectTotal, 0);
-
-  const head = [`✅ *День затверджено*`, `📅 ${date}`, ``];
-  const foot = [
-    `➕ Доплата за виїзд: ${money(combined.roadAllowance.perPerson)} грн/особу`,
-    `💰 *Загальний фонд: ${money(totalFund)} грн*`,
-  ];
-
-  const perObject = (withPeople: boolean) =>
-    packs.flatMap((pack) => {
-      const lines = [`📍 *${escapeMd(pack.objectName)}*`];
-      if (withPeople) {
-        if (!pack.rows.length) lines.push(`  _немає годин — оплата не розподілена_`);
-        for (const row of pack.rows) lines.push(`  • ${escapeMd(row.employeeName)} — ${money(row.pay)} грн`);
-      }
-      lines.push(``);
-      return lines;
-    });
-
-  // Telegram rejects anything over 4096 characters outright. At this size
-  // that needs a truly enormous day, but if it ever happens the note sheds
-  // the per-person lines rather than its tail -- the total fund is the whole
-  // point of the message and always survives.
-  const LIMIT = 3900;
-  const note = [`_Деталі скорочено — повний розклад у застосунку._`, ``];
-  const variants = [
-    [...head, ...perObject(true), ...foot],
-    [...head, ...perObject(false), ...note, ...foot],
-    [...head, ...note, ...foot],
-  ];
-  const chosen = variants.find((v) => v.join("\n").length <= LIMIT) ?? variants[variants.length - 1];
-  return chosen.join("\n").slice(0, LIMIT);
-}
+roadTimesheetRouter.use('/pending/deductions',createReportDeductionsRouter({
+  withLock,fetchTrips:fetchAllTrips,
+  gross:async(trips,owner)=>{const totals=await computeApprovedDayTotals(trips,owner);return {salaryPacks:totals.combined.salaryPacks,employeeIds:totals.unionEmployeeIds};},
+}));
 
 /** POST /api/road-timesheet/pending/approve — admin-only. { date, foremanTgId } */
 roadTimesheetRouter.post("/pending/approve", async (req, res) => {
@@ -2134,6 +2114,7 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
   // before it) is what actually closes both windows.
   let pendingTrips: StoredTrip[] = [];
   let count = 0;
+  let approvalTotals: ApprovedDayTotals | undefined;
   await withLock(`reserve:${date}`, async (tx) => {
     // Captured BEFORE setDayStatus flips their status, so the accounting
     // export below only ever covers the legs THIS action just approved --
@@ -2142,7 +2123,19 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
     // which would re-export it and double-count it in БУХЗВІТ.
     pendingTrips = (await fetchAllTrips(date, foremanTgId, tx)).filter((t) => t.status !== "ЗАТВЕРДЖЕНО");
     if (!pendingTrips.length) return;
+    const doc = await readReportDeductions(date, foremanTgId, tx);
+    const groups = doc.groups.filter(g=>!g.approved || g.eventIds.some(id=>pendingTrips.some(t=>t.eventId===id)));
+    if ((req.body.deductionsRevision !== undefined || groups.some(g=>g.items.length)) &&
+        (req.body.deductionsRevision !== doc.revision || req.body.reportRevision !== reportRevision(pendingTrips))) {
+      throw new ReservationConflictError('Звіт або відрахування змінилися. Оновіть список і перевірте суми.');
+    }
+    if (groups.some(g => g.items.length && g.sourceRevision !== reportRevision(pendingTrips))) {
+      throw new ReservationConflictError('Бригадир змінив звіт після відрахувань. Перевірте й повторно збережіть відрахування.');
+    }
+    if (groups.some(g=>g.items.length)) approvalTotals = await computeApprovedDayTotals(pendingTrips, foremanTgId, date, tx, true);
     count = await setDayStatus(date, foremanTgId, "ЗАТВЕРДЖЕНО", tx);
+    if (groups.some(g=>g.items.length)) await saveReportDeductions(tx,date,foremanTgId,req.user!.tgId,doc,
+      {revision:doc.revision+1,groups:doc.groups.map(g=>groups.includes(g)?{...g,approved:true}:g)});
   });
 
   if (!pendingTrips.length || !count) {
@@ -2156,7 +2149,7 @@ roadTimesheetRouter.post("/pending/approve", async (req, res) => {
   // approved -- just without the breakdown.
   let accountingExported = false;
   try {
-    const totals = await computeApprovedDayTotals(pendingTrips, foremanTgId);
+    const totals = approvalTotals ?? await computeApprovedDayTotals(pendingTrips, foremanTgId, date);
     accountingExported = (await exportApprovedDayToAccounting(date, foremanTgId, pendingTrips, totals)).ok;
     await sendTelegramMessage(foremanTgId, buildApprovalReport(date, totals));
   } catch (e) {
@@ -2460,3 +2453,12 @@ roadTimesheetRouter.get("/today", async (req, res) => {
 
 // Includes reserve/release and car-return, which forward async failures.
 roadTimesheetRouter.use(reservationConflictHandler);
+
+/** Only deduction-bearing days override the legacy statistics payload. */
+export async function deductedStatsDay(date:string,owner:number) {
+  const doc=await readReportDeductions(date,owner);
+  if(!doc.groups.some(g=>g.items.length))return null;
+  const trips=await fetchAllTrips(date,owner);
+  const totals=await computeApprovedDayTotals(trips,owner,date);
+  return {salaryPacks:totals.combined.salaryPacks,objects:totals.mergedObjects,employeeIds:totals.unionEmployeeIds};
+}

@@ -1,3 +1,4 @@
+import { deductedStatsDay } from "./roadTimesheet.js";
 import { asyncRouter } from "../asyncRouter.js";
 import { db, schema } from "@landscape/core";
 import { and, eq, gte, lte, sql } from "drizzle-orm";
@@ -128,6 +129,11 @@ statsRouter.get("/range", async (req, res) => {
     }
     return { date: e.date, carId: e.carId, foremanTgId: String(e.foremanTgId), status: e.status, employeeIds, ...payload };
   });
+
+  await Promise.all(parsedEvents.map(async e=>{
+    const adjusted=await deductedStatsDay(e.date,Number(e.foremanTgId));
+    if(adjusted) {e.salaryPacks=adjusted.salaryPacks;e.objects=adjusted.objects;e.employeeIds=adjusted.employeeIds;}
+  }));
 
   // (date, employeeId) pairs this foreman actually submitted a trip for --
   // timesheetEntries has no foremanTgId column (an employee can only be one

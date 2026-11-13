@@ -16,3 +16,5 @@ export * from "./payroll.js";
 export * from "./accounting.js";
 
 export { usesLiveReservations, affectsReservations, submissionReservationEffect } from "./reservationPolicy.js";
+
+export * from "./deductions.js";

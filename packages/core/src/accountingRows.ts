@@ -122,8 +122,10 @@ export function buildAccountingRows(params: {
   /** Години на обʼєкті: objectId -> employeeId -> годин. З того самого
    *  computePayroll, що дав суми, щоб години й гроші не розходились. */
   hoursByObject?: Map<string, Map<string, number>>;
+  deductionNoteByEmployeeId?: Map<string, string>;
 }): AccountingRow[] {
   const { date, foremanName, objects, salaryPacks, roadAllowancePerPerson, roadKm, roadBillableKm, roadTripClass, unionEmployeeIds, employeeNameById, tariffByWorkId, unitByWorkId, hoursByObject } = params;
+  const noteFor = (id:string) => params.deductionNoteByEmployeeId?.get(id) ? `${foremanName} · ${params.deductionNoteByEmployeeId.get(id)}` : foremanName;
   const objectsById = new Map(objects.map((o) => [o.objectId, o]));
   const out: AccountingRow[] = [];
 
@@ -166,7 +168,7 @@ export function buildAccountingRows(params: {
           volume: numericVolume(w),
           unit: unitByWorkId.get(w.workId) ?? "",
           amount,
-          foremanName,
+          foremanName: noteFor(row.employeeId),
         });
       });
     }
@@ -218,7 +220,7 @@ export function buildAccountingRows(params: {
         volume: Math.round(hours * 100) / 100,
         unit: "год",
         amount: 0,
-        foremanName,
+        foremanName: noteFor(employeeId),
       });
     }
   }
