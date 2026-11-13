@@ -124,6 +124,7 @@ type PayrollPreview = {
 // The day-combined totals -- what actually gets paid out -- once more than
 // one trip has been submitted for the same day (see SubmittedTrip below).
 type DayCombined = {
+  deductions?: {items:{id:string;reason:string;amount:number}[];total:number;perEmployee:{employeeId:string;amount:number}[]};
   km: number;
   excludedKm?: number;
   billableKm?: number;
@@ -1700,11 +1701,16 @@ export function RoadTimesheet({
 
         <div className="list" style={{ marginTop: 8 }}>
           <div className="cell" style={{ cursor: "default" }}>
-            <span className="cell-title">💰 Загальна сума</span>
+            <span className="cell-title">💰 {dayCombined.deductions?.total ? "До виплати після відрахувань" : "Загальна сума"}</span>
             <span className="cell-sub">{masked ? "🔒 •••" : `${Math.round(grandTotal * 100) / 100} ₴`}</span>
           </div>
         </div>
-
+        {!masked && !!dayCombined.deductions?.items.length && <div className="list" style={{marginTop:8}}>
+          <div className="section-title">Відрахування</div>
+          {dayCombined.deductions.items.map((d,i)=><div key={`${d.id}-${i}`} className="cell"><span className="cell-title">{d.reason}</span><span className="badge danger">−{d.amount} грн</span></div>)}
+          <div className="cell"><span className="cell-title">Разом відрахувань</span><span className="cell-sub">−{dayCombined.deductions.total} грн</span></div>
+          <div className="hint" style={{padding:'8px 16px'}}>Порівну між усіма учасниками, включно з бригадиром. Суми виплат вище вже з відрахуваннями.</div>
+        </div>}
       </>
     );
   }
